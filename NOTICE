@@ -1,0 +1,24 @@
+Open Computer Use — rclone-filestore mount
+Copyright (c) 2025 Open Computer Use Contributors
+https://github.com/Wide-Moat/ocu-rclone-filestore
+
+This repository holds the guest-side mount binary of Open Computer Use (the
+architecture and specifications live in
+https://github.com/Wide-Moat/open-computer-use).
+
+Files authored by this project are licensed under the Functional Source
+License, Version 1.1, Apache 2.0 Future License (FSL-1.1-Apache-2.0). See
+LICENSE. Two years after each release, that release automatically converts to
+Apache License 2.0 under the Grant of Future License clause.
+
+Code derived from upstream rclone (https://github.com/rclone/rclone) remains
+under rclone's MIT license; upstream copyright notices and headers are
+preserved in the derived files.
+
+You may use, copy, modify, fork, and redistribute the Software for any purpose
+other than offering a hosted or embedded service that competes with our paid
+version(s) of the Software. Self-hosting for internal use within your
+organization is explicitly permitted and is not considered competition.
+
+LICENSE-APACHE and LICENSE-MIT are included as reference texts for dependency
+licenses; they are not the license of files this project authors.
