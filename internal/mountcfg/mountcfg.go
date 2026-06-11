@@ -138,6 +138,13 @@ func validate(cfg *Config) error {
 	if err := validateServiceURL(cfg.ServiceURL); err != nil {
 		return err
 	}
+	// The schema lists mounts as required for GuestMountConfig: the key must be
+	// present. An empty-but-present array is legal (the schema permits []);
+	// absence is not. A nil slice means the key was absent or null — both are
+	// rejected (null fails the schema's array type the same way).
+	if cfg.Mounts == nil {
+		return &ErrMissingField{Field: "mounts"}
+	}
 	if err := validateMounts(arrayMounts, cfg.Mounts, true); err != nil {
 		return err
 	}

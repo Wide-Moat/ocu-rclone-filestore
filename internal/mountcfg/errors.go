@@ -125,6 +125,16 @@ func (e *ErrProvisionMarker) Error() string {
 	return fmt.Sprintf("provision-side marker %q present at %s; the guest config carries no credential material", e.Marker, e.Location)
 }
 
+// ErrMissingField reports a schema-required top-level field that is absent
+// from the document.
+type ErrMissingField struct {
+	Field string
+}
+
+func (e *ErrMissingField) Error() string {
+	return fmt.Sprintf("required field %q is missing", e.Field)
+}
+
 // ErrDecode wraps a strict-decode failure (malformed JSON or an unknown field).
 type ErrDecode struct {
 	Err error

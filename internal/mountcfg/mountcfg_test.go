@@ -126,6 +126,18 @@ func TestLoad(t *testing.T) {
 			fixture: "reject_unknown_field.json",
 			wantErr: new(*ErrDecode),
 		},
+		{
+			name:    "missing mounts key rejected (CFG-02)",
+			fixture: "invalid_missing_mounts.json",
+			wantErr: new(*ErrMissingField),
+			assert: func(t *testing.T, err error) {
+				var e *ErrMissingField
+				errors.As(err, &e)
+				if e.Field != "mounts" {
+					t.Fatalf("expected mounts flagged as missing, got %+v", e)
+				}
+			},
+		},
 	}
 
 	for _, tc := range cases {
