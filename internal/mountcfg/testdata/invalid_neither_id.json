@@ -1,0 +1,15 @@
+{
+  "schema_version": "v1alpha",
+  "service_url": "https://broker.internal",
+  "mounts": [
+    {
+      "destination": "/workspace/out",
+      "writes": true,
+      "vfs_cache_mode": "writes",
+      "cache_duration_s": 3600,
+      "vfs_cache_max_size": "1G",
+      "dir_perms": "0755",
+      "file_perms": "0644"
+    }
+  ]
+}
