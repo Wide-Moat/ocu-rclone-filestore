@@ -23,9 +23,12 @@ the mount speaks).
 
 ## Status
 
-Bootstrap: requirements and discipline only. The code base adopts the rclone
-fork layout when development starts — committing a separate Go skeleton now
-would collide with that import, so there is none. See
+Early development. The binary is built as a **thin wrapper module** over
+rclone: rclone is a pinned dependency in `go.mod`, our backend registers
+through rclone's public backend registry, and our own entrypoint drives
+rclone's mount machinery for multiple concurrent mounts. The diff against
+upstream rclone is zero. See [`docs/fork-shape.md`](./docs/fork-shape.md) for
+why this shape was chosen over a source fork, and
 [`docs/requirements.md`](./docs/requirements.md) for what the binary must do.
 
 ## Language note
