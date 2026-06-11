@@ -132,10 +132,10 @@ func TestConformanceDownloadRequest(t *testing.T) {
 
 	// Build the golden shape: route, Content-Type, version, body.
 	type requestGolden struct {
-		Route               string               `json:"route"`
-		ContentType         string               `json:"content_type"`
-		ConnectVersion      string               `json:"connect_protocol_version"`
-		Body                FileDownloadRequest  `json:"body"`
+		Route          string              `json:"route"`
+		ContentType    string              `json:"content_type"`
+		ConnectVersion string              `json:"connect_protocol_version"`
+		Body           FileDownloadRequest `json:"body"`
 	}
 	var want requestGolden
 	if err := json.Unmarshal(golden, &want); err != nil {

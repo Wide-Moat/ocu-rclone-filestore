@@ -13,26 +13,26 @@ type Op string
 // Connect-RPC route path (/ocu.filestore.v1alpha.FilesystemService/<Op>).
 const (
 	// Read-class ops: intent resolves to "read".
-	OpListDirectory    Op = "listDirectory"
-	OpReadFile         Op = "readFile"
-	OpReadMetadata     Op = "readMetadata"
-	OpGetFileMetadata  Op = "getFileMetadata"
-	OpListFiles        Op = "listFiles"
-	OpFileDownload     Op = "fileDownload"
+	OpListDirectory   Op = "listDirectory"
+	OpReadFile        Op = "readFile"
+	OpReadMetadata    Op = "readMetadata"
+	OpGetFileMetadata Op = "getFileMetadata"
+	OpListFiles       Op = "listFiles"
+	OpFileDownload    Op = "fileDownload"
 
 	// Write/mutate-class ops: intent resolves to "write".
-	OpMakeDirectory      Op = "makeDirectory"
-	OpMoveDirectory      Op = "moveDirectory"
-	OpRemoveDirectory    Op = "removeDirectory"
-	OpCreateFile         Op = "createFile"
-	OpCopyFile           Op = "copyFile"
-	OpMoveFile           Op = "moveFile"
-	OpRemoveFile         Op = "removeFile"
-	OpFileUpload         Op = "fileUpload"
-	OpImportFiles        Op = "importFiles"
-	OpImportZip          Op = "importZip"
-	OpMigrateFilesystem  Op = "migrateFilesystem"
-	OpRemoveFilesystem   Op = "removeFilesystem"
+	OpMakeDirectory     Op = "makeDirectory"
+	OpMoveDirectory     Op = "moveDirectory"
+	OpRemoveDirectory   Op = "removeDirectory"
+	OpCreateFile        Op = "createFile"
+	OpCopyFile          Op = "copyFile"
+	OpMoveFile          Op = "moveFile"
+	OpRemoveFile        Op = "removeFile"
+	OpFileUpload        Op = "fileUpload"
+	OpImportFiles       Op = "importFiles"
+	OpImportZip         Op = "importZip"
+	OpMigrateFilesystem Op = "migrateFilesystem"
+	OpRemoveFilesystem  Op = "removeFilesystem"
 )
 
 // opIntentTable is the single authoritative mapping from op to its intent

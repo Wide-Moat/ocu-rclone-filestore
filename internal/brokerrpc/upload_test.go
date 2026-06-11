@@ -103,7 +103,7 @@ func TestUploadParamsFrameDeclaredSizeBytes(t *testing.T) {
 	_ = c.Upload(context.Background(), "/b.txt", bytes.NewReader(content), int64(len(content)))
 
 	var params struct {
-		DeclaredSizeBytes int64                `json:"declared_size_bytes"`
+		DeclaredSizeBytes int64                 `json:"declared_size_bytes"`
 		AuthMetadata      AuthorizationMetadata `json:"authorization_metadata"`
 	}
 	if err := json.Unmarshal(paramsData, &params); err != nil {
@@ -173,7 +173,7 @@ func TestUploadChunkFramesTotalExact(t *testing.T) {
 // chunk length and waved away the envelope, so it did not pin the real
 // invariant; base64 inflation pushed every full frame ~4/3 over the ceiling.
 func TestUploadCeilingChunksUnderLimit(t *testing.T) {
-	const ceiling = 64 // small test ceiling
+	const ceiling = 64                                // small test ceiling
 	content := bytes.Repeat([]byte("a"), ceiling*3+7) // definitely >1 frame
 	var frameCount int
 	var maxFramePayload int

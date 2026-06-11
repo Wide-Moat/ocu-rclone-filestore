@@ -18,7 +18,7 @@ import (
 // each produce a permanent, non-retryable error.
 func TestErrorMappingNonRetryable(t *testing.T) {
 	codes := []struct {
-		code    string
+		code         string
 		wantSentinel error
 	}{
 		{"permission_denied", ErrPermissionDenied},

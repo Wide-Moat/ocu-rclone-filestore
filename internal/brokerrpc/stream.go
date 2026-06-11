@@ -58,8 +58,8 @@ func (e *ConnectError) Error() string {
 // The HTTP status for streaming responses is always 200 — the caller must
 // read this trailer to determine success or failure.
 type EndStreamResponse struct {
-	Error    *ConnectError      `json:"error,omitempty"`
-	Metadata map[string]any     `json:"metadata,omitempty"`
+	Error    *ConnectError  `json:"error,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
 // writeFrame writes a single Connect streaming frame to w. The flag byte and
