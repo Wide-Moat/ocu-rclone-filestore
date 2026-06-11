@@ -153,9 +153,9 @@ func TestOpenRangeTable(t *testing.T) {
 // Mandatory() returns true causes Open to return an error.
 type mandatoryOption struct{}
 
-func (mandatoryOption) Header() (string, string)  { return "X-Custom", "value" }
-func (mandatoryOption) Mandatory() bool            { return true }
-func (mandatoryOption) String() string             { return "MandatoryOption" }
+func (mandatoryOption) Header() (string, string) { return "X-Custom", "value" }
+func (mandatoryOption) Mandatory() bool          { return true }
+func (mandatoryOption) String() string           { return "MandatoryOption" }
 
 func TestOpenMandatoryUnsupportedOption(t *testing.T) {
 	obj, _ := objectWithSize(t, 1000)
@@ -170,8 +170,8 @@ func TestOpenMandatoryUnsupportedOption(t *testing.T) {
 type nonMandatoryOption struct{}
 
 func (nonMandatoryOption) Header() (string, string) { return "X-Custom", "value" }
-func (nonMandatoryOption) Mandatory() bool           { return false }
-func (nonMandatoryOption) String() string            { return "NonMandatoryOption" }
+func (nonMandatoryOption) Mandatory() bool          { return false }
+func (nonMandatoryOption) String() string           { return "NonMandatoryOption" }
 
 func TestOpenNonMandatoryUnknownOptionIgnored(t *testing.T) {
 	obj, _ := objectWithSize(t, 1000)
@@ -273,10 +273,10 @@ func TestListDerivedObjectOpenNoResolve(t *testing.T) {
 
 	f := &Fs{name: "ocufs", root: "/", client: c, readOnly: false}
 	obj := &Object{
-		fs:   f,
-		path: "/docs/file.txt",
-		uuid: "list-uuid-xyz",
-		size: 200,
+		fs:    f,
+		path:  "/docs/file.txt",
+		uuid:  "list-uuid-xyz",
+		size:  200,
 		mtime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 
