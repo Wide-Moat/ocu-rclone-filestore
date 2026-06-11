@@ -25,6 +25,6 @@
 //     (fileUpload, fileDownload) are defined as types here; their transport
 //     is completed in a later phase.
 //
-// This package contains no Authorization header construction, no bearer-token
-// handling, and no code path that sets downloadable to true.
+// This package contains no Authorization header construction, no credential
+// header handling, and no code path that sets downloadable to true.
 package brokerrpc

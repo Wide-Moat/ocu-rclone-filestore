@@ -20,14 +20,25 @@ import (
 // unixTestServer creates a temporary AF_UNIX socket, starts an httptest server
 // on it, and returns the socket path plus a cleanup function. The handler h
 // is called for every request received.
+//
+// macOS limits AF_UNIX socket paths to 104 bytes (including the null
+// terminator), so we use os.MkdirTemp with a short prefix instead of
+// t.TempDir() to keep the path well under the limit.
 func unixTestServer(t *testing.T, h http.Handler) (socketPath string, cleanup func()) {
 	t.Helper()
 
-	dir := t.TempDir()
-	socketPath = filepath.Join(dir, "broker.sock")
+	// Use a short directory to stay well under the 104-byte macOS AF_UNIX
+	// path limit. os.TempDir() on macOS is /var/folders/... which is already
+	// long; we need the filename to be short too.
+	dir, err := os.MkdirTemp("", "brpc")
+	if err != nil {
+		t.Fatalf("mkdirtemp: %v", err)
+	}
+	socketPath = filepath.Join(dir, "b.sock")
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
+		os.RemoveAll(dir)
 		t.Fatalf("listen unix %s: %v", socketPath, err)
 	}
 
@@ -39,7 +50,7 @@ func unixTestServer(t *testing.T, h http.Handler) (socketPath string, cleanup fu
 
 	return socketPath, func() {
 		srv.Close()
-		os.Remove(socketPath)
+		os.RemoveAll(dir)
 	}
 }
 
@@ -279,7 +290,12 @@ func TestDialerTargetsSuppliedSocketPath(t *testing.T) {
 	realSock, cleanup := unixTestServer(t, capturingHandler(t, &captured))
 	defer cleanup()
 
-	fakeSock := filepath.Join(t.TempDir(), "nonexistent.sock")
+	fakeDir, err := os.MkdirTemp("", "brpc")
+	if err != nil {
+		t.Fatalf("mkdirtemp for fake socket dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(fakeDir) })
+	fakeSock := filepath.Join(fakeDir, "n.sock")
 
 	// Client pointed at real socket should succeed.
 	real, err := brokerrpc.New(realSock, "fs-real")

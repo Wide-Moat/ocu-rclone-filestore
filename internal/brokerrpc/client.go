@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: FSL-1.1-Apache-2.0
+// Copyright (c) 2025 Open Computer Use Contributors
+
+package brokerrpc
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+)
+
+// serviceBase is the Connect-RPC service path prefix for the file-operations
+// service under the ocu.filestore.v1alpha namespace.
+const serviceBase = "/ocu.filestore.v1alpha.FilesystemService/"
+
+// Client is the guest-side Connect-JSON client for the broker's
+// file-operations service. It is bound at construction to a per-session
+// AF_UNIX socket (the only egress path) and a filesystem_id (the sole scope
+// handle). It holds no credential, constructs no Authorization header, and
+// has no code path that sets downloadable to true.
+type Client struct {
+	http     *http.Client
+	fsID     string
+}
+
+// New constructs a Client bound to the given per-session unix socket path and
+// filesystem_id. The socket path comes from the guest mount config; it is
+// never a shared constant. opts is reserved for future extension and is
+// currently unused.
+func New(socketPath string, fsID string, opts ...interface{}) (*Client, error) {
+	if socketPath == "" {
+		return nil, fmt.Errorf("brokerrpc.New: socketPath must not be empty")
+	}
+	if fsID == "" {
+		return nil, fmt.Errorf("brokerrpc.New: fsID must not be empty")
+	}
+	return &Client{
+		http: &http.Client{
+			Transport: unixTransport(socketPath),
+		},
+		fsID: fsID,
+	}, nil
+}
+
+// call is the unexported unary call helper. It marshals req to JSON, POSTs
+// to the per-op route /ocu.filestore.v1alpha.FilesystemService/<op> with the
+// required Connect-Protocol-Version: 1 header and Content-Type:
+// application/json, then decodes a 2xx JSON response into resp. On non-2xx it
+// returns a plain error; full closed-code mapping is wired in a later phase.
+func (c *Client) call(ctx context.Context, op Op, req, resp interface{}) error {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("brokerrpc: marshal %s request: %w", op, err)
+	}
+
+	// The broker lives on a unix socket; the http.Transport's DialContext
+	// ignores the host portion. We use "http://broker" as a placeholder host
+	// so the standard library constructs a valid HTTP/1.1 request.
+	url := "http://broker" + serviceBase + string(op)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("brokerrpc: build request for %s: %w", op, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Connect-Protocol-Version", "1")
+
+	httpResp, err := c.http.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("brokerrpc: %s: %w", op, err)
+	}
+	defer httpResp.Body.Close()
+
+	respBody, err := io.ReadAll(httpResp.Body)
+	if err != nil {
+		return fmt.Errorf("brokerrpc: read %s response body: %w", op, err)
+	}
+
+	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
+		// Minimal error for the happy-path scope of this plan. Full
+		// closed-code mapping (D4) is wired in plan 02-02.
+		return fmt.Errorf("brokerrpc: %s: non-2xx status %d: %s", op, httpResp.StatusCode, string(respBody))
+	}
+
+	if resp != nil {
+		if err := json.Unmarshal(respBody, resp); err != nil {
+			return fmt.Errorf("brokerrpc: unmarshal %s response: %w", op, err)
+		}
+	}
+	return nil
+}
+
+// stamp returns a pre-stamped request base with filesystem_id and
+// authorization_metadata filled in from the client's bound fsID and the
+// op-keyed intent table.
+func (c *Client) stamp(op Op) (string, AuthorizationMetadata, error) {
+	am, err := StampAuthMeta(op)
+	if err != nil {
+		return "", AuthorizationMetadata{}, err
+	}
+	return c.fsID, am, nil
+}
+
+// ---------------------------------------------------------------------------
+// Unary op methods — 16 total (fileUpload and fileDownload are streaming;
+// their transport is wired in plan 02-02; types are defined in messages.go).
+// ---------------------------------------------------------------------------
+
+// ListDirectory lists the directory at path.
+func (c *Client) ListDirectory(ctx context.Context, path string) (*ListDirectoryResponse, error) {
+	fsID, am, err := c.stamp(OpListDirectory)
+	if err != nil {
+		return nil, err
+	}
+	req := ListDirectoryRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
+	var resp ListDirectoryResponse
+	return &resp, c.call(ctx, OpListDirectory, req, &resp)
+}
+
+// MakeDirectory creates a directory at path.
+func (c *Client) MakeDirectory(ctx context.Context, path string) (*AckResponse, error) {
+	fsID, am, err := c.stamp(OpMakeDirectory)
+	if err != nil {
+		return nil, err
+	}
+	req := MakeDirectoryRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
+	var resp AckResponse
+	return &resp, c.call(ctx, OpMakeDirectory, req, &resp)
+}
+
+// MoveDirectory moves (renames) a directory from sourcePath to destinationPath.
+func (c *Client) MoveDirectory(ctx context.Context, sourcePath, destinationPath string) (*AckResponse, error) {
+	fsID, am, err := c.stamp(OpMoveDirectory)
+	if err != nil {
+		return nil, err
+	}
+	req := MoveDirectoryRequest{FilesystemID: fsID, SourcePath: sourcePath, DestinationPath: destinationPath, AuthorizationMetadata: am}
+	var resp AckResponse
+	return &resp, c.call(ctx, OpMoveDirectory, req, &resp)
+}
+
+// RemoveDirectory removes the directory at path.
+func (c *Client) RemoveDirectory(ctx context.Context, path string) (*AckResponse, error) {
+	fsID, am, err := c.stamp(OpRemoveDirectory)
+	if err != nil {
+		return nil, err
+	}
+	req := RemoveDirectoryRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
+	var resp AckResponse
+	return &resp, c.call(ctx, OpRemoveDirectory, req, &resp)
+}
+
+// CreateFile creates a file at path and returns the new file's metadata.
+func (c *Client) CreateFile(ctx context.Context, path string) (*CreateFileResponse, error) {
+	fsID, am, err := c.stamp(OpCreateFile)
+	if err != nil {
+		return nil, err
+	}
+	req := CreateFileRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
+	var resp CreateFileResponse
+	return &resp, c.call(ctx, OpCreateFile, req, &resp)
+}
+
+// ReadFile reads the file at path, optionally limited to rng. When rng is the
+// zero value the broker returns the full file.
+func (c *Client) ReadFile(ctx context.Context, path string, rng Range) (*ReadFileResponse, error) {
+	fsID, am, err := c.stamp(OpReadFile)
+	if err != nil {
+		return nil, err
+	}
+	req := ReadFileRequest{FilesystemID: fsID, Path: path, Range: rng, AuthorizationMetadata: am}
+	var resp ReadFileResponse
+	return &resp, c.call(ctx, OpReadFile, req, &resp)
+}
+
+// ReadMetadata returns metadata for the file or directory at path.
+func (c *Client) ReadMetadata(ctx context.Context, path string) (*ReadMetadataResponse, error) {
+	fsID, am, err := c.stamp(OpReadMetadata)
+	if err != nil {
+		return nil, err
+	}
+	req := ReadMetadataRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
+	var resp ReadMetadataResponse
+	return &resp, c.call(ctx, OpReadMetadata, req, &resp)
+}
+
+// GetFileMetadata returns metadata for the file addressed by broker-minted
+// UUID handle. The guest never derives scope from the UUID (D7).
+func (c *Client) GetFileMetadata(ctx context.Context, uuid string) (*GetFileMetadataResponse, error) {
+	fsID, am, err := c.stamp(OpGetFileMetadata)
+	if err != nil {
+		return nil, err
+	}
+	req := GetFileMetadataRequest{FilesystemID: fsID, UUID: uuid, AuthorizationMetadata: am}
+	var resp GetFileMetadataResponse
+	return &resp, c.call(ctx, OpGetFileMetadata, req, &resp)
+}
+
+// ListFiles returns files addressed by broker-minted UUID handle (uuid axis).
+func (c *Client) ListFiles(ctx context.Context, uuid string) (*ListFilesResponse, error) {
+	fsID, am, err := c.stamp(OpListFiles)
+	if err != nil {
+		return nil, err
+	}
+	req := ListFilesRequest{FilesystemID: fsID, UUID: uuid, AuthorizationMetadata: am}
+	var resp ListFilesResponse
+	return &resp, c.call(ctx, OpListFiles, req, &resp)
+}
+
+// CopyFile copies the file at sourcePath to destinationPath.
+func (c *Client) CopyFile(ctx context.Context, sourcePath, destinationPath string) (*AckResponse, error) {
+	fsID, am, err := c.stamp(OpCopyFile)
+	if err != nil {
+		return nil, err
+	}
+	req := CopyFileRequest{FilesystemID: fsID, SourcePath: sourcePath, DestinationPath: destinationPath, AuthorizationMetadata: am}
+	var resp AckResponse
+	return &resp, c.call(ctx, OpCopyFile, req, &resp)
+}
+
+// MoveFile moves the file at sourcePath to destinationPath.
+func (c *Client) MoveFile(ctx context.Context, sourcePath, destinationPath string) (*AckResponse, error) {
+	fsID, am, err := c.stamp(OpMoveFile)
+	if err != nil {
+		return nil, err
+	}
+	req := MoveFileRequest{FilesystemID: fsID, SourcePath: sourcePath, DestinationPath: destinationPath, AuthorizationMetadata: am}
+	var resp AckResponse
+	return &resp, c.call(ctx, OpMoveFile, req, &resp)
+}
+
+// RemoveFile removes the file at path.
+func (c *Client) RemoveFile(ctx context.Context, path string) (*AckResponse, error) {
+	fsID, am, err := c.stamp(OpRemoveFile)
+	if err != nil {
+		return nil, err
+	}
+	req := RemoveFileRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
+	var resp AckResponse
+	return &resp, c.call(ctx, OpRemoveFile, req, &resp)
+}
+
+// ImportFiles imports files into the filesystem at path.
+func (c *Client) ImportFiles(ctx context.Context, path string) (*AckResponse, error) {
+	fsID, am, err := c.stamp(OpImportFiles)
+	if err != nil {
+		return nil, err
+	}
+	req := ImportFilesRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
+	var resp AckResponse
+	return &resp, c.call(ctx, OpImportFiles, req, &resp)
+}
+
+// ImportZip imports a ZIP archive into the filesystem at path.
+func (c *Client) ImportZip(ctx context.Context, path string) (*AckResponse, error) {
+	fsID, am, err := c.stamp(OpImportZip)
+	if err != nil {
+		return nil, err
+	}
+	req := ImportZipRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
+	var resp AckResponse
+	return &resp, c.call(ctx, OpImportZip, req, &resp)
+}
+
+// MigrateFilesystem requests a migration of the bound filesystem.
+func (c *Client) MigrateFilesystem(ctx context.Context) (*AckResponse, error) {
+	fsID, am, err := c.stamp(OpMigrateFilesystem)
+	if err != nil {
+		return nil, err
+	}
+	req := MigrateFilesystemRequest{FilesystemID: fsID, AuthorizationMetadata: am}
+	var resp AckResponse
+	return &resp, c.call(ctx, OpMigrateFilesystem, req, &resp)
+}
+
+// RemoveFilesystem requests removal of the bound filesystem.
+func (c *Client) RemoveFilesystem(ctx context.Context) (*AckResponse, error) {
+	fsID, am, err := c.stamp(OpRemoveFilesystem)
+	if err != nil {
+		return nil, err
+	}
+	req := RemoveFilesystemRequest{FilesystemID: fsID, AuthorizationMetadata: am}
+	var resp AckResponse
+	return &resp, c.call(ctx, OpRemoveFilesystem, req, &resp)
+}
