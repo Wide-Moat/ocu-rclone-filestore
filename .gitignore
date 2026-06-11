@@ -11,6 +11,8 @@
 *.bin
 dist/
 build/
+cover.out
+*.coverprofile
 .env
 .env.*
 !.env.example
