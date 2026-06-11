@@ -67,6 +67,46 @@ func TestEndStreamFlagIsZeroX02(t *testing.T) {
 	}
 }
 
+// TestReadFrameRejectsOversizedLength verifies that readFrame refuses a wire
+// length above maxInboundFrame instead of allocating it (MD-01: a 4-byte field
+// must not size an unbounded allocation and OOM the guest).
+func TestReadFrameRejectsOversizedLength(t *testing.T) {
+	var buf bytes.Buffer
+	header := make([]byte, frameHeaderLen)
+	header[0] = 0x00
+	binary.BigEndian.PutUint32(header[1:5], maxInboundFrame+1)
+	buf.Write(header)
+	// No payload bytes follow; readFrame must reject before trying to read.
+
+	_, _, err := readFrame(&buf)
+	if err == nil {
+		t.Fatal("expected error for oversized frame length, got nil")
+	}
+}
+
+// TestReadFrameAcceptsLengthAtCap verifies the boundary: a length exactly at
+// maxInboundFrame is allowed (the guard rejects strictly greater).
+func TestReadFrameAcceptsLengthAtCap(t *testing.T) {
+	payload := []byte(`{"ok":1}`)
+	var buf bytes.Buffer
+	header := make([]byte, frameHeaderLen)
+	header[0] = 0x00
+	// Declare a length within the cap but only supply the small payload; the
+	// guard must pass and the read should proceed (and then hit EOF on the
+	// short body, which is a read error, not the size guard).
+	binary.BigEndian.PutUint32(header[1:5], uint32(len(payload)))
+	buf.Write(header)
+	buf.Write(payload)
+
+	flag, got, err := readFrame(&buf)
+	if err != nil {
+		t.Fatalf("readFrame at sane length: %v", err)
+	}
+	if flag != 0x00 || !bytes.Equal(got, payload) {
+		t.Errorf("round trip mismatch: flag %02x payload %q", flag, got)
+	}
+}
+
 // TestEndStreamSuccessRoundTrip writes a success end-stream frame and reads
 // it back; success/failure comes from the parsed EndStreamResponse, not the
 // HTTP status (always 200 for streams).

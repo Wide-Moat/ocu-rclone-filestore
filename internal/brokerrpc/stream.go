@@ -31,6 +31,15 @@ const endStreamFlag byte = 0x02
 // frameHeaderLen is the fixed size of the Connect streaming frame prefix.
 const frameHeaderLen = 5
 
+// maxInboundFrame caps the payload size readFrame will allocate from the 4-byte
+// wire length field. Without a bound, a broker bug, a desynced stream, or a
+// corrupted length turns a 4-byte field into a multi-gigabyte allocation and
+// guest OOM. The guest is the least-provisioned party in this architecture and
+// must never let a wire field size its allocations unboundedly. The cap is set
+// well above the 256 KiB message ceiling to leave headroom for any legitimate
+// trailer or metadata frame while still rejecting absurd lengths.
+const maxInboundFrame = 4 * 1024 * 1024 // 4 MiB
+
 // ConnectError is the on-wire error shape shared by both unary non-2xx bodies
 // and EndStreamResponse error trailers.
 type ConnectError struct {
@@ -78,6 +87,9 @@ func readFrame(r io.Reader) (flag byte, payload []byte, err error) {
 	}
 	flag = header[0]
 	length := binary.BigEndian.Uint32(header[1:5])
+	if length > maxInboundFrame {
+		return 0, nil, fmt.Errorf("brokerrpc: inbound frame length %d exceeds max %d", length, maxInboundFrame)
+	}
 	payload = make([]byte, length)
 	if length > 0 {
 		if _, err = io.ReadFull(r, payload); err != nil {
