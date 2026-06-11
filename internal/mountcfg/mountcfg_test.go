@@ -163,6 +163,30 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
+			name:    "negative cache_duration_s rejected (CFG-02)",
+			fixture: "invalid_negative_cache_duration.json",
+			wantErr: new(*ErrCacheDuration),
+			assert: func(t *testing.T, err error) {
+				var e *ErrCacheDuration
+				errors.As(err, &e)
+				if e.Missing || e.Value != -5 {
+					t.Fatalf("expected negative value flagged, got %+v", e)
+				}
+			},
+		},
+		{
+			name:    "missing cache_duration_s rejected (CFG-02)",
+			fixture: "invalid_missing_cache_duration.json",
+			wantErr: new(*ErrCacheDuration),
+			assert: func(t *testing.T, err error) {
+				var e *ErrCacheDuration
+				errors.As(err, &e)
+				if !e.Missing {
+					t.Fatalf("expected missing field flagged, got %+v", e)
+				}
+			},
+		},
+		{
 			name:    "missing mounts key rejected (CFG-02)",
 			fixture: "invalid_missing_mounts.json",
 			wantErr: new(*ErrMissingField),

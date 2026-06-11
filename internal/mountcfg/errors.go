@@ -127,6 +127,22 @@ func (e *ErrWritesPosture) Error() string {
 	return fmt.Sprintf("%s[%d] has writes=%t but %s entries require writes=%t", e.Array, e.Index, !e.Expected, e.Array, e.Expected)
 }
 
+// ErrCacheDuration reports a cache_duration_s that is missing or negative. The
+// field is required per mount with a minimum of 0 (an explicit 0 is legal).
+type ErrCacheDuration struct {
+	Array   mountArray
+	Index   int
+	Missing bool
+	Value   int
+}
+
+func (e *ErrCacheDuration) Error() string {
+	if e.Missing {
+		return fmt.Sprintf("%s[%d] is missing the required cache_duration_s field", e.Array, e.Index)
+	}
+	return fmt.Sprintf("%s[%d] cache_duration_s %d must be >= 0", e.Array, e.Index, e.Value)
+}
+
 // ErrProvisionMarker reports a provision-side credential marker present in a
 // guest config. The guest variant carries no credential by construction.
 type ErrProvisionMarker struct {

@@ -27,7 +27,7 @@ type Mount struct {
 	MemoryStoreID   *string `json:"memory_store_id,omitempty"`
 	Writes          *bool   `json:"writes,omitempty"`
 	VfsCacheMode    string  `json:"vfs_cache_mode"`
-	CacheDurationS  int     `json:"cache_duration_s"`
+	CacheDurationS  *int    `json:"cache_duration_s,omitempty"`
 	VfsCacheMaxSize string  `json:"vfs_cache_max_size"`
 	DirPerms        string  `json:"dir_perms"`
 	FilePerms       string  `json:"file_perms"`
@@ -199,6 +199,16 @@ func validateMount(arr mountArray, i int, m Mount, wantWrites bool) error {
 	}
 	if *m.Writes != wantWrites {
 		return &ErrWritesPosture{Array: arr, Index: i, Expected: wantWrites}
+	}
+
+	// cache_duration_s is schema-required with minimum 0. The pointer
+	// distinguishes an absent field from an explicit 0 (0 is legal; absence is
+	// not), mirroring the presence handling of writes.
+	if m.CacheDurationS == nil {
+		return &ErrCacheDuration{Array: arr, Index: i, Missing: true}
+	}
+	if *m.CacheDurationS < 0 {
+		return &ErrCacheDuration{Array: arr, Index: i, Value: *m.CacheDurationS}
 	}
 
 	if !octalRe.MatchString(m.DirPerms) {
