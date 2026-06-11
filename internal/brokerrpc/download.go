@@ -29,6 +29,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -135,8 +136,10 @@ func reassembleDownloadStream(r io.Reader, header http.Header) ([]byte, error) {
 	for {
 		flag, payload, err := readFrame(r)
 		if err != nil {
-			if err == io.EOF {
-				// Unexpected EOF before end-stream frame.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				// readFrame wraps the underlying EOF with %w, so equality on
+				// io.EOF would never match; use errors.Is. A truncated stream
+				// that ends before the EndStreamResponse trailer is an error.
 				return nil, fmt.Errorf("brokerrpc: fileDownload: stream ended before EndStreamResponse")
 			}
 			return nil, fmt.Errorf("brokerrpc: fileDownload: read frame: %w", err)
@@ -156,10 +159,15 @@ func reassembleDownloadStream(r io.Reader, header http.Header) ([]byte, error) {
 			return result, nil
 		}
 
-		// Data frame: extract the content bytes.
+		// Data frame: extract the content bytes. An undecodable frame is a
+		// HARD error — never return truncated content as success. For a
+		// FUSE-backed mount, silently dropping a frame would surface as silent
+		// file corruption, the worst possible failure mode. A zero-length data
+		// frame appends nothing and is harmless.
 		var frame downloadContentFrame
-		if jsonErr := json.Unmarshal(payload, &frame); jsonErr == nil && len(frame.Data) > 0 {
-			result = append(result, frame.Data...)
+		if jsonErr := json.Unmarshal(payload, &frame); jsonErr != nil {
+			return nil, fmt.Errorf("brokerrpc: fileDownload: malformed data frame: %w", jsonErr)
 		}
+		result = append(result, frame.Data...)
 	}
 }

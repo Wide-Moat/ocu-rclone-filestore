@@ -61,7 +61,9 @@ func TestDownloadAuthMetadata(t *testing.T) {
 			t.Errorf("read request frame: %v", err)
 			return
 		}
-		_ = flag
+		if flag != 0x00 {
+			t.Errorf("download request frame flag: want 0x00 (data frame), got 0x%02x", flag)
+		}
 		reqBody = payload
 
 		var buf bytes.Buffer
@@ -156,6 +158,56 @@ func TestDownloadRangeHelper(t *testing.T) {
 	want := content[2:5]
 	if !bytes.Equal(got, want) {
 		t.Errorf("range slice: got %q, want %q", got, want)
+	}
+}
+
+// TestDownloadMalformedFrameIsHardError verifies that an undecodable content
+// frame aborts the download with a non-nil error rather than silently dropping
+// the frame and returning truncated content as success (CR-01). For a
+// FUSE-backed mount, silent truncation is undetectable file corruption.
+func TestDownloadMalformedFrameIsHardError(t *testing.T) {
+	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		good, _ := json.Marshal(map[string][]byte{"data": []byte("hello ")})
+		_ = writeFrame(&buf, 0x00, good)
+		// A frame whose payload is not valid JSON for downloadContentFrame.
+		_ = writeFrame(&buf, 0x00, []byte("this is not json"))
+		good2, _ := json.Marshal(map[string][]byte{"data": []byte("world")})
+		_ = writeFrame(&buf, 0x00, good2)
+		_ = writeEndStream(&buf, nil)
+		w.Header().Set("Content-Type", "application/connect+json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buf.Bytes())
+	})
+
+	c, _ := New(sock, "fs-dl-01")
+	got, err := c.Download(context.Background(), "uuid-corrupt")
+	if err == nil {
+		t.Fatalf("expected hard error on malformed frame, got nil with content %q", got)
+	}
+	if got != nil {
+		t.Errorf("malformed frame must not return partial content; got %q", got)
+	}
+}
+
+// TestDownloadTruncatedStreamErrors verifies that a stream ending before the
+// EndStreamResponse trailer is reported as an error (LO-01: the EOF branch must
+// use errors.Is because readFrame wraps the underlying EOF).
+func TestDownloadTruncatedStreamErrors(t *testing.T) {
+	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		frame, _ := json.Marshal(map[string][]byte{"data": []byte("partial")})
+		_ = writeFrame(&buf, 0x00, frame)
+		// No end-stream frame — the stream is truncated.
+		w.Header().Set("Content-Type", "application/connect+json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buf.Bytes())
+	})
+
+	c, _ := New(sock, "fs-dl-01")
+	_, err := c.Download(context.Background(), "uuid-trunc")
+	if err == nil {
+		t.Fatal("expected error on truncated stream, got nil")
 	}
 }
 
