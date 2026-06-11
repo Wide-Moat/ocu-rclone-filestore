@@ -113,15 +113,24 @@ func (f *Fs) Precision() time.Duration { return time.Second }
 func (f *Fs) Hashes() hash.Set { return hash.NewHashSet() }
 
 // Features returns the optional interface features this Fs implements.
-// Copy, Move, and DirMove are advertised (their bodies land in 03-02);
-// PutStream is intentionally not advertised (design decision 1 from 03-02).
+//
+// Copy, Move, and DirMove are advertised now that their bodies are implemented
+// (03-02). PutStream is intentionally NOT advertised: rclone spools an
+// unknown-size source upstream and re-calls Put with a known size, so the
+// backend never needs an unknown-total upload path, and declared_size_bytes is
+// always a real size (D5, design decision 1 from 03-02).
+//
+// ListR (recursive listing) is not advertised here. Fs.List implements a
+// depth-1 filter over the recursive ListDirectoryAll call, which is sufficient
+// for rclone's VFS recursion. A dedicated ListR surface is deferred.
 func (f *Fs) Features() *fs.Features {
 	return (&fs.Features{
 		ReadMimeType:            true,
 		CanHaveEmptyDirectories: true,
-		Copy:                    nil, // wired in 03-02
-		Move:                    nil, // wired in 03-02
-		DirMove:                 nil, // wired in 03-02
+		Copy:                    f.Copy,
+		Move:                    f.Move,
+		DirMove:                 f.DirMove,
+		// PutStream intentionally absent — see comment above.
 	}).Fill(ctx, f)
 }
 

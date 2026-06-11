@@ -68,6 +68,15 @@ type fakeClient struct {
 	lastDownloadRangeLength int64
 	// lastDownloadUUID captures the uuid passed to Download.
 	lastDownloadUUID string
+	// lastCopyFileSrc/Dst capture the args passed to CopyFile.
+	lastCopyFileSrc string
+	lastCopyFileDst string
+	// lastMoveFileSrc/Dst capture the args passed to MoveFile.
+	lastMoveFileSrc string
+	lastMoveFileDst string
+	// lastMoveDirectorySrc/Dst capture the args passed to MoveDirectory.
+	lastMoveDirectorySrc string
+	lastMoveDirectoryDst string
 }
 
 func (f *fakeClient) totalMutatingCalls() int {
@@ -141,6 +150,8 @@ func (f *fakeClient) RemoveDirectory(ctx context.Context, path string) (*brokerr
 
 func (f *fakeClient) MoveDirectory(ctx context.Context, sourcePath, destPath string) (*brokerrpc.AckResponse, error) {
 	f.moveDirectoryCount++
+	f.lastMoveDirectorySrc = sourcePath
+	f.lastMoveDirectoryDst = destPath
 	if f.moveDirectoryResult != nil {
 		return f.moveDirectoryResult(ctx, sourcePath, destPath)
 	}
@@ -149,6 +160,8 @@ func (f *fakeClient) MoveDirectory(ctx context.Context, sourcePath, destPath str
 
 func (f *fakeClient) CopyFile(ctx context.Context, srcPath, dstPath string) (*brokerrpc.AckResponse, error) {
 	f.copyFileCount++
+	f.lastCopyFileSrc = srcPath
+	f.lastCopyFileDst = dstPath
 	if f.copyFileResult != nil {
 		return f.copyFileResult(ctx, srcPath, dstPath)
 	}
@@ -157,6 +170,8 @@ func (f *fakeClient) CopyFile(ctx context.Context, srcPath, dstPath string) (*br
 
 func (f *fakeClient) MoveFile(ctx context.Context, srcPath, dstPath string) (*brokerrpc.AckResponse, error) {
 	f.moveFileCount++
+	f.lastMoveFileSrc = srcPath
+	f.lastMoveFileDst = dstPath
 	if f.moveFileResult != nil {
 		return f.moveFileResult(ctx, srcPath, dstPath)
 	}
@@ -605,6 +620,24 @@ func TestReadOnlyGuardAllMutatingMethods(t *testing.T) {
 	err = obj.SetModTime(context.Background(), time.Now())
 	if !errors.Is(err, fs.ErrorPermissionDenied) {
 		t.Errorf("SetModTime on read-only: got %v, want fs.ErrorPermissionDenied", err)
+	}
+
+	// Fs.Copy
+	_, err = f.Copy(context.Background(), obj, "ro/copy.bin")
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("Copy on read-only: got %v, want fs.ErrorPermissionDenied", err)
+	}
+
+	// Fs.Move
+	_, err = f.Move(context.Background(), obj, "ro/move.bin")
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("Move on read-only: got %v, want fs.ErrorPermissionDenied", err)
+	}
+
+	// Fs.DirMove
+	err = f.DirMove(context.Background(), f, "ro/srcdir", "ro/dstdir")
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("DirMove on read-only: got %v, want fs.ErrorPermissionDenied", err)
 	}
 
 	// Assert ZERO client calls for ALL mutating methods (guard fired before any RPC).
