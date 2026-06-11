@@ -77,6 +77,12 @@ func (c *Client) ListDirectoryAll(ctx context.Context, path string) ([]Directory
 		if resp.Cursor == "" {
 			break
 		}
+		// Progress guard: if the broker echoes the same cursor we just sent,
+		// the listing is not advancing. Without this, a broker bug would spin
+		// this loop forever with unbounded memory growth inside the mount.
+		if cursor != "" && resp.Cursor == cursor {
+			return nil, fmt.Errorf("brokerrpc: ListDirectoryAll: cursor did not advance (%q) — aborting non-progressing pagination", string(resp.Cursor))
+		}
 		cursor = resp.Cursor
 	}
 
@@ -130,6 +136,11 @@ func (c *Client) ListFilesAll(ctx context.Context, uuid string) ([]FilesystemFil
 
 		if resp.AfterUUID == "" {
 			break
+		}
+		// Progress guard: a repeated after_uuid means the listing is not
+		// advancing; abort rather than loop forever (see ListDirectoryAll).
+		if afterUUID != "" && resp.AfterUUID == afterUUID {
+			return nil, fmt.Errorf("brokerrpc: ListFilesAll: after_uuid did not advance (%q) — aborting non-progressing pagination", string(resp.AfterUUID))
 		}
 		afterUUID = resp.AfterUUID
 	}

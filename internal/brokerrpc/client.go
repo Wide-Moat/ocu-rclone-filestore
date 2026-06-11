@@ -143,7 +143,10 @@ func (c *Client) stamp(op Op) (string, AuthorizationMetadata, error) {
 // their transport is wired in plan 02-02; types are defined in messages.go).
 // ---------------------------------------------------------------------------
 
-// ListDirectory lists the directory at path.
+// ListDirectory lists a single page of the directory at path. When the
+// returned response carries a non-empty Cursor the listing is paginated and
+// this is only the first page; callers needing the complete listing must use
+// ListDirectoryAll, which follows the cursor across pages.
 func (c *Client) ListDirectory(ctx context.Context, path string) (*ListDirectoryResponse, error) {
 	fsID, am, err := c.stamp(OpListDirectory)
 	if err != nil {
@@ -233,7 +236,10 @@ func (c *Client) GetFileMetadata(ctx context.Context, uuid string) (*GetFileMeta
 	return &resp, c.call(ctx, OpGetFileMetadata, req, &resp)
 }
 
-// ListFiles returns files addressed by broker-minted UUID handle (uuid axis).
+// ListFiles returns a single page of files addressed by broker-minted UUID
+// handle (uuid axis). When the returned response carries a non-empty AfterUUID
+// the listing is paginated and this is only the first page; callers needing the
+// complete listing must use ListFilesAll, which follows the cursor across pages.
 func (c *Client) ListFiles(ctx context.Context, uuid string) (*ListFilesResponse, error) {
 	fsID, am, err := c.stamp(OpListFiles)
 	if err != nil {

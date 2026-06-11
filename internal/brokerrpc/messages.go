@@ -206,9 +206,14 @@ type RemoveFilesystemRequest struct {
 // per D6 do not break existing decoders.
 // ---------------------------------------------------------------------------
 
-// ListDirectoryResponse wraps the directory listing result.
+// ListDirectoryResponse wraps the directory listing result for a single page.
+// Cursor is the opaque continuation token: when it is non-empty the broker has
+// more entries and this response is only page 1 — callers that need the
+// complete listing must use ListDirectoryAll. Exposing the field makes silent
+// truncation detectable instead of presenting page 1 as the whole listing.
 type ListDirectoryResponse struct {
-	Entries []Directory `json:"entries,omitempty"`
+	Entries []Directory  `json:"entries,omitempty"`
+	Cursor  OpaqueCursor `json:"cursor,omitempty"`
 }
 
 // MakeDirectoryResponse is the bare-ack response for makeDirectory.
@@ -243,9 +248,14 @@ type GetFileMetadataResponse struct {
 	File FilesystemFile `json:"file"`
 }
 
-// ListFilesResponse wraps the list of files returned for a uuid-axis listing.
+// ListFilesResponse wraps the list of files returned for a uuid-axis listing
+// page. AfterUUID is the opaque continuation token: when it is non-empty the
+// broker has more files and this response is only page 1 — callers that need
+// the complete listing must use ListFilesAll. Exposing the field makes silent
+// truncation detectable.
 type ListFilesResponse struct {
-	Files []FilesystemFile `json:"files,omitempty"`
+	Files     []FilesystemFile `json:"files,omitempty"`
+	AfterUUID OpaqueCursor     `json:"after_uuid,omitempty"`
 }
 
 // CopyFileResponse is the bare-ack response for copyFile.

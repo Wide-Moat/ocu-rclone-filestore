@@ -132,13 +132,71 @@ func TestListFilesCursorEchoedUnmodified(t *testing.T) {
 	}
 }
 
-// TestCursorNeverInspected verifies that the cursor carrier holds the value as
-// an opaque bytes/string without any structural access.
-func TestCursorNeverInspected(t *testing.T) {
-	// The cursor string has no parseable JSON structure — it is intentionally
-	// opaque. The client must echo it unchanged.
-	c := OpaqueCursor("this-has-no-json-structure")
-	if string(c) != "this-has-no-json-structure" {
-		t.Errorf("OpaqueCursor mutated value: got %q", c)
+// TestListDirectoryAllStopsOnNonAdvancingCursor verifies that a broker echoing
+// the same cursor forever does not spin ListDirectoryAll into an infinite loop
+// with unbounded memory growth; the helper detects the non-progressing cursor
+// and returns an error (MD-03).
+func TestListDirectoryAllStopsOnNonAdvancingCursor(t *testing.T) {
+	callCount := 0
+	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		// Always return the SAME non-empty cursor — never advances.
+		type entry struct {
+			Path string `json:"path"`
+		}
+		type resp struct {
+			Entries []entry `json:"entries,omitempty"`
+			Cursor  string  `json:"cursor,omitempty"`
+		}
+		respBody, _ := json.Marshal(resp{
+			Entries: []entry{{Path: "/x"}},
+			Cursor:  "stuck-cursor",
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(respBody)
+	})
+
+	c, _ := New(sock, "fs-cursor-01")
+	_, err := c.ListDirectoryAll(context.Background(), "/")
+	if err == nil {
+		t.Fatal("expected error on non-advancing cursor, got nil (would loop forever)")
+	}
+	// The first page sends an empty cursor, the second sends "stuck-cursor",
+	// the third sees the same cursor echoed and aborts — bounded call count.
+	if callCount > 3 {
+		t.Errorf("expected the loop to abort quickly, got %d calls", callCount)
+	}
+}
+
+// TestListFilesAllStopsOnNonAdvancingCursor verifies the same progress guard
+// for the uuid-paginated listFiles path (MD-03).
+func TestListFilesAllStopsOnNonAdvancingCursor(t *testing.T) {
+	callCount := 0
+	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		type file struct {
+			UUID string `json:"uuid"`
+		}
+		type resp struct {
+			Files     []file `json:"files,omitempty"`
+			AfterUUID string `json:"after_uuid,omitempty"`
+		}
+		respBody, _ := json.Marshal(resp{
+			Files:     []file{{UUID: "u"}},
+			AfterUUID: "stuck-after-uuid",
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(respBody)
+	})
+
+	c, _ := New(sock, "fs-cursor-01")
+	_, err := c.ListFilesAll(context.Background(), "root-uuid")
+	if err == nil {
+		t.Fatal("expected error on non-advancing after_uuid, got nil (would loop forever)")
+	}
+	if callCount > 3 {
+		t.Errorf("expected the loop to abort quickly, got %d calls", callCount)
 	}
 }
