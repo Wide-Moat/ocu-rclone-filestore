@@ -16,32 +16,54 @@ import (
 // service under the ocu.filestore.v1alpha namespace.
 const serviceBase = "/ocu.filestore.v1alpha.FilesystemService/"
 
+// defaultMessageCeiling is the default maximum payload size for a single
+// streaming chunk frame. The chunker always sends under this value so the
+// broker never receives a frame at or above the ceiling.
+const defaultMessageCeiling = 256 * 1024 // 256 KiB
+
+// ClientOptions carries construction-time tunables for Client.
+type ClientOptions struct {
+	// MessageCeiling is the maximum number of bytes per chunk frame payload.
+	// A value of 0 uses the default (256 KiB).
+	MessageCeiling int
+}
+
 // Client is the guest-side Connect-JSON client for the broker's
 // file-operations service. It is bound at construction to a per-session
 // AF_UNIX socket (the only egress path) and a filesystem_id (the sole scope
-// handle). It holds no credential, constructs no Authorization header, and
+// handle). It holds no credential, constructs no credential header, and
 // has no code path that sets downloadable to true.
 type Client struct {
-	http     *http.Client
-	fsID     string
+	http           *http.Client
+	fsID           string
+	messageCeiling int
 }
 
 // New constructs a Client bound to the given per-session unix socket path and
 // filesystem_id. The socket path comes from the guest mount config; it is
-// never a shared constant. opts is reserved for future extension and is
-// currently unused.
-func New(socketPath string, fsID string, opts ...interface{}) (*Client, error) {
+// never a shared constant.
+func New(socketPath string, fsID string) (*Client, error) {
+	return NewWithOptions(socketPath, fsID, ClientOptions{})
+}
+
+// NewWithOptions constructs a Client with explicit options.
+func NewWithOptions(socketPath, fsID string, opts ClientOptions) (*Client, error) {
 	if socketPath == "" {
 		return nil, fmt.Errorf("brokerrpc.New: socketPath must not be empty")
 	}
 	if fsID == "" {
 		return nil, fmt.Errorf("brokerrpc.New: fsID must not be empty")
 	}
+	ceiling := opts.MessageCeiling
+	if ceiling <= 0 {
+		ceiling = defaultMessageCeiling
+	}
 	return &Client{
 		http: &http.Client{
 			Transport: unixTransport(socketPath),
 		},
-		fsID: fsID,
+		fsID:           fsID,
+		messageCeiling: ceiling,
 	}, nil
 }
 

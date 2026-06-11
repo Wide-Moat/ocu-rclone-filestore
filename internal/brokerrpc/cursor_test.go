@@ -4,7 +4,6 @@
 package brokerrpc
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
