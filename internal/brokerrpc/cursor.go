@@ -34,9 +34,12 @@ type OpaqueCursor string
 
 // listDirectoryPageResponse is the JSON response shape for listDirectory.
 // We decode only the fields we echo (cursor) plus the entries we aggregate.
+// Entries uses the pinned union type []ListDirEntry (raised from []Directory
+// in Phase 3 — a response-decoder correction only, no new transport/op/auth
+// path, SEC-25).
 type listDirectoryPageResponse struct {
-	Entries []Directory  `json:"entries,omitempty"`
-	Cursor  OpaqueCursor `json:"cursor,omitempty"`
+	Entries []ListDirEntry `json:"entries,omitempty"`
+	Cursor  OpaqueCursor   `json:"cursor,omitempty"`
 }
 
 // listDirectoryPageRequest overrides ListDirectoryRequest to include the
@@ -50,13 +53,17 @@ type listDirectoryPageRequest struct {
 
 // ListDirectoryAll performs recursive listDirectory paging, echoing the
 // opaque cursor across pages, and returns the full accumulated entry list.
-func (c *Client) ListDirectoryAll(ctx context.Context, path string) ([]Directory, error) {
+// The returned []ListDirEntry reflects the pinned union shape (file XOR
+// directory per D6); the published return type was raised from []Directory in
+// Phase 3. This is a response-decoder correction only — no new transport,
+// op, or auth path was added (SEC-25).
+func (c *Client) ListDirectoryAll(ctx context.Context, path string) ([]ListDirEntry, error) {
 	fsID, am, err := c.stamp(OpListDirectory)
 	if err != nil {
 		return nil, err
 	}
 
-	var all []Directory
+	var all []ListDirEntry
 	var cursor OpaqueCursor
 
 	for {

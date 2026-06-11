@@ -210,14 +210,29 @@ type RemoveFilesystemRequest struct {
 // per D6 do not break existing decoders.
 // ---------------------------------------------------------------------------
 
+// ListDirEntry is the pinned listDirectory union entry (D6, Phase 3).
+// Each entry is either a file (the `file` key, carrying a full FilesystemFile
+// with uuid+size+mime+mtime) XOR a directory (the `directory` key, carrying
+// path+mtime). The union discriminator is the presence of one key or the
+// other; only one arm will be non-nil after decoding. Decoded tolerantly
+// (no DisallowUnknownFields) so future broker field pins per D6 do not break
+// existing decoders. The guest never derives scope from the uuid (D7).
+type ListDirEntry struct {
+	File      *FilesystemFile `json:"file,omitempty"`
+	Directory *Directory      `json:"directory,omitempty"`
+}
+
 // ListDirectoryResponse wraps the directory listing result for a single page.
 // Cursor is the opaque continuation token: when it is non-empty the broker has
 // more entries and this response is only page 1 — callers that need the
 // complete listing must use ListDirectoryAll. Exposing the field makes silent
 // truncation detectable instead of presenting page 1 as the whole listing.
+// Entries is the pinned union []ListDirEntry (raised from the Phase-2
+// dir-only []Directory in Phase 3; the decoder corrects the response shape
+// without adding any new transport/op/auth path — SEC-25).
 type ListDirectoryResponse struct {
-	Entries []Directory  `json:"entries,omitempty"`
-	Cursor  OpaqueCursor `json:"cursor,omitempty"`
+	Entries []ListDirEntry `json:"entries,omitempty"`
+	Cursor  OpaqueCursor   `json:"cursor,omitempty"`
 }
 
 // MakeDirectoryResponse is the bare-ack response for makeDirectory.

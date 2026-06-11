@@ -1,0 +1,367 @@
+// SPDX-License-Identifier: FSL-1.1-Apache-2.0
+// Copyright (c) 2025 Open Computer Use Contributors
+
+// Package ocufs is the rclone backend for the Open Computer Use file-store
+// broker. It maps rclone's Fs/Object surface onto the broker's file-operations
+// RPC through the brokerrpc package. The backend:
+//
+//   - Holds no backend credential and constructs no AuthorizationMetadata;
+//     auth/intent are stamped centrally by brokerrpc (SEC-25, SEC-73).
+//   - Reaches storage only through the brokerClient interface, which wraps
+//     *brokerrpc.Client; no object-store client is linked (T-03-04).
+//   - Enforces read-only mounts by returning a permission error at the TOP
+//     of every mutating method before any client call (BE-02, T-03-01).
+//   - Maps listDirectory union entries DIRECTLY to fully-populated Objects
+//     (file arm) or fs.Dir (directory arm) without a ReadMetadata round-trip
+//     on the hot path (D6, design decision 7).
+package ocufs
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"path"
+	"strings"
+	"time"
+
+	"github.com/Wide-Moat/ocu-rclone-filestore/internal/brokerrpc"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/config/configstruct"
+	"github.com/rclone/rclone/fs/hash"
+)
+
+// regInfo is the package-level RegInfo registered with rclone's registry.
+var regInfo *fs.RegInfo
+
+func init() {
+	regInfo = &fs.RegInfo{
+		Name:        "ocufs",
+		Description: "Open Computer Use file-store broker (guest-side mount)",
+		NewFs:       NewFs,
+		Options:     fsOptions,
+	}
+	fs.Register(regInfo)
+}
+
+// Fs implements fs.Fs for the ocufs backend.
+type Fs struct {
+	name     string
+	root     string
+	client   brokerClient
+	readOnly bool
+}
+
+// NewFs constructs an Fs from the provided config. It validates that the
+// required options (socket_path, filesystem_id) are present, then constructs
+// the brokerClient from the real brokerrpc.Client bound to the per-session
+// socket.
+//
+// The Fs holds no credential and constructs no AuthorizationMetadata. Auth
+// is stamped centrally by brokerrpc (SEC-25). NewFs does NOT dial the socket
+// synchronously — the first RPC call does.
+func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
+	var opts Options
+	if err := configstruct.Set(m, &opts); err != nil {
+		return nil, fmt.Errorf("ocufs: parse options: %w", err)
+	}
+	if opts.SocketPath == "" {
+		return nil, fmt.Errorf("ocufs: socket_path is required")
+	}
+	if opts.FilesystemID == "" {
+		return nil, fmt.Errorf("ocufs: filesystem_id is required")
+	}
+
+	c, err := brokerrpc.New(opts.SocketPath, opts.FilesystemID)
+	if err != nil {
+		return nil, fmt.Errorf("ocufs: create broker client: %w", err)
+	}
+
+	return &Fs{
+		name:     name,
+		root:     root,
+		client:   newBrokerClientAdapter(c),
+		readOnly: opts.ReadOnly,
+	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// fs.Info implementation
+// ---------------------------------------------------------------------------
+
+// Name returns the remote name (the config section name passed to NewFs).
+func (f *Fs) Name() string { return f.name }
+
+// Root returns the root path for this Fs instance.
+func (f *Fs) Root() string { return f.root }
+
+// String returns a human-readable description.
+func (f *Fs) String() string { return fmt.Sprintf("ocufs:%s", f.root) }
+
+// Precision returns the ModTime precision for this backend. The broker
+// encodes mtime as RFC3339 strings which carry second-level precision at
+// minimum; we report time.Second as the safe lower bound. A later broker
+// confirmation may raise this to time.Millisecond or time.Nanosecond once
+// the mtime format is pinned (LD-2).
+func (f *Fs) Precision() time.Duration { return time.Second }
+
+// Hashes returns the set of hash types supported by the backend. The broker
+// wire contract currently carries a `sha` field (D6 field-name reconciliation
+// pending — sha vs checksum_md5). We report hash.None for now and document
+// the gap; a later phase will wire the confirmed hash type.
+func (f *Fs) Hashes() hash.Set { return hash.NewHashSet() }
+
+// Features returns the optional interface features this Fs implements.
+// Copy, Move, and DirMove are advertised (their bodies land in 03-02);
+// PutStream is intentionally not advertised (design decision 1 from 03-02).
+func (f *Fs) Features() *fs.Features {
+	return (&fs.Features{
+		ReadMimeType:            true,
+		CanHaveEmptyDirectories: true,
+		Copy:                    nil, // wired in 03-02
+		Move:                    nil, // wired in 03-02
+		DirMove:                 nil, // wired in 03-02
+	}).Fill(ctx, f)
+}
+
+// ---------------------------------------------------------------------------
+// fs.Fs core methods
+// ---------------------------------------------------------------------------
+
+// List returns the immediate children of dir. It calls ListDirectoryAll (which
+// performs recursive broker paging) and then DEFENSIVELY filters the results
+// to entries that are exactly one path segment below dir — dropping deeper
+// descendants that the recursive op may include. This ensures List always
+// returns depth-1 results as required by rclone (design decision 6).
+//
+// Each surviving entry is classified by the pinned union arm (D6, decision 7):
+//   - file arm (entry.File != nil): a FULLY-POPULATED *Object built directly
+//     from the FilesystemFile (uuid+size+mime+mtime). No ReadMetadata needed.
+//   - directory arm (entry.Directory != nil): fs.NewDir(remote, mtime).
+func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
+	absPath := absPath(f.root, dir)
+
+	all, err := f.client.ListDirectoryAll(ctx, absPath)
+	if err != nil {
+		return nil, fmt.Errorf("ocufs: List %q: %w", absPath, err)
+	}
+
+	var entries fs.DirEntries
+	for _, entry := range all {
+		remote, ok := immediateChildRemote(f.root, dir, entry)
+		if !ok {
+			continue // deeper descendant — filtered per design decision 6
+		}
+		switch {
+		case entry.File != nil:
+			obj := objectFromFile(f, remote, entry.File)
+			entries = append(entries, obj)
+		case entry.Directory != nil:
+			mtime := parseMtime(entry.Directory.Mtime)
+			entries = append(entries, fs.NewDir(remote, mtime))
+		}
+		// Both arms nil: tolerate silently (unknown union variant from future
+		// broker field pin — stays tolerant per D6).
+	}
+	return entries, nil
+}
+
+// NewObject returns the Object at remote or an error sentinel if not found or
+// if the path resolves to a directory. It calls ReadMetadata as a point
+// lookup (design decision 2 — ReadMetadata stays a point lookup, NOT an
+// enumeration mechanism).
+//
+// Returns:
+//   - a fully-populated *Object when the response carries a File.
+//   - fs.ErrorIsDir when the response carries a Directory (and no File).
+//   - fs.ErrorObjectNotFound when neither arm is populated or when the broker
+//     returns not_found.
+func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
+	p := absPath(f.root, remote)
+	resp, err := f.client.ReadMetadata(ctx, p)
+	if err != nil {
+		if errors.Is(err, brokerrpc.ErrNotFound) {
+			return nil, fs.ErrorObjectNotFound
+		}
+		return nil, fmt.Errorf("ocufs: NewObject %q: %w", p, err)
+	}
+	if resp == nil {
+		return nil, fs.ErrorObjectNotFound
+	}
+	// A populated File takes priority over a Directory in the response
+	// (file arm wins per design decision 2).
+	if resp.File.UUID != "" || resp.File.Size != 0 || resp.File.Path != "" {
+		return &Object{
+			fs:    f,
+			path:  p,
+			uuid:  resp.File.UUID,
+			size:  resp.File.Size,
+			mtime: parseMtime(resp.File.Mtime),
+			mode:  resp.File.Mode,
+			sha:   resp.File.SHA,
+			mime:  resp.File.MIME,
+		}, nil
+	}
+	if resp.Directory.Path != "" {
+		return nil, fs.ErrorIsDir
+	}
+	return nil, fs.ErrorObjectNotFound
+}
+
+// Put writes the content of in to the remote path, returning the resulting
+// Object. On a read-only Fs it returns fs.ErrorPermissionDenied immediately
+// before any client call (BE-02).
+//
+// The Upload op requires a real declared_size_bytes (D5); rclone guarantees
+// src.Size() >= 0 when calling Put from outside an Fs. The returned Object is
+// uuid-less (Upload returns no metadata); the defensive lazy resolve() fallback
+// in Object.Open will fetch the uuid on first access.
+func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
+	if f.readOnly {
+		return nil, fs.ErrorPermissionDenied
+	}
+	dstPath := absPath(f.root, src.Remote())
+	if err := f.client.Upload(ctx, dstPath, in, src.Size()); err != nil {
+		return nil, fmt.Errorf("ocufs: Put %q: %w", dstPath, err)
+	}
+	// The upload response carries no metadata on the current wire contract;
+	// the returned Object is uuid-less. Object.resolve() is the defensive
+	// fallback: it fetches uuid+size on the first access that needs them.
+	// Documented in plan 03-01 SUMMARY as a known follow-up.
+	return &Object{
+		fs:   f,
+		path: dstPath,
+		size: src.Size(),
+	}, nil
+}
+
+// Mkdir creates a directory at dir. Returns fs.ErrorPermissionDenied
+// immediately on a read-only Fs (BE-02).
+func (f *Fs) Mkdir(ctx context.Context, dir string) error {
+	if f.readOnly {
+		return fs.ErrorPermissionDenied
+	}
+	p := absPath(f.root, dir)
+	_, err := f.client.MakeDirectory(ctx, p)
+	if err != nil {
+		return fmt.Errorf("ocufs: Mkdir %q: %w", p, err)
+	}
+	return nil
+}
+
+// Rmdir removes the directory at dir. Returns fs.ErrorPermissionDenied
+// immediately on a read-only Fs (BE-02).
+func (f *Fs) Rmdir(ctx context.Context, dir string) error {
+	if f.readOnly {
+		return fs.ErrorPermissionDenied
+	}
+	p := absPath(f.root, dir)
+	_, err := f.client.RemoveDirectory(ctx, p)
+	if err != nil {
+		return fmt.Errorf("ocufs: Rmdir %q: %w", p, err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
+
+// absPath joins the Fs root with a relative path, returning a clean absolute
+// broker path. An empty rel is the root itself.
+func absPath(root, rel string) string {
+	if rel == "" {
+		return cleanPath(root)
+	}
+	return cleanPath(path.Join(root, rel))
+}
+
+// cleanPath ensures the path begins with "/" and has no trailing slash
+// (except for "/" itself which stays "/").
+func cleanPath(p string) string {
+	p = path.Clean("/" + p)
+	return p
+}
+
+// immediateChildRemote returns the rclone remote string for an entry if the
+// entry is an immediate child of dir under root, and false otherwise. This
+// is the depth-1 filter implementing design decision 6: List must return
+// only entries that are exactly one path segment below dir.
+func immediateChildRemote(root, dir string, entry brokerrpc.ListDirEntry) (string, bool) {
+	var entryPath string
+	switch {
+	case entry.File != nil:
+		entryPath = entry.File.Path
+	case entry.Directory != nil:
+		entryPath = entry.Directory.Path
+	default:
+		return "", false
+	}
+	entryPath = cleanPath(entryPath)
+	parentPath := absPath(root, dir)
+
+	// The entry must sit directly below parentPath.
+	if !strings.HasPrefix(entryPath, parentPath+"/") {
+		// Special case: parentPath is "/" — all top-level entries are candidates.
+		if parentPath != "/" || strings.Count(strings.TrimPrefix(entryPath, "/"), "/") > 0 {
+			return "", false
+		}
+	}
+
+	// Strip the parent prefix to get the path-relative segment(s).
+	rel := strings.TrimPrefix(entryPath, parentPath)
+	rel = strings.TrimPrefix(rel, "/")
+
+	// An immediate child has no "/" in the remaining segment.
+	if strings.Contains(rel, "/") {
+		return "", false
+	}
+
+	// Build the rclone remote: dir/name (or just name at the root).
+	if dir == "" {
+		return rel, true
+	}
+	return path.Join(dir, rel), true
+}
+
+// objectFromFile builds a fully-populated *Object directly from a
+// FilesystemFile listing entry. No ReadMetadata round-trip is needed because
+// the file arm of the listDirectory union carries the full set of fields
+// (uuid+size+mime+mtime) as per the pinned D6 contract.
+func objectFromFile(f *Fs, remote string, ff *brokerrpc.FilesystemFile) *Object {
+	return &Object{
+		fs:    f,
+		path:  ff.Path,
+		uuid:  ff.UUID,
+		size:  ff.Size,
+		mtime: parseMtime(ff.Mtime),
+		mode:  ff.Mode,
+		sha:   ff.SHA,
+		mime:  ff.MIME,
+		// remote is the rclone-relative path (used by Remote()).
+		remote: remote,
+	}
+}
+
+// parseMtime parses an mtime string using RFC3339Nano (falling back to
+// RFC3339). A parse failure returns the zero time rather than failing the
+// operation, per the tolerant-decoding discipline and LD-2 pending
+// broker confirmation of the wire format.
+func parseMtime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	return time.Time{} // unknown time; tolerant decode
+}
+
+// ctx is a package-level alias to avoid a bare `ctx` identifier in
+// Features().Fill which requires it — the call must pass a context to Fill.
+// We use context.Background() there since Features() has no context parameter.
+var ctx = context.Background()

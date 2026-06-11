@@ -31,28 +31,35 @@ func TestRecursiveCursorEchoedUnmodified(t *testing.T) {
 
 		var respBody []byte
 		if callCount == 1 {
-			// Page 1: return cursor pointing to page 2.
-			type entry struct {
+			// Page 1: return cursor pointing to page 2. Use the union shape the
+			// widened decoder expects: each entry has a `file` or `directory` key.
+			type dirEntry struct {
 				Path string `json:"path"`
+			}
+			type entry struct {
+				Directory *dirEntry `json:"directory,omitempty"`
 			}
 			type resp struct {
 				Entries []entry `json:"entries,omitempty"`
 				Cursor  string  `json:"cursor,omitempty"`
 			}
 			respBody, _ = json.Marshal(resp{
-				Entries: []entry{{Path: "/a"}},
+				Entries: []entry{{Directory: &dirEntry{Path: "/a"}}},
 				Cursor:  page1Cursor,
 			})
 		} else {
 			// Page 2: return empty cursor (last page).
-			type entry struct {
+			type dirEntry struct {
 				Path string `json:"path"`
+			}
+			type entry struct {
+				Directory *dirEntry `json:"directory,omitempty"`
 			}
 			type resp struct {
 				Entries []entry `json:"entries,omitempty"`
 			}
 			respBody, _ = json.Marshal(resp{
-				Entries: []entry{{Path: "/b"}},
+				Entries: []entry{{Directory: &dirEntry{Path: "/b"}}},
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -141,15 +148,18 @@ func TestListDirectoryAllStopsOnNonAdvancingCursor(t *testing.T) {
 	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		// Always return the SAME non-empty cursor — never advances.
-		type entry struct {
+		type dirEntry struct {
 			Path string `json:"path"`
+		}
+		type entry struct {
+			Directory *dirEntry `json:"directory,omitempty"`
 		}
 		type resp struct {
 			Entries []entry `json:"entries,omitempty"`
 			Cursor  string  `json:"cursor,omitempty"`
 		}
 		respBody, _ := json.Marshal(resp{
-			Entries: []entry{{Path: "/x"}},
+			Entries: []entry{{Directory: &dirEntry{Path: "/x"}}},
 			Cursor:  "stuck-cursor",
 		})
 		w.Header().Set("Content-Type", "application/json")
@@ -198,5 +208,136 @@ func TestListFilesAllStopsOnNonAdvancingCursor(t *testing.T) {
 	}
 	if callCount > 3 {
 		t.Errorf("expected the loop to abort quickly, got %d calls", callCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Union decode tests — the widened listDirectory decoder (D6, Phase 3).
+// ---------------------------------------------------------------------------
+
+// TestListDirUnionDecodeMixedPage verifies that a listDirectory page JSON
+// containing a mixed entries array — one file entry and one directory entry —
+// decodes into []ListDirEntry where the file arm is populated for the file
+// entry (uuid+size+mtime non-zero) and the directory arm is populated for
+// the directory entry (mtime non-zero), and the opposite arm is nil.
+// Fixtures use the `mtime` JSON key (the current struct tag); the
+// created_at↔mtime source reconciliation is a tracked follow-up (LD-2).
+func TestListDirUnionDecodeMixedPage(t *testing.T) {
+	const mixedPage = `{
+		"entries": [
+			{
+				"file": {
+					"path": "/docs/readme.txt",
+					"size": 1024,
+					"uuid": "file-uuid-abc",
+					"mime": "text/plain",
+					"mtime": "2026-01-15T10:00:00Z",
+					"extra_unknown_field": "ignored"
+				}
+			},
+			{
+				"directory": {
+					"path": "/docs/sub",
+					"mtime": "2026-01-10T08:00:00Z",
+					"extra_unknown_field": "ignored"
+				}
+			}
+		]
+	}`
+
+	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(mixedPage))
+	})
+
+	c, _ := New(sock, "fs-union-01")
+	entries, err := c.ListDirectoryAll(context.Background(), "/docs")
+	if err != nil {
+		t.Fatalf("ListDirectoryAll: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(entries))
+	}
+
+	// First entry: file arm populated, directory arm nil.
+	fileEntry := entries[0]
+	if fileEntry.File == nil {
+		t.Fatal("entries[0].File is nil, expected a populated FilesystemFile")
+	}
+	if fileEntry.Directory != nil {
+		t.Error("entries[0].Directory is non-nil, expected nil for a file entry")
+	}
+	if fileEntry.File.UUID != "file-uuid-abc" {
+		t.Errorf("entries[0].File.UUID = %q, want %q", fileEntry.File.UUID, "file-uuid-abc")
+	}
+	if fileEntry.File.Size != 1024 {
+		t.Errorf("entries[0].File.Size = %d, want 1024", fileEntry.File.Size)
+	}
+	if fileEntry.File.MIME != "text/plain" {
+		t.Errorf("entries[0].File.MIME = %q, want %q", fileEntry.File.MIME, "text/plain")
+	}
+	if fileEntry.File.Mtime == "" {
+		t.Error("entries[0].File.Mtime is empty, expected non-empty mtime")
+	}
+
+	// Second entry: directory arm populated, file arm nil.
+	dirEntry := entries[1]
+	if dirEntry.Directory == nil {
+		t.Fatal("entries[1].Directory is nil, expected a populated Directory")
+	}
+	if dirEntry.File != nil {
+		t.Error("entries[1].File is non-nil, expected nil for a directory entry")
+	}
+	if dirEntry.Directory.Path != "/docs/sub" {
+		t.Errorf("entries[1].Directory.Path = %q, want %q", dirEntry.Directory.Path, "/docs/sub")
+	}
+	if dirEntry.Directory.Mtime == "" {
+		t.Error("entries[1].Directory.Mtime is empty, expected non-empty mtime")
+	}
+}
+
+// TestListDirUnionTwoPageAggregation verifies that ListDirectoryAll correctly
+// aggregates union entries across two pages, echoing the opaque cursor, and
+// returns all entries as []ListDirEntry.
+func TestListDirUnionTwoPageAggregation(t *testing.T) {
+	callCount := 0
+	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var respBody []byte
+		if callCount == 1 {
+			// Page 1: one file entry, cursor points to page 2.
+			respBody = []byte(`{
+				"entries": [{"file": {"path": "/f1", "uuid": "u1", "size": 10, "mtime": "2026-01-01T00:00:00Z"}}],
+				"cursor": "page2-cursor"
+			}`)
+		} else {
+			// Page 2: one directory entry, no cursor (last page).
+			respBody = []byte(`{
+				"entries": [{"directory": {"path": "/d1", "mtime": "2026-01-02T00:00:00Z"}}]
+			}`)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(respBody)
+	})
+
+	c, _ := New(sock, "fs-union-02")
+	entries, err := c.ListDirectoryAll(context.Background(), "/")
+	if err != nil {
+		t.Fatalf("ListDirectoryAll: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 entries from 2 pages, got %d", len(entries))
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 page calls, got %d", callCount)
+	}
+	// First: file entry; second: directory entry.
+	if entries[0].File == nil {
+		t.Error("entries[0].File is nil, expected file arm populated")
+	}
+	if entries[1].Directory == nil {
+		t.Error("entries[1].Directory is nil, expected directory arm populated")
 	}
 }
