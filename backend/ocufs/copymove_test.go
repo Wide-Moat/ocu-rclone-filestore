@@ -40,13 +40,13 @@ type fakeObjectInfoAt struct {
 	mtime    time.Time
 }
 
-func (o *fakeObjectInfoAt) Fs() fs.Info                                                  { return o.parentFs }
-func (o *fakeObjectInfoAt) String() string                                               { return o.remote }
-func (o *fakeObjectInfoAt) Remote() string                                               { return o.remote }
-func (o *fakeObjectInfoAt) ModTime(ctx context.Context) time.Time                        { return o.mtime }
-func (o *fakeObjectInfoAt) Size() int64                                                  { return o.size }
-func (o *fakeObjectInfoAt) Hash(ctx context.Context, ty hash.Type) (string, error)        { return "", nil }
-func (o *fakeObjectInfoAt) Storable() bool                                               { return true }
+func (o *fakeObjectInfoAt) Fs() fs.Info                                            { return o.parentFs }
+func (o *fakeObjectInfoAt) String() string                                         { return o.remote }
+func (o *fakeObjectInfoAt) Remote() string                                         { return o.remote }
+func (o *fakeObjectInfoAt) ModTime(ctx context.Context) time.Time                  { return o.mtime }
+func (o *fakeObjectInfoAt) Size() int64                                            { return o.size }
+func (o *fakeObjectInfoAt) Hash(ctx context.Context, ty hash.Type) (string, error) { return "", nil }
+func (o *fakeObjectInfoAt) Storable() bool                                         { return true }
 
 // ---------------------------------------------------------------------------
 // TestCopyCallsCopyFile — Copy maps onto CopyFile with the correct src/dst paths.
