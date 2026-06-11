@@ -242,6 +242,31 @@ func TestUploadResourceExhaustedIsRetryable(t *testing.T) {
 	}
 }
 
+// TestUploadToleratesResponseMessageFrame verifies that a successful upload
+// where the broker emits the optional response message frame (data flag 0x00,
+// a FileUploadResponse) before the end-stream trailer is accepted — the
+// standard Connect client-streaming success shape (MD-02). Reading the trailer
+// directly would have hard-failed on the leading 0x00 frame.
+func TestUploadToleratesResponseMessageFrame(t *testing.T) {
+	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		var buf bytes.Buffer
+		// Optional response message frame (flag 0x00) before the trailer.
+		msg, _ := json.Marshal(FileUploadResponse{File: FilesystemFile{Path: "/g.txt", Size: 1}})
+		_ = writeFrame(&buf, 0x00, msg)
+		_ = writeEndStream(&buf, nil)
+		w.Header().Set("Content-Type", "application/connect+json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buf.Bytes())
+	})
+
+	c, _ := New(sock, "fs-test-01")
+	err := c.Upload(context.Background(), "/g.txt", bytes.NewReader([]byte("x")), 1)
+	if err != nil {
+		t.Fatalf("upload with leading response message frame must succeed: %v", err)
+	}
+}
+
 // TestUploadEarlyTrailerSurvivesPipeError verifies that when the broker
 // terminates the upload early with a resource_exhausted trailer without
 // draining the request body (the SEC-46 throttle case), the retryable trailer

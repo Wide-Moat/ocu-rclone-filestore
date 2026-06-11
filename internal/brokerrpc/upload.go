@@ -98,7 +98,10 @@ func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBy
 	// io.ErrClosedPipe. A parseable error trailer must never be masked by that
 	// pipe-closure error, or the contractually retryable backpressure posture
 	// (D4/SEC-46) is destroyed.
-	esr, trailerErr := readEndStream(httpResp.Body)
+	// readUploadResult tolerates an optional response message frame (flag 0x00)
+	// before the trailer, the standard Connect client-streaming success shape;
+	// reading readEndStream directly would hard-fail on that leading frame.
+	esr, trailerErr := readUploadResult(httpResp.Body)
 	if trailerErr == nil && esr.Error != nil {
 		retryAfterRaw := httpResp.Header.Get("Retry-After")
 		return MapConnectError(esr.Error, retryAfterRaw)

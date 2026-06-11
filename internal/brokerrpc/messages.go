@@ -267,16 +267,21 @@ type MoveFileResponse = AckResponse
 // RemoveFileResponse is the bare-ack response for removeFile.
 type RemoveFileResponse = AckResponse
 
-// FileUploadResponse is the final response after a completed fileUpload stream.
+// FileUploadResponse is the optional response message frame (data flag 0x00)
+// the broker MAY emit before the EndStreamResponse trailer on a completed
+// fileUpload stream — the standard Connect client-streaming success shape. The
+// upload reader tolerates its presence or absence; the trailer carries the
+// authoritative success verdict (D5). It carries the assembled object's
+// metadata as a FilesystemFile (D6).
 type FileUploadResponse struct {
 	File FilesystemFile `json:"file"`
 }
 
-// FileDownloadResponse is the per-frame payload for a fileDownload stream.
-// The streaming frame envelope is wired in a later phase.
-type FileDownloadResponse struct {
-	File File `json:"file"`
-}
+// Note: fileDownload content frames carry {"data": <base64 bytes>}
+// (downloadContentFrame in download.go), per D5 — NOT a {"file": ...} unary
+// body. There is no separate per-frame download response type; the
+// FilesystemFile-bearing metadata, when present, rides the trailer/metadata
+// per D6.
 
 // ImportFilesResponse is the bare-ack response for importFiles.
 type ImportFilesResponse = AckResponse

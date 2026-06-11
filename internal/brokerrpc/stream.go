@@ -128,6 +128,38 @@ func readEndStream(r io.Reader) (*EndStreamResponse, error) {
 	return &esr, nil
 }
 
+// readUploadResult reads the response of a client-streaming op. Standard
+// Connect client-streaming success is an optional single response message frame
+// (data flag 0x00) followed by the end-stream frame (flag 0x02). The broker may
+// or may not emit the response message frame; this reader tolerates either
+// shape. When a message frame is present it is decoded into a FileUploadResponse
+// (and currently otherwise unused — the trailer carries the success verdict).
+// The returned EndStreamResponse trailer is authoritative for success/failure.
+func readUploadResult(r io.Reader) (*EndStreamResponse, error) {
+	flag, payload, err := readFrame(r)
+	if err != nil {
+		return nil, err
+	}
+
+	if flag != endStreamFlag {
+		// A leading data frame: the optional response message. Decode it into
+		// the declared response type so the shape is consumed, then read the
+		// trailer that must follow.
+		var msg FileUploadResponse
+		if jsonErr := json.Unmarshal(payload, &msg); jsonErr != nil {
+			return nil, fmt.Errorf("brokerrpc: parse fileUpload response message: %w", jsonErr)
+		}
+		return readEndStream(r)
+	}
+
+	// No response message frame: this frame is already the trailer.
+	var esr EndStreamResponse
+	if err := json.Unmarshal(payload, &esr); err != nil {
+		return nil, fmt.Errorf("brokerrpc: parse EndStreamResponse: %w", err)
+	}
+	return &esr, nil
+}
+
 // streamingURL constructs the POST URL for a streaming op.
 // Both fileUpload and fileDownload follow the same URL scheme as unary ops.
 func streamingURL(op Op) string {
