@@ -75,10 +75,15 @@ func TestSchemaConformance(t *testing.T) {
 }
 
 // TestVendoredSchemaParity asserts the vendored schema is byte-identical to the
-// canonical source via the parity script. It skips cleanly when the canon
-// checkout is absent so the hermetic CI run stays green.
+// canonical source via the parity script. The canon location comes only from
+// the OCU_ARCH_REPO environment variable (the same variable the script reads);
+// when it is unset or the checkout is absent, the test skips cleanly so the
+// hermetic CI run stays green.
 func TestVendoredSchemaParity(t *testing.T) {
-	repoRoot := canonRepoRoot()
+	repoRoot := os.Getenv("OCU_ARCH_REPO")
+	if repoRoot == "" {
+		t.Skip("OCU_ARCH_REPO unset; skipping vendored-schema parity (hermetic run). Set it to the architecture repo checkout to enable.")
+	}
 	canonPath := filepath.Join(repoRoot, "contracts", "storage", "mount-config.schema.json")
 	if _, err := os.Stat(canonPath); err != nil {
 		t.Skipf("canonical schema source absent at %s; skipping parity (hermetic run)", canonPath)
@@ -93,13 +98,4 @@ func TestVendoredSchemaParity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parity script failed: %v\n%s", err, out)
 	}
-}
-
-// canonRepoRoot resolves the canonical architecture repo root, honoring the
-// OCU_ARCH_REPO override the parity script also reads.
-func canonRepoRoot() string {
-	if v := os.Getenv("OCU_ARCH_REPO"); v != "" {
-		return v
-	}
-	return "/Users/nick/open-computer-use"
 }

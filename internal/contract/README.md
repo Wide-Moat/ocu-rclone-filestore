@@ -31,9 +31,13 @@ a document carrying `auth_token` fails it.
 
 ## Refresh procedure
 
+Set `OCU_ARCH_REPO` to wherever the architecture repo is checked out; the
+parity script and test read the same variable and skip with a notice when it
+is unset (hermetic run).
+
 1. Re-copy the file from the canonical source:
-   `cp "${OCU_ARCH_REPO:-/Users/nick/open-computer-use}/contracts/storage/mount-config.schema.json" internal/contract/testdata/mount-config.schema.json`
+   `cp "${OCU_ARCH_REPO}/contracts/storage/mount-config.schema.json" internal/contract/testdata/mount-config.schema.json`
 2. Update the "Copied at commit" hash above to the canon `HEAD` at copy time
-   (`git -C "${OCU_ARCH_REPO:-/Users/nick/open-computer-use}" rev-parse HEAD`).
+   (`git -C "${OCU_ARCH_REPO}" rev-parse HEAD`).
 3. Re-run the parity check: `bash scripts/check-contract-parity.sh`.
 4. Re-run the conformance test: `go test ./internal/contract/`.

@@ -11,13 +11,21 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENDORED="${REPO_ROOT}/internal/contract/testdata/mount-config.schema.json"
 
-CANON_ROOT="${OCU_ARCH_REPO:-/Users/nick/open-computer-use}"
-CANON="${CANON_ROOT}/contracts/storage/mount-config.schema.json"
+# The canon location comes only from the environment; there is no default
+# path. An unset variable is a hermetic run, not an error.
+CANON_ROOT="${OCU_ARCH_REPO:-}"
 
 if [[ ! -f "${VENDORED}" ]]; then
   echo "error: vendored schema missing at ${VENDORED}" >&2
   exit 1
 fi
+
+if [[ -z "${CANON_ROOT}" ]]; then
+  echo "notice: OCU_ARCH_REPO is unset; skipping parity check (hermetic run). Set it to the architecture repo checkout to enable."
+  exit 0
+fi
+
+CANON="${CANON_ROOT}/contracts/storage/mount-config.schema.json"
 
 if [[ ! -f "${CANON}" ]]; then
   echo "notice: canonical schema source absent at ${CANON}; skipping parity check (hermetic run)."
