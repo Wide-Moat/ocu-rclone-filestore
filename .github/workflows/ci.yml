@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Core build/test gate. Every pull request (and push to main) builds for
+# linux/amd64 and linux/arm64, vets, tests with coverage, ratchets coverage
+# against the recorded floor, asserts the build-graph denylist, and checks
+# that every authored file carries the FSL header.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux]
+        goarch: [amd64, arm64]
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build (cross-compile, build-only)
+        run: go build ./...
+
+  test:
+    name: vet + test + coverage ratchet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet
+        run: go vet ./...
+      - name: Test with race + coverage
+        run: go test ./... -race -coverprofile=cover.out
+      - name: Coverage ratchet
+        env:
+          COVERAGE_PROFILE: cover.out
+        run: go test ./internal/coverage/ -run TestCoverageRatchet -count=1
+
+  denylist:
+    name: build-graph denylist
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: No foreign object-store client in the dependency graph
+        run: go test ./internal/buildgraph/ -run TestNoForeignObjectStore -count=1
+
+  fsl-headers:
+    name: authored-file FSL-header gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check FSL headers
+        run: bash scripts/check-fsl-headers.sh

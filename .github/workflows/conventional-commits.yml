@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Conventional-commits gate. Runs commitlint over every commit in the pull
+# request using the ruleset in .commitlintrc.yml.
+
+name: conventional-commits
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  commitlint:
+    name: commitlint (PR commits)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for the PR range)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "20"
+      - name: Install commitlint
+        run: npm install --no-save @commitlint/cli@19.6.1 @commitlint/config-conventional@19.6.0
+      - name: Lint PR commits
+        run: |
+          npx commitlint \
+            --config .commitlintrc.yml \
+            --from "${{ github.event.pull_request.base.sha }}" \
+            --to "${{ github.event.pull_request.head.sha }}" \
+            --verbose

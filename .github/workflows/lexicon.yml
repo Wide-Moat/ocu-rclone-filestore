@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Naming-denylist gate. A thin caller of scripts/lexicon-scan.sh: it passes
+# the LEXICON_DENYLIST repository secret into the environment and runs the
+# shared scan. All scan logic lives in the script so the behavior is the same
+# locally and in CI. With the secret unset the scan skips with a notice; with
+# a denied term present it fails without ever echoing the term value.
+
+name: lexicon
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lexicon-scan:
+    name: lexicon naming gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Run lexicon scan
+        env:
+          LEXICON_DENYLIST: ${{ secrets.LEXICON_DENYLIST }}
+        run: bash scripts/lexicon-scan.sh

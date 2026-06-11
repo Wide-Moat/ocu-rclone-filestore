@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Conventional-commit ruleset enforced over pull-request commits by
+# .github/workflows/conventional-commits.yml.
+
+extends:
+  - "@commitlint/config-conventional"
+
+rules:
+  # Allow the commit types this repository uses.
+  type-enum:
+    - 2
+    - always
+    - - build
+      - chore
+      - ci
+      - docs
+      - feat
+      - fix
+      - perf
+      - refactor
+      - revert
+      - style
+      - test
+  # Subject must not be empty and must not end with a period.
+  subject-empty:
+    - 2
+    - never
+  subject-full-stop:
+    - 2
+    - never
+    - "."
+  # Keep the header readable.
+  header-max-length:
+    - 2
+    - always
+    - 100
