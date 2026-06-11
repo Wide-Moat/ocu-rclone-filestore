@@ -79,9 +79,18 @@ func (c *Client) call(ctx context.Context, op Op, req, resp interface{}) error {
 	}
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
-		// Minimal error for the happy-path scope of this plan. Full
-		// closed-code mapping (D4) is wired in plan 02-02.
-		return fmt.Errorf("brokerrpc: %s: non-2xx status %d: %s", op, httpResp.StatusCode, string(respBody))
+		// Non-2xx unary error: decode the Connect error body and run it
+		// through the closed-code mapper (D4). The Retry-After header is
+		// present only on resource_exhausted per the locked contract.
+		var ce ConnectError
+		if jsonErr := json.Unmarshal(respBody, &ce); jsonErr != nil || ce.Code == "" {
+			// Body is not a parseable Connect error: fall back to a plain
+			// permanent error wrapping the raw body.
+			return fmt.Errorf("%w: %s: status %d: %s",
+				ErrPermanentOther, op, httpResp.StatusCode, string(respBody))
+		}
+		retryAfterRaw := httpResp.Header.Get("Retry-After")
+		return MapConnectError(&ce, retryAfterRaw)
 	}
 
 	if resp != nil {
