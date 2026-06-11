@@ -5,15 +5,18 @@
 package ocufs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/brokerrpc"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/hash"
 )
 
 // ---------------------------------------------------------------------------
@@ -526,5 +529,222 @@ func TestDirectOpenNoResolve(t *testing.T) {
 	}
 	if c.downloadRangeCount != 1 {
 		t.Errorf("DownloadRange called %d times, want 1", c.downloadRangeCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// fakeObjectInfo — minimal fs.ObjectInfo for Put/Update tests.
+// ---------------------------------------------------------------------------
+
+type fakeObjectInfo struct {
+	remote string
+	size   int64
+}
+
+func (f *fakeObjectInfo) Fs() fs.Info                                   { return nil }
+func (f *fakeObjectInfo) String() string                                 { return f.remote }
+func (f *fakeObjectInfo) Remote() string                                 { return f.remote }
+func (f *fakeObjectInfo) ModTime(ctx context.Context) time.Time          { return time.Time{} }
+func (f *fakeObjectInfo) Size() int64                                    { return f.size }
+func (f *fakeObjectInfo) Hash(ctx context.Context, t hash.Type) (string, error) { return "", nil }
+func (f *fakeObjectInfo) Storable() bool                                 { return true }
+
+// ---------------------------------------------------------------------------
+// Task 3: Read-only guard tests
+// ---------------------------------------------------------------------------
+
+// TestReadOnlyGuardAllMutatingMethods verifies that on a read-only Fs every
+// mutating method returns a permission error AND the double's client call
+// counter stays 0 (no RPC constructed before the guard fires, BE-02 / T-03-01).
+func TestReadOnlyGuardAllMutatingMethods(t *testing.T) {
+	c := &fakeClient{}
+	f := newTestFs(t, c, true) // read-only
+
+	// Build an Object owned by this read-only Fs.
+	obj := &Object{
+		fs:   f,
+		path: "/ro/file.bin",
+		uuid: "uuid-ro",
+		size: 100,
+	}
+
+	src := &fakeObjectInfo{remote: "ro/file.bin", size: 100}
+	body := bytes.NewReader([]byte("data"))
+
+	// Fs.Put
+	_, err := f.Put(context.Background(), body, src)
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("Put on read-only: got %v, want fs.ErrorPermissionDenied", err)
+	}
+
+	// Fs.Mkdir
+	err = f.Mkdir(context.Background(), "newdir")
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("Mkdir on read-only: got %v, want fs.ErrorPermissionDenied", err)
+	}
+
+	// Fs.Rmdir
+	err = f.Rmdir(context.Background(), "olddir")
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("Rmdir on read-only: got %v, want fs.ErrorPermissionDenied", err)
+	}
+
+	// Object.Update
+	err = obj.Update(context.Background(), body, src)
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("Update on read-only: got %v, want fs.ErrorPermissionDenied", err)
+	}
+
+	// Object.Remove
+	err = obj.Remove(context.Background())
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("Remove on read-only: got %v, want fs.ErrorPermissionDenied", err)
+	}
+
+	// Object.SetModTime
+	err = obj.SetModTime(context.Background(), time.Now())
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("SetModTime on read-only: got %v, want fs.ErrorPermissionDenied", err)
+	}
+
+	// Assert ZERO client calls for ALL mutating methods (guard fired before any RPC).
+	total := c.totalMutatingCalls()
+	if total != 0 {
+		t.Errorf("total mutating client calls on read-only Fs = %d, want 0", total)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 3: Writable body tests
+// ---------------------------------------------------------------------------
+
+// TestWritablePathPutInvokesUpload verifies that Put on a writable Fs invokes
+// Upload with the correct path and size.
+func TestWritablePathPutInvokesUpload(t *testing.T) {
+	c := &fakeClient{}
+	f := newTestFs(t, c, false) // writable
+	f.root = "/"
+
+	content := []byte("file content here")
+	src := &fakeObjectInfo{remote: "subdir/newfile.txt", size: int64(len(content))}
+	body := bytes.NewReader(content)
+
+	obj, err := f.Put(context.Background(), body, src)
+	if err != nil {
+		t.Fatalf("Put on writable Fs: %v", err)
+	}
+	if obj == nil {
+		t.Fatal("Put returned nil object")
+	}
+	if c.uploadCount != 1 {
+		t.Errorf("Upload called %d times, want 1", c.uploadCount)
+	}
+	if !strings.Contains(c.lastUploadPath, "newfile.txt") {
+		t.Errorf("Upload path = %q, want path containing %q", c.lastUploadPath, "newfile.txt")
+	}
+	if c.lastUploadSize != int64(len(content)) {
+		t.Errorf("Upload totalBytes = %d, want %d", c.lastUploadSize, len(content))
+	}
+}
+
+// TestWritablePathUpdateInvokesUpload verifies that Object.Update on a
+// writable Fs invokes Upload (in-place overwrite at the same path).
+func TestWritablePathUpdateInvokesUpload(t *testing.T) {
+	c := &fakeClient{}
+	f := newTestFs(t, c, false)
+
+	content := []byte("updated content")
+	obj := &Object{
+		fs:   f,
+		path: "/docs/file.txt",
+		uuid: "uuid-update",
+		size: 100,
+	}
+	src := &fakeObjectInfo{remote: "docs/file.txt", size: int64(len(content))}
+
+	err := obj.Update(context.Background(), bytes.NewReader(content), src)
+	if err != nil {
+		t.Fatalf("Update on writable Fs: %v", err)
+	}
+	if c.uploadCount != 1 {
+		t.Errorf("Upload called %d times, want 1", c.uploadCount)
+	}
+	if c.lastUploadPath != "/docs/file.txt" {
+		t.Errorf("Upload path = %q, want %q", c.lastUploadPath, "/docs/file.txt")
+	}
+}
+
+// TestWritablePathRemoveInvokesRemoveFile verifies that Object.Remove on a
+// writable Fs invokes RemoveFile at the object's path.
+func TestWritablePathRemoveInvokesRemoveFile(t *testing.T) {
+	c := &fakeClient{}
+	f := newTestFs(t, c, false)
+
+	obj := &Object{fs: f, path: "/to/delete.txt", uuid: "uuid-del", size: 10}
+	err := obj.Remove(context.Background())
+	if err != nil {
+		t.Fatalf("Remove on writable Fs: %v", err)
+	}
+	if c.removeFileCount != 1 {
+		t.Errorf("RemoveFile called %d times, want 1", c.removeFileCount)
+	}
+	if c.lastRemoveFilePath != "/to/delete.txt" {
+		t.Errorf("RemoveFile path = %q, want %q", c.lastRemoveFilePath, "/to/delete.txt")
+	}
+}
+
+// TestWritablePathMkdirInvokesMakeDirectory verifies that Fs.Mkdir on a
+// writable Fs invokes MakeDirectory at the resolved path.
+func TestWritablePathMkdirInvokesMakeDirectory(t *testing.T) {
+	c := &fakeClient{}
+	f := newTestFs(t, c, false)
+	f.root = "/"
+
+	err := f.Mkdir(context.Background(), "newdir")
+	if err != nil {
+		t.Fatalf("Mkdir on writable Fs: %v", err)
+	}
+	if c.makeDirectoryCount != 1 {
+		t.Errorf("MakeDirectory called %d times, want 1", c.makeDirectoryCount)
+	}
+	if c.lastMakeDirectoryPath != "/newdir" {
+		t.Errorf("MakeDirectory path = %q, want %q", c.lastMakeDirectoryPath, "/newdir")
+	}
+}
+
+// TestWritablePathRmdirInvokesRemoveDirectory verifies that Fs.Rmdir on a
+// writable Fs invokes RemoveDirectory at the resolved path.
+func TestWritablePathRmdirInvokesRemoveDirectory(t *testing.T) {
+	c := &fakeClient{}
+	f := newTestFs(t, c, false)
+	f.root = "/"
+
+	err := f.Rmdir(context.Background(), "olddir")
+	if err != nil {
+		t.Fatalf("Rmdir on writable Fs: %v", err)
+	}
+	if c.removeDirectoryCount != 1 {
+		t.Errorf("RemoveDirectory called %d times, want 1", c.removeDirectoryCount)
+	}
+	if c.lastRemoveDirectoryPath != "/olddir" {
+		t.Errorf("RemoveDirectory path = %q, want %q", c.lastRemoveDirectoryPath, "/olddir")
+	}
+}
+
+// TestSetModTimeWritableReturnsErrorCantSetModTime verifies that
+// Object.SetModTime on a WRITABLE Fs returns fs.ErrorCantSetModTime and
+// invokes ZERO client calls (no broker op sets mtime, design decision 8).
+func TestSetModTimeWritableReturnsErrorCantSetModTime(t *testing.T) {
+	c := &fakeClient{}
+	f := newTestFs(t, c, false) // writable
+
+	obj := &Object{fs: f, path: "/file.txt", uuid: "uuid-smt", size: 100}
+	err := obj.SetModTime(context.Background(), time.Now())
+	if !errors.Is(err, fs.ErrorCantSetModTime) {
+		t.Errorf("SetModTime on writable Fs: got %v, want fs.ErrorCantSetModTime", err)
+	}
+	total := c.totalMutatingCalls()
+	if total != 0 {
+		t.Errorf("SetModTime called %d client methods, want 0 (no broker op sets mtime)", total)
 	}
 }
