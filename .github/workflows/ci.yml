@@ -53,7 +53,10 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test with race + coverage
-        run: go test ./... -race -coverprofile=cover.out
+        # -coverpkg=./... puts every package in the coverage denominator, so a
+        # package added without tests lowers the total instead of being
+        # invisible to the ratchet.
+        run: go test ./... -race -coverprofile=cover.out -coverpkg=./...
       - name: Coverage ratchet
         env:
           COVERAGE_PROFILE: cover.out
