@@ -29,16 +29,31 @@ if [[ -z "${LEXICON_DENYLIST:-}" ]]; then
 fi
 
 # Collect the matching file paths without ever emitting the matched term.
-# grep is run per term with the term supplied via a here-string so it never
-# appears in the process list; -I skips binary files, -l prints only paths,
-# -r recurses, -i is case-insensitive. The .git directory is excluded.
+# grep is run per term. -F matches the term as a fixed string, never a regular
+# expression, so metacharacters in a term cannot change (or break) the match;
+# the term is delivered as a pattern file on stdin (-f -) so it never appears
+# in the process argv. -I skips binary files, -l prints only paths, -r
+# recurses, -i is case-insensitive. The .git directory is excluded.
+#
+# Exit-code discipline (fail closed): grep exits 0 on a match (a hit), 1 on no
+# match (clean), and >=2 on an error. An error must fail the scan — a swallowed
+# grep failure would report green over a real hit.
 hit_paths=()
 while IFS= read -r term; do
   [[ -z "${term}" ]] && continue
+  set +e
+  paths="$(printf '%s\n' "${term}" | grep -rIilF --exclude-dir=.git -f - "${SCAN_ROOT}" 2>/dev/null)"
+  rc=$?
+  set -e
+  if [[ ${rc} -ge 2 ]]; then
+    echo "error: lexicon scan could not evaluate a denylist term (grep exit ${rc}); failing closed. The term value is intentionally not printed." >&2
+    exit 1
+  fi
+  [[ ${rc} -ne 0 ]] && continue
   while IFS= read -r path; do
     [[ -z "${path}" ]] && continue
     hit_paths+=("${path}")
-  done < <(grep -rIil --exclude-dir=.git -e "${term}" "${SCAN_ROOT}" 2>/dev/null || true)
+  done <<< "${paths}"
 done <<< "${LEXICON_DENYLIST}"
 
 if [[ ${#hit_paths[@]} -gt 0 ]]; then

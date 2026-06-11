@@ -52,5 +52,46 @@ echo "${combined_b}" | grep -q "sample.txt" \
   || fail "scan should report the matching file path"
 echo "PASS (b): throwaway-term hit exits non-zero and never leaks the term value"
 
+# ── (c) regex-metacharacter terms are matched as fixed strings ───────────────
+# A term shaped like an invalid regular expression (unclosed bracket) that is
+# literally present must be caught: terms are fixed strings, never patterns,
+# and a grep evaluation error must fail the scan rather than report green.
+THROWAWAY_BRACKET="foo[bar"
+printf 'content with %s literally embedded\n' "${THROWAWAY_BRACKET}" \
+  > "${TMPDIR_TEST}/bracket.txt"
+
+set +e
+combined_c="$(LEXICON_DENYLIST="${THROWAWAY_BRACKET}" bash "${SCAN}" "${TMPDIR_TEST}" 2>&1)"
+rc_c=$?
+set -e
+[[ ${rc_c} -ne 0 ]] \
+  || fail "invalid-regex-shaped term literally present should exit non-zero, got ${rc_c}"
+if printf '%s' "${combined_c}" | grep -qF "${THROWAWAY_BRACKET}"; then
+  fail "no-leak violated: regex-shaped token value appeared in scan output"
+fi
+echo "${combined_c}" | grep -q "bracket.txt" \
+  || fail "scan should report the matching file path for the regex-shaped term"
+echo "PASS (c): invalid-regex-shaped term is caught as a fixed string, no leak"
+
+# ── (d) a star-bearing term matches its literal occurrence ───────────────────
+# Under regex semantics 'b*' would never match a literal '*'; fixed-string
+# matching must catch the literal occurrence.
+THROWAWAY_STAR="zzqab*cdzzq"
+printf 'content with %s literally embedded\n' "${THROWAWAY_STAR}" \
+  > "${TMPDIR_TEST}/star.txt"
+
+set +e
+combined_d="$(LEXICON_DENYLIST="${THROWAWAY_STAR}" bash "${SCAN}" "${TMPDIR_TEST}" 2>&1)"
+rc_d=$?
+set -e
+[[ ${rc_d} -ne 0 ]] \
+  || fail "star-bearing term literally present should exit non-zero, got ${rc_d}"
+if printf '%s' "${combined_d}" | grep -qF "${THROWAWAY_STAR}"; then
+  fail "no-leak violated: star-bearing token value appeared in scan output"
+fi
+echo "${combined_d}" | grep -q "star.txt" \
+  || fail "scan should report the matching file path for the star-bearing term"
+echo "PASS (d): star-bearing term is caught as a fixed string, no leak"
+
 echo "ALL PASS: lexicon-scan.sh contract verified"
 exit 0
