@@ -211,6 +211,49 @@ func TestDownloadTruncatedStreamErrors(t *testing.T) {
 	}
 }
 
+// downloadRangeContentServer serves the given content as a single download
+// content frame followed by a success trailer.
+func downloadRangeContentServer(t *testing.T, content []byte) string {
+	t.Helper()
+	return uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		frame, _ := json.Marshal(map[string][]byte{"data": content})
+		_ = writeFrame(&buf, 0x00, frame)
+		_ = writeEndStream(&buf, nil)
+		w.Header().Set("Content-Type", "application/connect+json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buf.Bytes())
+	})
+}
+
+// TestDownloadRangeNegativeLength verifies that a negative length returns an
+// error rather than panicking the process (HI-02). A make([]byte, negative)
+// would crash the entire mount instead of returning EINVAL to the VFS.
+func TestDownloadRangeNegativeLength(t *testing.T) {
+	sock := downloadRangeContentServer(t, []byte("abcdefghij"))
+	c, _ := New(sock, "fs-dl-01")
+	got, err := c.DownloadRange(context.Background(), "uuid-abc", 5, -3)
+	if err == nil {
+		t.Fatalf("expected error on negative length, got nil with content %q", got)
+	}
+}
+
+// TestDownloadRangePastEOF verifies that a length extending past EOF is clamped
+// to the remaining bytes rather than panicking or over-reading (HI-02).
+func TestDownloadRangePastEOF(t *testing.T) {
+	content := []byte("abcdefghij") // 10 bytes
+	sock := downloadRangeContentServer(t, content)
+	c, _ := New(sock, "fs-dl-01")
+	// Offset 7, length 100 → expect the final 3 bytes "hij".
+	got, err := c.DownloadRange(context.Background(), "uuid-abc", 7, 100)
+	if err != nil {
+		t.Fatalf("DownloadRange past EOF: %v", err)
+	}
+	if want := content[7:]; !bytes.Equal(got, want) {
+		t.Errorf("range past EOF: got %q, want %q", got, want)
+	}
+}
+
 // TestDownloadTrailerDeterminesSuccess verifies that success/failure comes from
 // the EndStreamResponse trailer, not the HTTP status (streams always 200).
 func TestDownloadTrailerDeterminesSuccess(t *testing.T) {

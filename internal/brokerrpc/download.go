@@ -77,12 +77,18 @@ func (c *Client) DownloadRange(ctx context.Context, uuid string, offset, length 
 	if offset < 0 || offset > size {
 		return nil, fmt.Errorf("brokerrpc: DownloadRange: offset %d out of bounds (size %d)", offset, size)
 	}
-	end := offset + length
-	if end > size {
-		end = size
+	if length < 0 {
+		return nil, fmt.Errorf("brokerrpc: DownloadRange: negative length %d", length)
 	}
-	out := make([]byte, end-offset)
-	copy(out, full[offset:end])
+	// Clamp the length to what remains after offset. The offset check above
+	// guarantees size-offset is non-negative, which also makes offset+length
+	// overflow into a negative end (and the resulting make([]byte, negative)
+	// panic) impossible.
+	if length > size-offset {
+		length = size - offset
+	}
+	out := make([]byte, length)
+	copy(out, full[offset:offset+length])
 	return out, nil
 }
 
