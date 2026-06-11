@@ -505,10 +505,10 @@ func TestDirectOpenNoResolve(t *testing.T) {
 	// Build a List-derived Object with uuid pre-set (simulates what List produces).
 	f := newTestFs(t, c, false)
 	obj := &Object{
-		fs:   f,
-		path: "/docs/file.txt",
-		uuid: "direct-uuid-001",
-		size: 7,
+		fs:    f,
+		path:  "/docs/file.txt",
+		uuid:  "direct-uuid-001",
+		size:  7,
 		mtime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 
@@ -541,13 +541,13 @@ type fakeObjectInfo struct {
 	size   int64
 }
 
-func (f *fakeObjectInfo) Fs() fs.Info                                   { return nil }
-func (f *fakeObjectInfo) String() string                                 { return f.remote }
-func (f *fakeObjectInfo) Remote() string                                 { return f.remote }
-func (f *fakeObjectInfo) ModTime(ctx context.Context) time.Time          { return time.Time{} }
-func (f *fakeObjectInfo) Size() int64                                    { return f.size }
+func (f *fakeObjectInfo) Fs() fs.Info                                           { return nil }
+func (f *fakeObjectInfo) String() string                                        { return f.remote }
+func (f *fakeObjectInfo) Remote() string                                        { return f.remote }
+func (f *fakeObjectInfo) ModTime(ctx context.Context) time.Time                 { return time.Time{} }
+func (f *fakeObjectInfo) Size() int64                                           { return f.size }
 func (f *fakeObjectInfo) Hash(ctx context.Context, t hash.Type) (string, error) { return "", nil }
-func (f *fakeObjectInfo) Storable() bool                                 { return true }
+func (f *fakeObjectInfo) Storable() bool                                        { return true }
 
 // ---------------------------------------------------------------------------
 // Task 3: Read-only guard tests
@@ -746,5 +746,190 @@ func TestSetModTimeWritableReturnsErrorCantSetModTime(t *testing.T) {
 	total := c.totalMutatingCalls()
 	if total != 0 {
 		t.Errorf("SetModTime called %d client methods, want 0 (no broker op sets mtime)", total)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fs Info accessor coverage
+// ---------------------------------------------------------------------------
+
+// TestFsInfoAccessors exercises the simple Info methods on an Fs so the
+// coverage tool counts them as reached.
+func TestFsInfoAccessors(t *testing.T) {
+	f := newTestFs(t, &fakeClient{}, false)
+	f.name = "testfs"
+	f.root = "/testroot"
+
+	if f.Name() != "testfs" {
+		t.Errorf("Name() = %q, want %q", f.Name(), "testfs")
+	}
+	if f.Root() != "/testroot" {
+		t.Errorf("Root() = %q, want %q", f.Root(), "/testroot")
+	}
+	if f.String() == "" {
+		t.Error("String() returned empty string")
+	}
+	if f.Precision() <= 0 {
+		t.Errorf("Precision() = %v, want > 0", f.Precision())
+	}
+	if hashes := f.Hashes(); hashes.Count() != 0 {
+		t.Errorf("Hashes().Count() = %d, want 0 (hash.None)", hashes.Count())
+	}
+	feats := f.Features()
+	if feats == nil {
+		t.Error("Features() returned nil")
+	}
+}
+
+// TestObjectAccessors exercises the simple accessor methods on an Object so
+// the coverage tool counts them as reached.
+func TestObjectAccessors(t *testing.T) {
+	f := newTestFs(t, &fakeClient{}, false)
+	mtime := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	obj := &Object{
+		fs:     f,
+		path:   "/docs/file.txt",
+		remote: "docs/file.txt",
+		uuid:   "acc-uuid",
+		size:   256,
+		mtime:  mtime,
+		mime:   "text/plain",
+	}
+
+	if obj.Fs() != f {
+		t.Error("Fs() does not return the parent Fs")
+	}
+	if obj.String() != "/docs/file.txt" {
+		t.Errorf("String() = %q, want %q", obj.String(), "/docs/file.txt")
+	}
+	if obj.Remote() != "docs/file.txt" {
+		t.Errorf("Remote() = %q, want %q", obj.Remote(), "docs/file.txt")
+	}
+	if obj.Size() != 256 {
+		t.Errorf("Size() = %d, want 256", obj.Size())
+	}
+	if obj.ModTime(context.Background()) != mtime {
+		t.Errorf("ModTime() = %v, want %v", obj.ModTime(context.Background()), mtime)
+	}
+	if !obj.Storable() {
+		t.Error("Storable() returned false, want true")
+	}
+	h, err := obj.Hash(context.Background(), 0)
+	if err != nil {
+		t.Errorf("Hash() returned error: %v", err)
+	}
+	if h != "" {
+		t.Errorf("Hash() = %q, want empty (hash.None)", h)
+	}
+}
+
+// TestModTimeResolvesFallback verifies that calling ModTime on a uuid-less
+// Object triggers the fallback resolve (ReadMetadata call).
+func TestModTimeResolvesFallback(t *testing.T) {
+	c := &fakeClient{}
+	want := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		return &brokerrpc.ReadMetadataResponse{
+			File: brokerrpc.File{
+				UUID:  "resolved-uuid",
+				Size:  100,
+				Path:  path,
+				Mtime: want.Format(time.RFC3339),
+			},
+		}, nil
+	}
+
+	f := newTestFs(t, c, false)
+	obj := &Object{fs: f, path: "/file.txt", uuid: ""}
+	got := obj.ModTime(context.Background())
+	if got != want {
+		t.Errorf("ModTime (via resolve) = %v, want %v", got, want)
+	}
+}
+
+// TestParseMtimeFallbacks verifies parseMtime handles RFC3339 (no nano) and
+// bad input gracefully (zero time on bad input — tolerant decode per LD-2).
+func TestParseMtimeFallbacks(t *testing.T) {
+	// RFC3339 (no nano) should parse fine.
+	t1 := parseMtime("2026-01-15T10:00:00Z")
+	if t1.IsZero() {
+		t.Error("parseMtime(RFC3339) returned zero time, want non-zero")
+	}
+
+	// Bad input returns zero time (tolerant, not an error).
+	t2 := parseMtime("not-a-date")
+	if !t2.IsZero() {
+		t.Errorf("parseMtime(bad) = %v, want zero time", t2)
+	}
+
+	// Empty string returns zero time.
+	t3 := parseMtime("")
+	if !t3.IsZero() {
+		t.Errorf("parseMtime(\"\") = %v, want zero time", t3)
+	}
+}
+
+// TestImmediateChildRemoteRootPath verifies that entries at the root level
+// (parentPath = "/") are accepted as immediate children.
+func TestImmediateChildRemoteRootPath(t *testing.T) {
+	root := "/"
+	dir := ""
+
+	fileEntry := brokerrpc.ListDirEntry{
+		File: &brokerrpc.FilesystemFile{Path: "/file.txt"},
+	}
+	remote, ok := immediateChildRemote(root, dir, fileEntry)
+	if !ok {
+		t.Fatal("immediateChildRemote for root-level file returned false, want true")
+	}
+	if remote != "file.txt" {
+		t.Errorf("remote = %q, want %q", remote, "file.txt")
+	}
+
+	// A deeper path at root should be filtered out.
+	deepEntry := brokerrpc.ListDirEntry{
+		File: &brokerrpc.FilesystemFile{Path: "/a/b/file.txt"},
+	}
+	_, ok = immediateChildRemote(root, dir, deepEntry)
+	if ok {
+		t.Error("immediateChildRemote for deeply nested path returned true, want false")
+	}
+}
+
+// TestListPathErrorPropagated verifies that an error from ListDirectoryAll
+// is surfaced by List.
+func TestListPathErrorPropagated(t *testing.T) {
+	c := &fakeClient{}
+	c.listDirectoryAllResult = func(ctx context.Context, path string) ([]brokerrpc.ListDirEntry, error) {
+		return nil, brokerrpc.ErrPermissionDenied
+	}
+
+	f := newTestFs(t, c, false)
+	_, err := f.List(context.Background(), "subdir")
+	if err == nil {
+		t.Fatal("List expected error from ListDirectoryAll, got nil")
+	}
+}
+
+// TestAbsPathHelper exercises absPath with edge cases.
+func TestAbsPathHelper(t *testing.T) {
+	if got := absPath("/root", "sub"); got != "/root/sub" {
+		t.Errorf("absPath(\"/root\", \"sub\") = %q, want %q", got, "/root/sub")
+	}
+	if got := absPath("/root", ""); got != "/root" {
+		t.Errorf("absPath(\"/root\", \"\") = %q, want %q", got, "/root")
+	}
+	if got := absPath("/", ""); got != "/" {
+		t.Errorf("absPath(\"/\", \"\") = %q, want %q", got, "/")
+	}
+}
+
+// TestNewObjectMissingFilesystemID ensures NewFs returns an error when both
+// socket_path and filesystem_id are present but value is empty.
+func TestNewFsBothMissing(t *testing.T) {
+	m := configmap.Simple{}
+	_, err := NewFs(context.Background(), "test", "/", m)
+	if err == nil {
+		t.Fatal("NewFs with empty configmap returned nil error, want error")
 	}
 }
