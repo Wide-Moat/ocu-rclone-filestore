@@ -63,6 +63,19 @@ func (e *ErrMountScope) Error() string {
 	}
 }
 
+// ErrScopeID reports a scope id (filesystem_id or memory_store_id) that is
+// present but empty. The scope XOR keys on field presence; a present id must
+// still be a non-empty string.
+type ErrScopeID struct {
+	Array mountArray
+	Index int
+	Field string
+}
+
+func (e *ErrScopeID) Error() string {
+	return fmt.Sprintf("%s[%d] %s is present but empty; a scope id must be a non-empty string", e.Array, e.Index, e.Field)
+}
+
 // ErrPerms reports a dir_perms or file_perms value that is not an octal string.
 type ErrPerms struct {
 	Array mountArray

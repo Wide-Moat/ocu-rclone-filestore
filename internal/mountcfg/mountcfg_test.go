@@ -127,6 +127,42 @@ func TestLoad(t *testing.T) {
 			wantErr: new(*ErrDecode),
 		},
 		{
+			name:    "empty filesystem_id beside memory_store_id trips the both-set error (CFG-02)",
+			fixture: "invalid_empty_fs_with_mem.json",
+			wantErr: new(*ErrMountScope),
+			assert: func(t *testing.T, err error) {
+				var e *ErrMountScope
+				errors.As(err, &e)
+				if !e.HasFilesystem || !e.HasMemory {
+					t.Fatalf("expected both keys flagged present, got %+v", e)
+				}
+			},
+		},
+		{
+			name:    "present-but-empty filesystem_id rejected (CFG-02)",
+			fixture: "invalid_empty_fs_id.json",
+			wantErr: new(*ErrScopeID),
+			assert: func(t *testing.T, err error) {
+				var e *ErrScopeID
+				errors.As(err, &e)
+				if e.Field != "filesystem_id" {
+					t.Fatalf("expected filesystem_id flagged, got %+v", e)
+				}
+			},
+		},
+		{
+			name:    "present-but-empty memory_store_id rejected (CFG-02)",
+			fixture: "invalid_empty_mem_id.json",
+			wantErr: new(*ErrScopeID),
+			assert: func(t *testing.T, err error) {
+				var e *ErrScopeID
+				errors.As(err, &e)
+				if e.Field != "memory_store_id" {
+					t.Fatalf("expected memory_store_id flagged, got %+v", e)
+				}
+			},
+		},
+		{
 			name:    "missing mounts key rejected (CFG-02)",
 			fixture: "invalid_missing_mounts.json",
 			wantErr: new(*ErrMissingField),

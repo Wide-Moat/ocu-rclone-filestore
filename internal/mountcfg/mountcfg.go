@@ -178,10 +178,20 @@ func validateMount(arr mountArray, i int, m Mount, wantWrites bool) error {
 		return &ErrDestination{Array: arr, Index: i, Value: m.Destination}
 	}
 
-	hasFS := m.FilesystemID != nil && *m.FilesystemID != ""
-	hasMem := m.MemoryStoreID != nil && *m.MemoryStoreID != ""
-	if hasFS == hasMem { // both set or neither set
+	// The scope XOR keys on presence of the field, exactly as the schema's
+	// oneOf does: an explicit empty string is present and still trips the
+	// both-set error. A present-but-empty id is separately invalid (the schema
+	// requires minLength 1).
+	hasFS := m.FilesystemID != nil
+	hasMem := m.MemoryStoreID != nil
+	if hasFS == hasMem { // both present or neither present
 		return &ErrMountScope{Array: arr, Index: i, HasFilesystem: hasFS, HasMemory: hasMem}
+	}
+	if hasFS && *m.FilesystemID == "" {
+		return &ErrScopeID{Array: arr, Index: i, Field: "filesystem_id"}
+	}
+	if hasMem && *m.MemoryStoreID == "" {
+		return &ErrScopeID{Array: arr, Index: i, Field: "memory_store_id"}
 	}
 
 	if m.Writes == nil {
