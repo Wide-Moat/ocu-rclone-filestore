@@ -166,13 +166,17 @@ func TestUploadChunkFramesTotalExact(t *testing.T) {
 }
 
 // TestUploadCeilingChunksUnderLimit verifies that a payload larger than the
-// message ceiling is split into multiple frames and no single frame exceeds
-// the ceiling.
+// message ceiling is split into multiple frames and that the ENCODED frame
+// payload — the base64-plus-JSON-envelope bytes actually put on the wire, the
+// thing the broker measures against the ceiling (D4) — stays strictly under
+// the ceiling. The previous version of this test only checked the *decoded*
+// chunk length and waved away the envelope, so it did not pin the real
+// invariant; base64 inflation pushed every full frame ~4/3 over the ceiling.
 func TestUploadCeilingChunksUnderLimit(t *testing.T) {
-	const ceiling = 32 // small test ceiling
+	const ceiling = 64 // small test ceiling
 	content := bytes.Repeat([]byte("a"), ceiling*3+7) // definitely >1 frame
 	var frameCount int
-	var oversized bool
+	var maxFramePayload int
 
 	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		// Skip params frame.
@@ -185,16 +189,14 @@ func TestUploadCeilingChunksUnderLimit(t *testing.T) {
 			if flag == endStreamFlag {
 				break
 			}
-			// The raw JSON frame should be under the ceiling + some overhead
-			// for the JSON envelope. We check the chunk field itself.
-			var chunk struct {
-				Chunk []byte `json:"chunk"`
+			// Measure the ENCODED frame payload (what the broker sees), not
+			// the decoded chunk bytes.
+			frameCount++
+			if len(payload) > maxFramePayload {
+				maxFramePayload = len(payload)
 			}
-			if jsonErr := json.Unmarshal(payload, &chunk); jsonErr == nil {
-				frameCount++
-				if len(chunk.Chunk) > ceiling {
-					oversized = true
-				}
+			if len(payload) >= ceiling {
+				t.Errorf("encoded frame payload %d bytes is not strictly under ceiling %d", len(payload), ceiling)
 			}
 		}
 
@@ -211,8 +213,8 @@ func TestUploadCeilingChunksUnderLimit(t *testing.T) {
 	if frameCount <= 1 {
 		t.Errorf("expected >1 chunk frame for payload larger than ceiling, got %d", frameCount)
 	}
-	if oversized {
-		t.Error("at least one chunk exceeded the message ceiling")
+	if maxFramePayload == 0 {
+		t.Error("no chunk frames observed")
 	}
 }
 

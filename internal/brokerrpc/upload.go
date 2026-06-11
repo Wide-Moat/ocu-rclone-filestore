@@ -13,8 +13,8 @@
 //     declared_size_bytes (required, = total source size), filesystem_id,
 //     and authorization_metadata{intent:write, downloadable:false}.
 //
-//  3. Frames 2…N (data flag 0x00): {chunk: <base64 bytes>} frames, each
-//     containing at most MessageCeiling bytes of source data.
+//  3. Frames 2…N (data flag 0x00): {chunk: <base64 bytes>} frames, each sized
+//     so the ENCODED frame payload stays strictly under MessageCeiling.
 //
 //  4. Half-close (EOF on the request body) signals completion.
 //
@@ -120,6 +120,27 @@ func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBy
 	return nil
 }
 
+// jsonEnvelopeOverhead is the byte cost of the {"chunk":""} JSON wrapper around
+// the base64 chunk payload, plus one byte of safety margin so the encoded frame
+// payload stays strictly below the ceiling rather than equal to it.
+const jsonEnvelopeOverhead = len(`{"chunk":""}`) + 1
+
+// sourceChunkSize returns the number of raw source bytes to read per chunk so
+// that the encoded {"chunk":"<base64>"} frame payload stays strictly under
+// ceiling. Base64 encodes N source bytes (a multiple of 3) into 4*N/3
+// characters with no padding, so the frame payload is
+// jsonEnvelopeOverhead + 4*N/3. Solving 4*N/3 < ceiling-jsonEnvelopeOverhead
+// and rounding N down to a multiple of 3 yields the value below. The result is
+// always at least 3 so progress is guaranteed even for a tiny ceiling.
+func sourceChunkSize(ceiling int) int {
+	budget := ceiling - jsonEnvelopeOverhead
+	n := 3 * (budget / 4)
+	if n < 3 {
+		n = 3
+	}
+	return n
+}
+
 // writeUploadFrames sends the params frame followed by ceiling-sized chunk
 // frames to w, reading from src until EOF. It sends exactly totalBytes bytes
 // across the chunk frames (the caller is responsible for supplying a src that
@@ -147,10 +168,15 @@ func writeUploadFrames(
 		return err
 	}
 
-	// Subsequent frames: read chunks of at most ceiling bytes and send each
-	// as a {chunk} frame. The chunk bytes are JSON-encoded as base64 via
-	// Go's standard []byte marshalling.
-	buf := make([]byte, ceiling)
+	// Subsequent frames: read source in chunks sized so the ENCODED frame
+	// payload stays strictly under the message ceiling. The chunk bytes are
+	// JSON-encoded as base64 via Go's standard []byte marshalling: N source
+	// bytes (a multiple of 3, so no base64 padding) become 4*N/3 base64
+	// characters wrapped in the {"chunk":"..."} envelope. Sizing the read by
+	// raw source bytes would push every full frame to ~4/3 of the ceiling and
+	// deterministically draw resource_exhausted from the broker (D4).
+	srcChunk := sourceChunkSize(ceiling)
+	buf := make([]byte, srcChunk)
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {

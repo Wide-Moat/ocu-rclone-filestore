@@ -17,14 +17,18 @@ import (
 const serviceBase = "/ocu.filestore.v1alpha.FilesystemService/"
 
 // defaultMessageCeiling is the default maximum payload size for a single
-// streaming chunk frame. The chunker always sends under this value so the
-// broker never receives a frame at or above the ceiling.
+// streaming chunk frame, measured on the ENCODED frame payload. The chunker
+// sizes each source read so the base64-plus-JSON-envelope frame payload stays
+// strictly below this value, so the broker never receives a frame at or above
+// the ceiling (D4: a transport frame over the ceiling draws resource_exhausted).
 const defaultMessageCeiling = 256 * 1024 // 256 KiB
 
 // ClientOptions carries construction-time tunables for Client.
 type ClientOptions struct {
-	// MessageCeiling is the maximum number of bytes per chunk frame payload.
-	// A value of 0 uses the default (256 KiB).
+	// MessageCeiling is the maximum number of bytes per ENCODED chunk frame
+	// payload (the base64-plus-JSON-envelope on-wire frame). The chunker keeps
+	// every frame strictly below this value. A value of 0 uses the default
+	// (256 KiB).
 	MessageCeiling int
 }
 
