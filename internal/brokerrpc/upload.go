@@ -26,6 +26,7 @@ package brokerrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -85,20 +86,37 @@ func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBy
 	defer httpResp.Body.Close() //nolint:errcheck
 
 	// Collect the frame-writing result (blocks until the goroutine finishes).
-	if writeErr := <-errCh; writeErr != nil {
-		return fmt.Errorf("brokerrpc: fileUpload write frames: %w", writeErr)
-	}
+	writeErr := <-errCh
 
 	// Success/failure for streaming ops lives ONLY in the EndStreamResponse
-	// trailer. The HTTP status is always 200 for streams.
-	esr, err := readEndStream(httpResp.Body)
-	if err != nil {
-		return fmt.Errorf("brokerrpc: fileUpload read EndStreamResponse: %w", err)
-	}
-	if esr.Error != nil {
+	// trailer (the HTTP status is always 200 for streams). The trailer verdict
+	// is authoritative and MUST be read and preferred before the writer-pipe
+	// error is considered. When the broker terminates the stream early — the
+	// SEC-46 resource_exhausted throttle case, a frame over the ceiling, or a
+	// permission failure — it replies without draining the request body, the
+	// transport closes the pipe, and the writer goroutine fails with
+	// io.ErrClosedPipe. A parseable error trailer must never be masked by that
+	// pipe-closure error, or the contractually retryable backpressure posture
+	// (D4/SEC-46) is destroyed.
+	esr, trailerErr := readEndStream(httpResp.Body)
+	if trailerErr == nil && esr.Error != nil {
 		retryAfterRaw := httpResp.Header.Get("Retry-After")
 		return MapConnectError(esr.Error, retryAfterRaw)
 	}
+
+	// No authoritative error trailer. A genuine frame-writing failure now
+	// surfaces — except a pipe closure, which is the expected symptom of the
+	// broker ending the stream early rather than a real local write fault.
+	if writeErr != nil && !errors.Is(writeErr, io.ErrClosedPipe) {
+		return fmt.Errorf("brokerrpc: fileUpload write frames: %w", writeErr)
+	}
+
+	// Trailer read failed and there is no clear write fault to report.
+	if trailerErr != nil {
+		return fmt.Errorf("brokerrpc: fileUpload read EndStreamResponse: %w", trailerErr)
+	}
+
+	// Parseable success trailer ({}); the upload completed.
 	return nil
 }
 

@@ -240,6 +240,37 @@ func TestUploadResourceExhaustedIsRetryable(t *testing.T) {
 	}
 }
 
+// TestUploadEarlyTrailerSurvivesPipeError verifies that when the broker
+// terminates the upload early with a resource_exhausted trailer without
+// draining the request body (the SEC-46 throttle case), the retryable trailer
+// verdict survives to the caller and is NOT masked by the io.ErrClosedPipe
+// write error (CR-02). The payload is large enough that the writer goroutine
+// is still streaming when the broker replies and closes the request body.
+func TestUploadEarlyTrailerSurvivesPipeError(t *testing.T) {
+	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Reply immediately WITHOUT draining the request body, so the
+		// transport closes the pipe under the still-writing goroutine.
+		var buf bytes.Buffer
+		connErr := &ConnectError{Code: "resource_exhausted", Message: "throttled mid-stream"}
+		_ = writeEndStream(&buf, connErr)
+		w.Header().Set("Content-Type", "application/connect+json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buf.Bytes())
+	})
+
+	// 8 MiB of source — far larger than the default 256 KiB ceiling, so the
+	// writer goroutine is mid-stream when the broker replies.
+	big := bytes.Repeat([]byte("a"), 8*1024*1024)
+	c, _ := New(sock, "fs-test-01")
+	err := c.Upload(context.Background(), "/big.bin", bytes.NewReader(big), int64(len(big)))
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !fserrors.IsRetryError(err) {
+		t.Errorf("early resource_exhausted trailer must surface as retryable, not be masked by the pipe error: %v", err)
+	}
+}
+
 // TestUploadSizeMismatchIsPermanent verifies that a broker invalid_argument
 // (size_exceeded) response maps to a permanent no-retry error.
 func TestUploadSizeMismatchIsPermanent(t *testing.T) {
