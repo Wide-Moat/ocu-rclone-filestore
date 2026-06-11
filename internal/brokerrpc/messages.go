@@ -25,7 +25,11 @@ type File struct {
 	UUID  string `json:"uuid,omitempty"`
 }
 
-// FilesystemFile is a file entry in the context of a named filesystem.
+// FilesystemFile is a file entry in the context of a named filesystem. It is a
+// SEPARATE wire message from File per the contract (D6 lists File and
+// FilesystemFile as distinct response bodies), so the two are intentionally NOT
+// aliased even though their fields currently coincide: a later field pin per D6
+// may add a field to only one of them, and an alias would silently couple them.
 // Decoded tolerantly (same rationale as File).
 type FilesystemFile struct {
 	Path  string `json:"path,omitempty"`
@@ -230,8 +234,15 @@ type CreateFileResponse struct {
 	File FilesystemFile `json:"file"`
 }
 
-// ReadFileResponse wraps the file content for a unary readFile result. Full
-// reassembly for chunked delivery is in a later phase.
+// ReadFileResponse is the unary readFile result. It is METADATA-ONLY as shipped:
+// File carries no content/data field, so this type cannot return file bytes —
+// the content body is a TBD per D6 and is never invented here. Bulk content is
+// delivered by the server-streaming fileDownload op (download.go), not by this
+// unary op. When a content body is pinned in the contract it will be added here;
+// until then a broker that returns a content field has it silently dropped by
+// the tolerant decoder. The Range field on the request selects within that
+// (currently absent) content body; a zero-value Range relies on the broker
+// reading length 0 as "full file".
 type ReadFileResponse struct {
 	File File `json:"file"`
 }

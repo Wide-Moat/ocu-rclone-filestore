@@ -201,8 +201,12 @@ func (c *Client) CreateFile(ctx context.Context, path string) (*CreateFileRespon
 	return &resp, c.call(ctx, OpCreateFile, req, &resp)
 }
 
-// ReadFile reads the file at path, optionally limited to rng. When rng is the
-// zero value the broker returns the full file.
+// ReadFile performs the unary readFile op for the file at path. As shipped this
+// op is METADATA-ONLY: the response carries no content body (the content field
+// is a TBD per D6, not invented here), so rng currently selects within an absent
+// body. Bulk content is delivered by the streaming Download/DownloadRange
+// helpers, not this op. A zero-value rng relies on the broker reading length 0
+// as "full file".
 func (c *Client) ReadFile(ctx context.Context, path string, rng Range) (*ReadFileResponse, error) {
 	fsID, am, err := c.stamp(OpReadFile)
 	if err != nil {

@@ -32,6 +32,15 @@ func TestNoAuthorizationHeaderInSource(t *testing.T) {
 		`"authorization"`,
 		`bearer`,
 		`Bearer`,
+		// The doc promises the scan also catches token-bearing headers and the
+		// adjacent credential-header spellings; these patterns make the
+		// enforcement match the documentation (LO-02).
+		`auth_token`,
+		`authToken`,
+		`AuthToken`,
+		`"X-Api-Key"`,
+		`"X-API-Key"`,
+		`"Proxy-Authorization"`,
 	}
 
 	for _, path := range sources {
