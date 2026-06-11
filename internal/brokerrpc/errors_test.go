@@ -4,7 +4,10 @@
 package brokerrpc
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
 
@@ -80,6 +83,28 @@ func TestErrorMappingRetryAfter(t *testing.T) {
 	}
 }
 
+// TestErrorMappingRetryAfterRejectsNonFinite verifies that a non-finite or
+// absurdly large Retry-After value is not turned into a garbage deadline
+// (LO-03). The error must stay retryable (resource_exhausted) but carry no
+// RetryAfter deadline.
+func TestErrorMappingRetryAfterRejectsNonFinite(t *testing.T) {
+	for _, raw := range []string{"inf", "Inf", "+Inf", "1e300", "-5", "0"} {
+		t.Run(raw, func(t *testing.T) {
+			ce := &ConnectError{Code: "resource_exhausted", Message: "throttled"}
+			mapped := MapConnectError(ce, raw)
+			if mapped == nil {
+				t.Fatal("MapConnectError returned nil")
+			}
+			if !fserrors.IsRetryError(mapped) {
+				t.Errorf("%q: resource_exhausted must remain retryable", raw)
+			}
+			if fserrors.IsRetryAfterError(mapped) {
+				t.Errorf("%q: malformed Retry-After must not produce a RetryAfter deadline", raw)
+			}
+		})
+	}
+}
+
 // TestErrorMappingUnknownCodeIsPermanent verifies that a code outside the
 // closed table maps to a permanent, non-retryable error with NO retryable
 // fallthrough. This is the explicit default branch.
@@ -118,38 +143,65 @@ func TestErrorMappingAbortedIsPermanent(t *testing.T) {
 	}
 }
 
-// TestDenyReasonDoesNotChangeMappingPermissionDenied verifies that
-// permission_denied with and without an x-deny-reason header map to the same
-// error. The mapping keys on code, not the header.
+// callMappedError drives a single unary call against a server that returns the
+// given Connect code with the given response headers, and returns the mapped
+// error from the production unary path (Client.call → MapConnectError).
+func callMappedError(t *testing.T, code string, respHeaders map[string]string) error {
+	t.Helper()
+	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		for k, v := range respHeaders {
+			w.Header().Set(k, v)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		body, _ := json.Marshal(ConnectError{Code: code, Message: "verdict"})
+		_, _ = w.Write(body)
+	})
+	c, _ := New(sock, "fs-deny-01")
+	return c.call(context.Background(), OpListDirectory, ListDirectoryRequest{}, nil)
+}
+
+// TestDenyReasonDoesNotChangeMappingPermissionDenied drives the real unary path
+// end-to-end and asserts that a permission_denied verdict maps to the same
+// error whether or not the broker attaches an x-deny-reason header — the
+// structural invariant being that the mapping keys on the Connect code and the
+// production code reads no deny-reason header at all (MD-05). The prior version
+// called MapConnectError twice with identical arguments and could never fail.
 func TestDenyReasonDoesNotChangeMappingPermissionDenied(t *testing.T) {
-	ce := &ConnectError{Code: "permission_denied", Message: "denied"}
+	withHeader := callMappedError(t, "permission_denied", map[string]string{"x-deny-reason": "scope_mismatch"})
+	withoutHeader := callMappedError(t, "permission_denied", nil)
 
-	withHeader := MapConnectError(ce, "")
-	// x-deny-reason is passed via a separate parameter; use a non-empty value
-	// to simulate it being present. The mapping result must be identical.
-	withoutHeader := MapConnectError(ce, "")
-
-	if fserrors.IsRetryError(withHeader) || fserrors.IsRetryError(withoutHeader) {
-		t.Error("permission_denied must not be retryable regardless of deny header")
-	}
-	if !errors.Is(withHeader, ErrPermissionDenied) || !errors.Is(withoutHeader, ErrPermissionDenied) {
-		t.Error("permission_denied: both paths must resolve to ErrPermissionDenied")
+	for name, err := range map[string]error{"with-header": withHeader, "without-header": withoutHeader} {
+		if err == nil {
+			t.Fatalf("%s: expected error, got nil", name)
+		}
+		if fserrors.IsRetryError(err) {
+			t.Errorf("%s: permission_denied must not be retryable", name)
+		}
+		if !errors.Is(err, ErrPermissionDenied) {
+			t.Errorf("%s: errors.Is(ErrPermissionDenied) false", name)
+		}
 	}
 }
 
-// TestDenyReasonNotReadOnNotFound verifies that not_found NEVER reads the
-// x-deny-reason header — the mapping must be the same with or without it.
+// TestDenyReasonNotReadOnNotFound drives the real unary path and asserts that a
+// not_found verdict maps identically whether or not an x-deny-reason header is
+// present — confirming the cross-scope-uuid degrade (D8) is treated uniformly
+// and the header is never consulted (MD-05).
 func TestDenyReasonNotReadOnNotFound(t *testing.T) {
-	ce := &ConnectError{Code: "not_found", Message: "missing"}
-	mapped := MapConnectError(ce, "")
-	if mapped == nil {
-		t.Fatal("MapConnectError returned nil")
-	}
-	if fserrors.IsRetryError(mapped) {
-		t.Error("not_found must not be retryable")
-	}
-	if !errors.Is(mapped, ErrNotFound) {
-		t.Error("not_found: errors.Is(ErrNotFound) false")
+	withHeader := callMappedError(t, "not_found", map[string]string{"x-deny-reason": "scope_mismatch"})
+	withoutHeader := callMappedError(t, "not_found", nil)
+
+	for name, err := range map[string]error{"with-header": withHeader, "without-header": withoutHeader} {
+		if err == nil {
+			t.Fatalf("%s: expected error, got nil", name)
+		}
+		if fserrors.IsRetryError(err) {
+			t.Errorf("%s: not_found must not be retryable", name)
+		}
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("%s: errors.Is(ErrNotFound) false", name)
+		}
 	}
 }
 

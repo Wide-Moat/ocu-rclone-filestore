@@ -47,6 +47,12 @@ var ErrNotFound = errors.New("brokerrpc: not found")
 // (Connect code: already_exists).
 var ErrAlreadyExists = errors.New("brokerrpc: already exists")
 
+// maxRetryAfterSeconds bounds an accepted Retry-After hint. A value at or above
+// this (or non-finite) is treated as no usable hint: the error is still
+// retryable but carries no deadline. One hour is far longer than any sane
+// broker back-off and excludes "inf" and overflowing floats.
+const maxRetryAfterSeconds = 3600
+
 // ErrPermanentOther is the sentinel for any Connect code not in the closed
 // table — including `aborted` and any future or unknown code. These map to a
 // permanent no-retry error. The explicit default prevents a wrong retryable
@@ -101,7 +107,12 @@ func MapConnectError(ce *ConnectError, retryAfterRaw string) error {
 		// When a Retry-After header is present, produce an ErrorRetryAfter so
 		// the upstream pacer (Phase 3) can honour the broker's back-off hint.
 		if retryAfterRaw != "" {
-			if secs, err := strconv.ParseFloat(retryAfterRaw, 64); err == nil && secs > 0 {
+			// Bound the parse: reject non-positive, non-finite ("inf"), and
+			// absurdly large values ("1e300"). strconv.ParseFloat accepts
+			// "inf" with +Inf > 0, and time.Duration(math.Inf(1)*1e9) is an
+			// out-of-range float→int conversion yielding a garbage duration.
+			// This parse path is the designated malformed-header defense.
+			if secs, err := strconv.ParseFloat(retryAfterRaw, 64); err == nil && secs > 0 && secs < maxRetryAfterSeconds {
 				d := time.Duration(secs * float64(time.Second))
 				base := fmt.Errorf("brokerrpc: resource exhausted: %s", ce.Message)
 				// Wrap as RetryAfter so the pacer can inspect the deadline.
