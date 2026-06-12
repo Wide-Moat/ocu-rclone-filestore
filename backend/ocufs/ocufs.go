@@ -131,7 +131,7 @@ func (f *Fs) Features() *fs.Features {
 		Move:                    f.Move,
 		DirMove:                 f.DirMove,
 		// PutStream intentionally absent — see comment above.
-	}).Fill(ctx, f)
+	}).Fill(context.Background(), f)
 }
 
 // ---------------------------------------------------------------------------
@@ -434,8 +434,3 @@ func parseMtime(s string) time.Time {
 	}
 	return time.Time{} // unknown time; tolerant decode
 }
-
-// ctx is a package-level alias to avoid a bare `ctx` identifier in
-// Features().Fill which requires it — the call must pass a context to Fill.
-// We use context.Background() there since Features() has no context parameter.
-var ctx = context.Background()
