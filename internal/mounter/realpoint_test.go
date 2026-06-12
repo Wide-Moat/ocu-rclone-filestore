@@ -260,11 +260,12 @@ type stubPoint struct{}
 func (stubPoint) destination() string { return "/stub" }
 func (stubPoint) wait() error         { return nil }
 
-// TestDefaultRealSeamResolves exercises defaultRealSeam on a mount2-supported
-// leg: it resolves the registered mount2 function and builds the production
-// seam. On this build tag the registry lookup succeeds, so the constructor must
-// return a non-nil seam and no error. (The unsupported-platform fail-closed path
-// is covered separately by the negated-tag test.)
+// TestDefaultRealSeamResolves exercises defaultRealSeam on a supported leg: it
+// builds the production seam over the first-party direct-mount MountFn, so the
+// constructor must return a non-nil seam and no error. (The wiring assertion —
+// directMountFn, not the registry-resolved mount2 function — lives in
+// directmount_test.go; the unsupported-platform fail-closed path is covered
+// separately by the negated-tag test.)
 func TestDefaultRealSeamResolves(t *testing.T) {
 	seam, err := defaultRealSeam()
 	if err != nil {
