@@ -64,11 +64,21 @@ func fsID(s string) *string { return &s }
 // TestMountAndWaitReadyAssemblesOptions drives mountAndWaitReady with a FAKE
 // MountFn so the option-assembly (ocufs Fs build via the registry, the mapped
 // VFS/mount options) and the NewMountPoint/Mount call are covered with no
-// /dev/fuse. The readyTimeout is set tiny so WaitMountReady fails fast on the
-// non-mounted directory rather than blocking on its ~30s spin-poll — the test
-// asserts the fake MountFn WAS invoked (proving Mount ran over the assembled
-// options) and that the failure is the expected WaitMountReady error, not an
-// option-assembly error.
+// /dev/fuse. The readyTimeout is set tiny so the readiness poll fails fast on
+// the non-mounted directory rather than blocking on the full ~30s poll.
+//
+// The readiness assertion is leg-dependent because the seam polls only where
+// the kernel can be queried (it no longer calls the nil-daemon
+// mountlib.WaitMountReady, which crashed on the first not-ready poll):
+//   - linux (mountlib.CanCheckMountReady=true): CheckMountReady on a plain
+//     non-mounted temp dir never succeeds, so the poll times out and returns
+//     the wrapped "wait for mount ready" error after option assembly.
+//   - darwin/amd64 (CanCheckMountReady=false): readiness cannot be kernel-
+//     verified; since Mount() already succeeded the seam blind-trusts and
+//     returns a live point with no error.
+//
+// Either way the fake MountFn MUST have been invoked, proving Mount ran over the
+// assembled options (no option-assembly error short-circuited it).
 func TestMountAndWaitReadyAssemblesOptions(t *testing.T) {
 	var invoked bool
 	r := &realPointMounter{
@@ -89,17 +99,31 @@ func TestMountAndWaitReadyAssemblesOptions(t *testing.T) {
 		socketPath: "/tmp/ocufs-unit-not-dialed.sock",
 	}
 
-	_, err := r.mountAndWaitReady(context.Background(), spec)
-	if err == nil {
-		t.Fatal("mountAndWaitReady over a fake MountFn returned nil error; want the WaitMountReady failure on the non-mounted dir")
-	}
+	p, err := r.mountAndWaitReady(context.Background(), spec)
+
 	if !invoked {
 		t.Fatal("fake MountFn was never invoked: option assembly errored before Mount, or NewMountPoint/Mount was not reached")
 	}
-	// The failure must be the readiness wait, not an option-assembly error: the
-	// error string names the destination and the wait stage.
-	if got := err.Error(); !strings.Contains(got, "wait for mount ready") {
-		t.Fatalf("mountAndWaitReady error = %q; want the WaitMountReady stage to fail after option assembly", got)
+
+	if mountlib.CanCheckMountReady {
+		// linux: the poll over a non-mounted dir must time out with the wrapped
+		// readiness error — NOT crash (the old nil-daemon WaitMountReady path
+		// SIGSEGV'd here) and NOT an option-assembly error.
+		if err == nil {
+			t.Fatal("mountAndWaitReady returned nil on a leg that polls readiness; want the readiness timeout error on the non-mounted dir")
+		}
+		if got := err.Error(); !strings.Contains(got, "wait for mount ready") {
+			t.Fatalf("mountAndWaitReady error = %q; want the readiness stage to fail after option assembly", got)
+		}
+		return
+	}
+
+	// darwin/amd64: readiness is blind-trusted, so a live point is returned.
+	if err != nil {
+		t.Fatalf("mountAndWaitReady on a non-polling leg returned %v; want a blind-trusted point", err)
+	}
+	if p == nil {
+		t.Fatal("mountAndWaitReady on a non-polling leg returned a nil point; want a live point")
 	}
 }
 

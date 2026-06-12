@@ -44,9 +44,10 @@ type realPointMounter struct {
 	// option-assembly and MountPoint wiring with a fake function and no
 	// /dev/fuse.
 	mountFn mountlib.MountFn
-	// readyTimeout bounds WaitMountReady. It defaults to waitMountReadyTimeout
-	// and is a field so a unit test driving a fake MountFn can set it tiny and
-	// not block on the real ~30s spin-poll over a non-mounted directory.
+	// readyTimeout bounds the readiness poll. It defaults to
+	// waitMountReadyTimeout and is a field so a unit test driving a fake MountFn
+	// can set it tiny and not block on the real ~30s poll over a non-mounted
+	// directory.
 	readyTimeout time.Duration
 }
 
@@ -122,18 +123,56 @@ func (r *realPointMounter) mountAndWaitReady(ctx context.Context, spec mountSpec
 
 	mp := mountlib.NewMountPoint(r.mountFn, dest, fsObj, &mountOpt, &vfsOpt)
 
-	daemon, err := mp.Mount()
-	if err != nil {
+	if _, err := mp.Mount(); err != nil {
 		return nil, fmt.Errorf("mount %q: start mount: %w", dest, err)
 	}
 
-	if err := mountlib.WaitMountReady(dest, r.readyTimeout, daemon); err != nil {
+	if err := r.waitReady(ctx, dest); err != nil {
 		// Best-effort teardown of the half-started mount before surfacing.
 		_ = mp.Unmount()
-		return nil, fmt.Errorf("mount %q: wait for mount ready: %w", dest, err)
+		return nil, err
 	}
 
 	return &realPoint{dest: dest, mp: mp}, nil
+}
+
+// waitReady confirms the mountpoint is live using only the exported, nil-safe
+// mountlib primitives, so it carries zero upstream diff and never reaches the
+// nil-daemon nil-pointer path inside mountlib.WaitMountReady (which dereferences
+// the daemon process unconditionally on every poll; our non-daemon mp.Mount()
+// always returns a nil daemon, so calling WaitMountReady would crash on the
+// first not-ready poll).
+//
+// On a leg where mountlib.CanCheckMountReady is false (e.g. darwin/amd64), the
+// kernel cannot be polled for readiness. mp.Mount() already returned success, so
+// readiness is blind-trusted there. linux (CanCheckMountReady=true) is the
+// production target and is the only leg that kernel-verifies readiness; the
+// darwin/amd64 leg is a build convenience that cannot poll the kernel.
+func (r *realPointMounter) waitReady(ctx context.Context, dest string) error {
+	if !mountlib.CanCheckMountReady {
+		return nil
+	}
+
+	const pollInterval = 100 * time.Millisecond
+	deadline := time.Now().Add(r.readyTimeout)
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("mount %q: wait for mount ready: %w", dest, err)
+		}
+		lastErr = mountlib.CheckMountReady(dest)
+		if lastErr == nil {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("mount %q: wait for mount ready: %w", dest, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("mount %q: wait for mount ready: %w", dest, ctx.Err())
+		case <-time.After(pollInterval):
+		}
+	}
 }
 
 // unmount best-effort unmounts one live point.
