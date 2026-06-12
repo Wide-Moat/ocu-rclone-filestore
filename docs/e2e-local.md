@@ -13,6 +13,13 @@ steps take the harness up, run the gated exercise, and tear it down.
 - A Lima VM that runs a Linux kernel with Docker available inside it. The VM
   must expose `/dev/fuse` to containers and allow the `SYS_ADMIN` capability —
   a standard Linux VM does.
+- AppArmor caveat: on an AppArmor-enforcing host (e.g. Ubuntu), the default
+  container profile denies the mount syscall even with `CAP_SYS_ADMIN`, so a
+  FUSE mount inside a container fails with `permission denied`. The compose
+  harness therefore runs the mount service with
+  `security_opt: [apparmor=unconfined]`; a tailored AppArmor profile allowing
+  `mount fstype=fuse.*` is the stricter alternative if your environment
+  forbids unconfined containers.
 
 ## 1. Bring up a Lima VM with Docker
 

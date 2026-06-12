@@ -46,6 +46,13 @@ services:
       - /dev/fuse
     cap_add:
       - SYS_ADMIN
+    # FUSE's mount(2) needs the AppArmor mount restriction lifted:
+    # CAP_SYS_ADMIN alone is insufficient under the default container
+    # AppArmor profile, which denies the mount syscall outright. A tailored
+    # profile allowing 'mount fstype=fuse.*' is the stricter alternative.
+    # Only this service mounts; the broker stays confined.
+    security_opt:
+      - apparmor=unconfined
     # SEC-25 made structural: the mount container has NO network stack at all —
     # not merely no route to an object store. The broker unix socket on the
     # shared volume is the sole channel; a unix socket needs no network.
