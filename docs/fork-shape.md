@@ -56,6 +56,31 @@ Exact API signatures and the precise mount entry point are pinned and verified a
 the chosen rclone release during the phases that build the backend and the mounter, not
 asserted here.
 
+### The mount symbols, pinned
+
+The mounter relies on these exported rclone symbols, all reachable as library calls with
+zero upstream diff:
+
+- `cmd/mountlib.ResolveMountMethod(name)` — looks up a mount function from the registry by
+  name. A blank import of `cmd/mount2` self-registers its (unexported upstream) mount
+  function under the name `"mount2"`, so the lookup obtains it without forking upstream to
+  export a symbol. `mount2` is preferred over the `cmd/mount` path because its direct
+  kernel mount avoids spawning a fusermount helper subprocess, which matters in a minimal
+  guest where that helper may be absent.
+- `cmd/mountlib.NewMountPoint(fn, mountpoint, fs, mountOpt, vfsOpt)` — assembles a mount
+  from the resolved function, the ocufs Fs, and the mapped options.
+- `(*cmd/mountlib.MountPoint).Mount()` — starts the live mount. It constructs the VFS
+  itself from the Fs and the VFS options; the wrapper never constructs a VFS separately, so
+  no second VFS is leaked into the package-level active cache.
+- `cmd/mountlib.WaitMountReady(mountpoint, timeout, daemon)` — confirms the kernel reports
+  the mountpoint live before the mount is treated as ready.
+- `(*cmd/mountlib.MountPoint).Wait()` / `.Unmount()` — bridged into the orchestrator's
+  per-point lifecycle for spontaneous-exit detection and teardown.
+
+These calls are build-tagged to the platforms the kernel mount method supports
+(`linux || (darwin && amd64)`); on any other target a fail-closed stub returns a typed
+"mount method unavailable" error so the binary refuses to mount rather than mis-mounting.
+
 ## Recovery path
 
 If a future rclone release removes a seam we depend on, the backend package moves into a

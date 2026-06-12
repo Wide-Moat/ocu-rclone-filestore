@@ -8,23 +8,42 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mountcfg"
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mounter"
 )
 
-// run parses args, loads the guest mount config from the --config path, and
-// drives the mounter seam. It returns a non-nil error on every failure path —
-// a missing flag, a config that fails to load or validate, or the seam's
-// not-implemented sentinel — and nil only on a clean shutdown. It never calls
-// os.Exit; main maps the returned error to the process exit code.
+// mountFunc realizes a loaded config under the given runtime inputs. run wires
+// the production mounter; the table test injects a recording double so the
+// flag/env resolution is asserted without a real mount.
+type mountFunc func(cfg *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket string, signals <-chan os.Signal) error
+
+// run parses args, loads the guest mount config from the --config path, sources
+// the runtime inputs (ready-file and broker socket, each from a flag with an env
+// fallback) and the termination-signal channel, and drives the mounter. It
+// returns a non-nil error on every failure path and nil only on a clean
+// shutdown. It never calls os.Exit; main maps the returned error to the exit
+// code.
+func run(args []string, stderr io.Writer) error {
+	return runWith(args, stderr, productionMount)
+}
+
+// runWith is the testable core: it parses flags, resolves the runtime inputs,
+// loads the config, and calls mount. The mount function is injected so the
+// table test asserts the resolved ReadinessConfig and broker socket without
+// mounting.
 //
 // run takes its own FlagSet rather than the global one so it can be called
 // repeatedly (the table test relies on this).
-func run(args []string, stderr io.Writer) error {
+func runWith(args []string, stderr io.Writer, mount mountFunc) error {
 	fs := flag.NewFlagSet("ocu-rclone-filestore", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "path to the guest mount config file")
+	readyFile := fs.String("ready-file", "", "optional path to create once all mounts are ready (env: OCU_READY_FILE)")
+	brokerSocket := fs.String("broker-socket", "", "per-session broker socket path supplied at provision (env: OCU_BROKER_SOCKET)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
@@ -33,10 +52,44 @@ func run(args []string, stderr io.Writer) error {
 		return errors.New("missing required --config flag: pass the path to the guest mount config")
 	}
 
+	// Flag wins over env; an unset flag falls back to the env var. The ready-file
+	// and broker socket paths are host-controlled RUNTIME inputs, never fields of
+	// the frozen guest mount config schema (D2).
+	resolvedReadyFile := resolveFlagOrEnv(*readyFile, "OCU_READY_FILE")
+	resolvedBrokerSocket := resolveFlagOrEnv(*brokerSocket, "OCU_BROKER_SOCKET")
+
 	cfg, err := mountcfg.Load(*configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	return mounter.New().Mount(cfg)
+	// Install the real termination-signal channel. The orchestrator selects on
+	// it to tear down every live mount on SIGTERM/SIGINT.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sig)
+
+	rc := mounter.ReadinessConfig{ReadyFilePath: resolvedReadyFile}
+	return mount(cfg, rc, resolvedBrokerSocket, sig)
+}
+
+// resolveFlagOrEnv returns the flag value when set, otherwise the env var. An
+// empty result is left to the downstream consumer to reject (the empty broker
+// socket is a hard error in the orchestrator).
+func resolveFlagOrEnv(flagVal, envKey string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	return os.Getenv(envKey)
+}
+
+// productionMount wires the runtime inputs into the functional-options mounter
+// and runs it. Mount(cfg) stays unchanged; the entrypoint contract does not
+// break.
+func productionMount(cfg *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket string, signals <-chan os.Signal) error {
+	return mounter.New(
+		mounter.WithReadiness(rc),
+		mounter.WithBrokerSocket(brokerSocket),
+		mounter.WithSignals(signals),
+	).Mount(cfg)
 }

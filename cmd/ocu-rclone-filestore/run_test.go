@@ -4,12 +4,13 @@
 package main
 
 import (
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mountcfg"
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mounter"
 )
 
@@ -63,10 +64,12 @@ func TestRun(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
-		// wantNotImplemented asserts the returned error wraps
-		// mounter.ErrNotImplemented (the valid-config success path that then
-		// hits the not-implemented seam).
-		wantNotImplemented bool
+		// wantBrokerSocketError asserts the valid-config path threads through to
+		// the orchestrator and returns the empty-broker-socket hard error (no
+		// --broker-socket / OCU_BROKER_SOCKET set). This proves the wiring
+		// reaches the seam without /dev/fuse — it replaces the wave-1
+		// ErrNotImplemented case.
+		wantBrokerSocketError bool
 	}{
 		{
 			name: "no --config flag returns a non-nil error",
@@ -85,9 +88,9 @@ func TestRun(t *testing.T) {
 			args: []string{"--config", badJSONPath},
 		},
 		{
-			name:               "valid config reaches the not-implemented mounter seam",
-			args:               []string{"--config", validPath},
-			wantNotImplemented: true,
+			name:                  "valid config with no broker socket hits the orchestrator hard error",
+			args:                  []string{"--config", validPath},
+			wantBrokerSocketError: true,
 		},
 	}
 
@@ -97,11 +100,83 @@ func TestRun(t *testing.T) {
 			if err == nil {
 				t.Fatalf("run(%v) = nil; want non-nil error (every path here is an error path)", tc.args)
 			}
-			if tc.wantNotImplemented && !errors.Is(err, mounter.ErrNotImplemented) {
-				t.Fatalf("run(%v) error = %v; want errors.Is ErrNotImplemented", tc.args, err)
+			gotSocketErr := strings.Contains(err.Error(), "broker socket path not provided")
+			if tc.wantBrokerSocketError && !gotSocketErr {
+				t.Fatalf("run(%v) error = %v; want the empty-broker-socket hard error", tc.args, err)
 			}
-			if !tc.wantNotImplemented && errors.Is(err, mounter.ErrNotImplemented) {
-				t.Fatalf("run(%v) reached the mounter seam; want a flag/load error before the seam", tc.args)
+			if !tc.wantBrokerSocketError && gotSocketErr {
+				t.Fatalf("run(%v) reached the orchestrator socket check; want a flag/load error before the seam", tc.args)
+			}
+		})
+	}
+}
+
+// TestRunResolvesReadyFileAndBrokerSocket asserts that --ready-file and
+// --broker-socket parse, that the OCU_READY_FILE / OCU_BROKER_SOCKET env
+// fallbacks resolve when the flag is unset, and that the flag wins over the env.
+// It drives runWith with a recording double so the resolved values are asserted
+// WITHOUT mounting (no /dev/fuse).
+func TestRunResolvesReadyFileAndBrokerSocket(t *testing.T) {
+	validPath := writeTemp(t, "valid.json", validConfig)
+
+	type captured struct {
+		rc           mounter.ReadinessConfig
+		brokerSocket string
+		signals      bool
+	}
+
+	tests := []struct {
+		name           string
+		args           []string
+		env            map[string]string
+		wantReadyFile  string
+		wantBrokerSock string
+	}{
+		{
+			name:           "flags supply both runtime inputs",
+			args:           []string{"--config", validPath, "--ready-file", "/run/ready", "--broker-socket", "/run/broker.sock"},
+			wantReadyFile:  "/run/ready",
+			wantBrokerSock: "/run/broker.sock",
+		},
+		{
+			name:           "env fallbacks resolve when flags unset",
+			args:           []string{"--config", validPath},
+			env:            map[string]string{"OCU_READY_FILE": "/env/ready", "OCU_BROKER_SOCKET": "/env/broker.sock"},
+			wantReadyFile:  "/env/ready",
+			wantBrokerSock: "/env/broker.sock",
+		},
+		{
+			name:           "flag wins over env",
+			args:           []string{"--config", validPath, "--ready-file", "/flag/ready", "--broker-socket", "/flag/broker.sock"},
+			env:            map[string]string{"OCU_READY_FILE": "/env/ready", "OCU_BROKER_SOCKET": "/env/broker.sock"},
+			wantReadyFile:  "/flag/ready",
+			wantBrokerSock: "/flag/broker.sock",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+
+			var got captured
+			recorder := func(_ *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket string, signals <-chan os.Signal) error {
+				got = captured{rc: rc, brokerSocket: brokerSocket, signals: signals != nil}
+				return nil
+			}
+
+			if err := runWith(tc.args, io.Discard, recorder); err != nil {
+				t.Fatalf("runWith(%v) = %v; want nil (recorder returns nil)", tc.args, err)
+			}
+			if got.rc.ReadyFilePath != tc.wantReadyFile {
+				t.Errorf("ReadyFilePath = %q; want %q", got.rc.ReadyFilePath, tc.wantReadyFile)
+			}
+			if got.brokerSocket != tc.wantBrokerSock {
+				t.Errorf("brokerSocket = %q; want %q", got.brokerSocket, tc.wantBrokerSock)
+			}
+			if !got.signals {
+				t.Error("signals channel was nil; want a real signal.Notify channel threaded into the mounter")
 			}
 		})
 	}
