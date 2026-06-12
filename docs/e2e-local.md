@@ -92,6 +92,6 @@ graceful teardown the mount unmounts every mount and the ready-file is removed.
 - This binary builds openly on the public rclone project; the mount path uses
   rclone's pure-Go FUSE mount, so the image is fully static and needs no
   libfuse.
-- The hosted CI cannot run this live exercise (no `/dev/fuse`); see
-  [`ci-fuse-decision.md`](ci-fuse-decision.md) for why the live gate runs on a
-  self-hosted or Lima host and why the release requires it.
+- Whether hosted CI can run this live exercise is probed in wave 05-02; see
+  [`ci-fuse-decision.md`](ci-fuse-decision.md) for the runner-placement
+  decision and why the release requires a green live gate either way.

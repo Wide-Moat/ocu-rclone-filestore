@@ -3,14 +3,16 @@
 
 # CI /dev/fuse availability — decision record
 
-## Finding
+## Working assumption — to be probed in 05-02
 
-The standard GitHub-hosted `ubuntu-latest` runner does not expose `/dev/fuse`
-to a container. The device node is not present for a workload container, and the
-FUSE kernel module is not loadable inside the hosted sandbox. A container that
-asks for `--device /dev/fuse` and `--cap-add SYS_ADMIN` on a hosted runner
-therefore cannot complete a real kernel mount. This is a property of the hosted
-sandbox, not of the mount binary.
+Whether the standard GitHub-hosted `ubuntu-latest` runner exposes `/dev/fuse`
+to a workload container (and permits the `--device /dev/fuse` +
+`--cap-add SYS_ADMIN` mount pattern) has **not been verified** and is treated
+here as an open question, not a finding. Wave 05-02 runs an explicit probe on
+the hosted runner — `test -e /dev/fuse` plus a container smoke that performs a
+trivial FUSE mount — before committing to a runner placement. If the hosted
+runner suffices, the live gate runs there and no self-hosted/Lima host is
+needed for CI; the decision below covers the case where it does not.
 
 ## Decision
 
@@ -18,6 +20,8 @@ The **live** end-to-end exercise — the one that performs a real FUSE mount and
 drives file operations through it against a live broker — runs on a host that
 provides a real `/dev/fuse`:
 
+- the **hosted runner itself**, if the 05-02 probe shows it exposes the FUSE
+  device to containers (the preferred, cheapest placement), or
 - a **self-hosted runner** on a Linux host that grants the FUSE device and the
   mount capability to the container, or
 - a **local Lima run** on a developer workstation (see
