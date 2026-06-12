@@ -154,10 +154,9 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	}
 
 	var (
-		haveRange bool
-		offset    int64
-		length    int64
-		fullRead  = true
+		offset   int64
+		length   int64
+		fullRead = true
 	)
 
 	for _, opt := range options {
@@ -169,7 +168,6 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 			if length < 0 {
 				length = 0
 			}
-			haveRange = true
 			fullRead = false
 		case *fs.RangeOption:
 			// RangeOption.Decode handles all four forms and returns the
@@ -185,7 +183,6 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 			} else {
 				length = limit
 			}
-			haveRange = true
 			fullRead = false
 		default:
 			if opt.Mandatory() {
@@ -194,7 +191,6 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 			// Non-mandatory unknown option: silently ignore.
 		}
 	}
-	_ = haveRange // used implicitly via fullRead
 
 	var (
 		data []byte
