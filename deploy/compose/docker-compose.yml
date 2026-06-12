@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Compose harness for the real end-to-end exercise. Two services share one
+# named volume that carries the per-session broker unix socket: the broker
+# creates the socket, the mount dials it. The mount service gets ONLY the
+# socket volume and a read-only guest config — no network path to any object
+# store, no credential env, no second transport (SEC-25). Real /dev/fuse needs
+# a Linux kernel; run this under Lima locally (see ../../docs/e2e-local.md).
+
+services:
+  # ---------------------------------------------------------------------------
+  # PLACEHOLDER BROKER — wave 05-01 only. DO NOT treat as the real broker.
+  #
+  # >>> 05-02 REPLACES THIS SERVICE <<< with a multi-stage build of the sibling
+  #     broker repo at a pinned ref (its cmd entrypoint serving the south-face
+  #     over the exported Serve), creating the per-session unix socket on the
+  #     shared volume below so the mount can dial it. Until then this is a
+  #     do-nothing pinned base image that simply holds the socket volume mount
+  #     in place; it serves nothing, so a local run skips the live assertions.
+  # ---------------------------------------------------------------------------
+  broker:
+    # Do-nothing placeholder base, pinned by digest (busybox 1.37.0-glibc). It
+    # idles so the harness topology (shared socket volume, start ordering) is
+    # exercisable now; it does NOT emit any file-op bodies.
+    image: busybox@sha256:4279d9b47df4c1b02d80efd8d02cd59b3a8182c1e785a4ff3f6983bee19dc8b0
+    command: ["sh", "-c", "echo '05-01 placeholder broker: idling; 05-02 builds the real south-face server here'; sleep infinity"]
+    volumes:
+      # The per-session socket directory shared with the mount service. 05-02's
+      # real broker creates the unix socket here.
+      - broker-socket:/run/ocu
+
+  mount:
+    # Built from the repo-root Dockerfile (the static mount image).
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      - broker
+    # FUSE needs the device node and the mount capability from the host. No
+    # other capabilities, no privileged: true.
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    # SEC-25: ONLY the read-only guest config and the shared socket volume cross
+    # into the mount container. No object-store network alias, no credential
+    # env, no second transport.
+    volumes:
+      - ./fixtures/guest-config.json:/etc/ocu/guest-config.json:ro
+      - broker-socket:/run/ocu
+    # The shipped entrypoint contract: --config (required), --broker-socket
+    # (the per-session socket on the shared volume), --ready-file (created once
+    # all mounts are up; the healthcheck waits on it).
+    command:
+      - --config
+      - /etc/ocu/guest-config.json
+      - --broker-socket
+      - /run/ocu/broker.sock
+      - --ready-file
+      - /run/ocu/mount-ready
+    # Readiness is the ready-file at /run/ocu/mount-ready: the entrypoint creates
+    # it once every mount is up and removes it on teardown. The minimal runtime
+    # image has no shell, so readiness is observed from the SHARED VOLUME rather
+    # than a CMD-SHELL container healthcheck — the e2e runner (and a local
+    # operator) waits on that file via the harness, which is the same signal the
+    # ready-file exists to provide. 05-02 wires the runner's wait to this path.
+
+volumes:
+  # Shared per-session unix socket directory. The broker creates the socket;
+  # the mount dials it. The sole channel between the two services.
+  broker-socket:
