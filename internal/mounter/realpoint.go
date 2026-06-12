@@ -8,6 +8,7 @@ package mounter
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/rclone/rclone/cmd/mountlib"
@@ -72,13 +73,31 @@ func defaultRealSeam() (pointMounter, error) {
 // realPoint bridges a live mountlib.MountPoint into the orchestrator's opaque
 // point: destination() reports the served path, wait() blocks on the mount's
 // terminal exit, and unmount() tears it down.
+//
+// doUnmount is guarded by a sync.Once so OUR unmount path runs mp.Unmount()
+// exactly once even when the orchestrator's signal-teardown races a spontaneous
+// exit on the same point. mountlib.MountPoint.Wait() runs its own finalise that
+// also calls Unmount() — that is rclone-internal and not deduplicatable from
+// here, so the residual race is rclone-internal finalise vs our unmount; the
+// Once removes the double-call from OUR code path, which is the cheap, correct
+// guard available without an upstream diff.
 type realPoint struct {
-	dest string
-	mp   *mountlib.MountPoint
+	dest        string
+	mp          *mountlib.MountPoint
+	unmountOnce sync.Once
+	unmountErr  error
 }
 
 func (p *realPoint) destination() string { return p.dest }
 func (p *realPoint) wait() error         { return p.mp.Wait() }
+
+// doUnmount tears the mount down at most once, caching and returning the result
+// of the single mp.Unmount() call. Concurrent callers all observe that one
+// result.
+func (p *realPoint) doUnmount() error {
+	p.unmountOnce.Do(func() { p.unmountErr = p.mp.Unmount() })
+	return p.unmountErr
+}
 
 // mountAndWaitReady builds the ocufs Fs for spec, constructs the MountPoint with
 // the mapped options, starts the mount, and confirms readiness. The VFS is built
@@ -181,5 +200,5 @@ func (r *realPointMounter) unmount(p point) error {
 	if !ok {
 		return fmt.Errorf("unmount: unexpected point type %T", p)
 	}
-	return rp.mp.Unmount()
+	return rp.doUnmount()
 }

@@ -14,7 +14,9 @@ import (
 
 	"github.com/rclone/rclone/cmd/mountlib"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/vfs"
+	"github.com/rclone/rclone/vfs/vfscommon"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mountcfg"
 )
@@ -188,6 +190,57 @@ func TestMountIdentityIsPerMount(t *testing.T) {
 	csB := fs.ConfigString(seen[1].Fs())
 	if csA == csB {
 		t.Fatalf("Fs ConfigString identical for distinct mounts (%q == %q): the active-VFS cache key collides (CR-01)", csA, csB)
+	}
+}
+
+// countingUnmountMountFn returns a MountFn whose unmount closure increments
+// *count, so a test can assert how many times the underlying unmount ran.
+func countingUnmountMountFn(count *int) mountlib.MountFn {
+	return func(_ *vfs.VFS, mountpoint string, _ *mountlib.Options) (<-chan error, func() error, string, error) {
+		errChan := make(chan error, 1)
+		unmount := func() error { *count++; return nil }
+		return errChan, unmount, mountpoint, nil
+	}
+}
+
+// TestRealPointDoUnmountOnce is the WR-01 guard: routing two unmount calls on the
+// SAME realPoint through the seam must invoke the underlying mp.Unmount() exactly
+// once. On a live mount the orchestrator's signal-teardown can race the point's
+// own Wait()-driven finalise; the sync.Once removes the double-call from OUR
+// path (the rclone-internal finalise is out of scope here).
+func TestRealPointDoUnmountOnce(t *testing.T) {
+	var count int
+	mountFn := countingUnmountMountFn(&count)
+	r := &realPointMounter{mountFn: mountFn, readyTimeout: 10 * time.Millisecond}
+
+	// Build a real ocufs Fs (vfs.New needs a non-nil Fs) and a MountPoint over
+	// the counting MountFn, then start it so UnmountFn is wired.
+	info, err := fs.Find("ocufs")
+	if err != nil {
+		t.Fatalf("ocufs backend not registered: %v", err)
+	}
+	cm := configmap.Simple{}
+	cm.Set("socket_path", "/tmp/ocufs-unit-not-dialed.sock")
+	cm.Set("filesystem_id", "session_unit_fs")
+	cm.Set("read_only", "false")
+	fsObj, err := info.NewFs(context.Background(), "ocufs-wr01", "", cm)
+	if err != nil {
+		t.Fatalf("build ocufs Fs: %v", err)
+	}
+	mp := mountlib.NewMountPoint(mountFn, t.TempDir(), fsObj, &mountlib.Options{}, &vfscommon.Options{})
+	if _, err := mp.Mount(); err != nil {
+		t.Fatalf("mp.Mount(): %v", err)
+	}
+	p := &realPoint{dest: mp.MountPoint, mp: mp}
+
+	if err := r.unmount(p); err != nil {
+		t.Fatalf("first unmount: %v", err)
+	}
+	if err := r.unmount(p); err != nil {
+		t.Fatalf("second unmount: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("underlying unmount ran %d times; want exactly 1 (sync.Once must dedup OUR path)", count)
 	}
 }
 
