@@ -37,8 +37,19 @@ func buildVFSOptions(m mountcfg.Mount, readOnly bool) (vfscommon.Options, error)
 	}
 	opt.CacheMode = mode
 
+	// Normalize a unitless value to BYTES before parsing. fs.SizeSuffix.Set
+	// treats a trailing digit as the KiB multiplier, so a bare integer like
+	// "1048576" would parse as 1048576 KiB (1 GiB) — a 1024x-too-large per-mount
+	// cap, which matters under per-session ceilings (SEC-46). The contract
+	// ByteSize pattern admits a unitless integer, so append "B" when the value is
+	// all digits to force a bytes interpretation; values that already carry a
+	// B/K/M/G/T suffix pass through unchanged.
+	rawSize := m.VfsCacheMaxSize
+	if isAllDigits(rawSize) {
+		rawSize += "B"
+	}
 	var size fs.SizeSuffix
-	if err := size.Set(m.VfsCacheMaxSize); err != nil {
+	if err := size.Set(rawSize); err != nil {
 		return vfscommon.Options{}, fmt.Errorf("vfs_cache_max_size %q: %w", m.VfsCacheMaxSize, err)
 	}
 	opt.CacheMaxSize = size
@@ -109,4 +120,20 @@ func buildOcufsConfigmap(m mountcfg.Mount, readOnly bool, socketPath string) (co
 		cm.Set("read_only", "false")
 	}
 	return cm, nil
+}
+
+// isAllDigits reports whether s is non-empty and made up entirely of ASCII
+// digits, i.e. a unitless ByteSize value that fs.SizeSuffix would otherwise
+// misread as KiB. An empty string is not all-digits (it must not gain a "B"
+// suffix and parse as a bare unit).
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }

@@ -121,13 +121,28 @@ func TestBuildVFSOptionsCacheModes(t *testing.T) {
 }
 
 func TestBuildVFSOptionsSizeForms(t *testing.T) {
-	for _, in := range []string{"256M", "1048576"} {
+	// Assert the CONCRETE resulting cap, not merely no-error: a unitless integer
+	// must be read as BYTES, not KiB (WR-03). fs.SizeSuffix.Set would otherwise
+	// read "1048576" as 1048576 KiB (1 GiB), a 1024x-too-large per-mount cap.
+	cases := map[string]fs.SizeSuffix{
+		"1048576": 1048576,       // unitless -> bytes, NOT 1048576 KiB
+		"1M":      1 << 20,       // 1 MiB
+		"1G":      1 << 30,       // 1 GiB
+		"256M":    256 * 1 << 20, // 256 MiB
+	}
+	for in, want := range cases {
 		m := writableMount()
 		m.VfsCacheMaxSize = in
-		if _, err := buildVFSOptions(m, false); err != nil {
+		opt, err := buildVFSOptions(m, false)
+		if err != nil {
 			t.Errorf("buildVFSOptions size %q: %v", in, err)
+			continue
+		}
+		if opt.CacheMaxSize != want {
+			t.Errorf("CacheMaxSize for %q = %d; want %d", in, opt.CacheMaxSize, want)
 		}
 	}
+
 	m := writableMount()
 	m.VfsCacheMaxSize = "not-a-size"
 	if _, err := buildVFSOptions(m, false); err == nil {
