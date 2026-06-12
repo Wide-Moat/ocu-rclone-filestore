@@ -26,6 +26,16 @@ import (
 	// minimal guest where that helper may be absent and an extra process is
 	// undesirable.
 	_ "github.com/rclone/rclone/cmd/mount2"
+
+	// Blank-import the local backend so the VFS disk cache can build its cache
+	// area: rclone's vfscache resolves the backend named "local" for the
+	// on-disk cache directory, and without this registration the cache is
+	// silently disabled — vfs_cache_mode writes/minimal becomes inert and the
+	// hold-data-across-a-throttled-retry mechanism (SEC-46) does not exist.
+	// This is a disk backend for the cache dir only: NOT a second transport
+	// and NOT an object-store client, so SEC-25 is untouched — the sole
+	// network/IPC path remains the broker unix socket.
+	_ "github.com/rclone/rclone/backend/local"
 )
 
 // waitMountReadyTimeout bounds how long the seam waits for the kernel to report
