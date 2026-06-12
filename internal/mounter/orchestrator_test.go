@@ -383,6 +383,90 @@ func TestNewMountEmptyBrokerSocketHardErrorWinsOverSeam(t *testing.T) {
 	}
 }
 
+// TestOrchestratorStaleReadyFileRemovedAndRetracted is the ME-01 regression: a
+// pre-existing ready-file must be removed at start (it could advertise readiness
+// for a dead process), and the ready-file must not outlive the process — it is
+// retracted on the clean signal-teardown exit.
+func TestOrchestratorStaleReadyFileRemovedAndRetracted(t *testing.T) {
+	fake := newFake()
+	sig := make(chan os.Signal, 1)
+	readyFile := filepath.Join(t.TempDir(), "ready")
+
+	// Plant a stale ready-file from a notional previous run.
+	if err := os.WriteFile(readyFile, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("plant stale ready-file: %v", err)
+	}
+
+	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{writableEntry("/mnt/w")}}
+	o := &orchestrator{
+		seam:             fake,
+		readiness:        ReadinessConfig{ReadyFilePath: readyFile},
+		signals:          sig,
+		brokerSocketPath: "/run/x.sock",
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- o.run(context.Background(), cfg) }()
+
+	// run removes the stale file at start and recreates an EMPTY one only after
+	// the mount is up. Poll until the file holds the fresh (empty) content rather
+	// than the planted "stale" bytes — proving the stale file was removed, not
+	// merely reopened.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		b, err := os.ReadFile(readyFile)
+		if err == nil && string(b) != "stale" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ready-file never lost its stale content (last=%q, err %v); want it removed and freshly created", string(b), err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	sig <- syscall.SIGTERM
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run = %v; want nil on clean signal teardown", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return after signal")
+	}
+
+	// The process is shutting down: the ready-file must be retracted, never left
+	// advertising readiness for a dead process.
+	if _, statErr := os.Stat(readyFile); !os.IsNotExist(statErr) {
+		t.Errorf("ready-file survives teardown; want it retracted on exit")
+	}
+}
+
+// TestOrchestratorDuplicateDestinationHardError is the ME-02 regression: a
+// destination repeated across mounts/readonly_mounts must be a hard error before
+// any point starts, not a silent shadow.
+func TestOrchestratorDuplicateDestinationHardError(t *testing.T) {
+	fake := newFake()
+	cfg := &mountcfg.Config{
+		Mounts:         []mountcfg.Mount{writableEntry("/mnt/dup")},
+		ReadonlyMounts: []mountcfg.Mount{readonlyEntry("/mnt/dup")},
+	}
+	o := &orchestrator{
+		seam:             fake,
+		signals:          make(chan os.Signal, 1),
+		brokerSocketPath: "/run/x.sock",
+	}
+	err := o.run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("run = nil; want a hard error for a duplicate destination")
+	}
+	if !strings.Contains(err.Error(), "/mnt/dup") {
+		t.Errorf("error %q does not name the duplicate destination", err.Error())
+	}
+	if fake.mountCount() != 0 {
+		t.Errorf("mountCount = %d; want 0 (rejected before any point started)", fake.mountCount())
+	}
+}
+
 // waitForFile polls until path exists or the test times out.
 func waitForFile(t *testing.T, path string) {
 	t.Helper()

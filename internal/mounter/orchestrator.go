@@ -121,6 +121,23 @@ func (o *orchestrator) run(ctx context.Context, cfg *mountcfg.Config) error {
 		o.signals = sig
 	}
 
+	// Ready-file hygiene (ME-01): remove any pre-existing file at the START so a
+	// stale file from a previous dead process never advertises "ready" for this
+	// run, and register a retraction so the file never outlives the process. The
+	// retraction runs on EVERY exit from run (error, signal teardown, spontaneous
+	// exit); signalReady creates the file only on the all-up path, so the net
+	// effect is: the ready-file exists only while every mount is actually up.
+	if o.readiness.ReadyFilePath != "" {
+		if err := os.Remove(o.readiness.ReadyFilePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove stale ready-file %q: %w", o.readiness.ReadyFilePath, err)
+		}
+		defer func() {
+			if err := os.Remove(o.readiness.ReadyFilePath); err != nil && !os.IsNotExist(err) {
+				slog.Warn("retract ready-file", "path", o.readiness.ReadyFilePath, "err", err)
+			}
+		}()
+	}
+
 	specs, err := o.buildSpecs(cfg)
 	if err != nil {
 		return err
@@ -206,14 +223,22 @@ func (o *orchestrator) shutdownDuringStartup(started []point) error {
 
 // buildSpecs orders the writable mounts before the read-only mounts and stamps
 // each with the broker socket path. A memory-store mount is a hard error here,
-// before any point is started, so it is never silently skipped.
+// before any point is started, so it is never silently skipped. A destination
+// that repeats across Mounts ∪ ReadonlyMounts is likewise a hard error (ME-02):
+// two specs targeting the same path would have the second silently shadow the
+// first, violating the never-silently-mis-mounted discipline.
 func (o *orchestrator) buildSpecs(cfg *mountcfg.Config) ([]mountSpec, error) {
 	specs := make([]mountSpec, 0, len(cfg.Mounts)+len(cfg.ReadonlyMounts))
+	seen := make(map[string]struct{}, cap(specs))
 	add := func(mounts []mountcfg.Mount, readOnly bool) error {
 		for _, m := range mounts {
 			if m.MemoryStoreID != nil {
 				return fmt.Errorf("mount %q: memory-store mounts are not yet supported (no memory scope axis)", m.Destination)
 			}
+			if _, dup := seen[m.Destination]; dup {
+				return fmt.Errorf("mount %q: duplicate destination across mounts/readonly_mounts (a second mount would silently shadow the first)", m.Destination)
+			}
+			seen[m.Destination] = struct{}{}
 			specs = append(specs, mountSpec{mount: m, readOnly: readOnly, socketPath: o.brokerSocketPath})
 		}
 		return nil
@@ -228,10 +253,13 @@ func (o *orchestrator) buildSpecs(cfg *mountcfg.Config) ([]mountSpec, error) {
 }
 
 // signalReady fires the readiness signal exactly once: it creates the ready-file
-// when a path is configured, otherwise logs a single readiness line.
+// when a path is configured, otherwise logs a single readiness line. The file is
+// truncated on create so it is always fresh and content-free — a pure presence
+// signal that never carries leftover bytes (run also removes any stale file at
+// start, ME-01).
 func (o *orchestrator) signalReady(n int) error {
 	if o.readiness.ReadyFilePath != "" {
-		f, err := os.OpenFile(o.readiness.ReadyFilePath, os.O_CREATE|os.O_WRONLY, 0o644)
+		f, err := os.OpenFile(o.readiness.ReadyFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			return fmt.Errorf("create ready-file %q: %w", o.readiness.ReadyFilePath, err)
 		}
