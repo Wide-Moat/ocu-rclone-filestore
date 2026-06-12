@@ -2,103 +2,115 @@
 // Copyright (c) 2025 Open Computer Use Contributors
 
 // Package mounter is the seam between the loaded guest mount config and the
-// VFS mount it will eventually drive.
+// live VFS mounts it drives.
 //
-// This package declares the interface and a not-implemented sentinel only. The
-// concrete mount that binds a [mountcfg.Config] to a live VFS is built in a
-// later phase; until then the no-op implementation returns [ErrNotImplemented]
-// so every call site fails closed on an explicit, matchable error.
+// The orchestration policy — fan-out, fail-fast with best-effort cleanup,
+// readiness-once, signal teardown — depends only on the unexported pointMounter
+// seam and is fully unit-tested over a fake. The production seam builds the
+// ocufs Fs, hands it to a mountlib.MountPoint, starts the live mount and bridges
+// its lifecycle; it is build-tagged to the platforms the kernel mount method
+// supports and fails closed elsewhere.
 package mounter
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
-	// Anchor the pinned rclone module as a direct dependency without
-	// registering a backend or invoking any mount path. The core fs package
-	// carries no backend registration on its own; the real mount wiring lands
-	// in a later phase. This blank import keeps rclone in the module graph as a
-	// direct, exact-tag dependency rather than a prunable indirect one.
+	// Anchor the pinned rclone module as a direct dependency. The core fs
+	// package carries no backend registration on its own; the production mount
+	// wiring lives in the build-tagged realpoint.go. This blank import keeps
+	// rclone in the module graph as a direct, exact-tag dependency.
 	_ "github.com/rclone/rclone/fs"
 
 	// Register the ocufs backend so its NewFs is reachable through the
-	// configmap the orchestrator builds. This is the sole new dependency edge;
-	// the orchestrator builds no other Fs and opens no second transport.
+	// configmap the seam builds. This is the sole new Fs edge; the seam builds
+	// no other Fs and opens no second transport.
 	_ "github.com/Wide-Moat/ocu-rclone-filestore/backend/ocufs"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mountcfg"
 )
 
-// ErrNotImplemented is returned by the seam until the real mount lands. Call
-// sites match it with errors.Is so the not-implemented path stays distinct from
-// any future operational error.
-var ErrNotImplemented = errors.New("mounter: not implemented")
+// errMountMethodUnavailable is the typed fail-closed error returned by the
+// production seam constructor when the kernel mount method is unavailable —
+// either the mount2 registry lookup returned nil on a supported platform, or
+// the build landed on an unsupported platform/arch. The session surfaces it so
+// main exits non-zero; the mount is never silently skipped (MNT-02).
+var errMountMethodUnavailable = errors.New("mounter: mount method unavailable: cannot mount on this platform/arch")
 
-// Mounter binds a validated guest mount config to the VFS mounts it describes.
-// The single method takes the loaded config so the seam is typed end to end.
+// Mounter binds a validated guest mount config to the live VFS mounts it
+// describes. The single method takes the loaded config so the seam is typed end
+// to end.
 type Mounter interface {
 	// Mount realizes every entry in cfg as a live mount and blocks until the
 	// mounts are torn down, returning the terminal error (nil on clean
-	// shutdown). The current implementation is a seam returning
-	// ErrNotImplemented.
+	// shutdown).
 	Mount(cfg *mountcfg.Config) error
 }
 
 // orchestratorMounter realizes a config by running the orchestrator over a
-// production pointMounter seam. The orchestration policy (fan-out, fail-fast,
-// readiness, signal teardown) is wave-1 complete and fully unit-tested over a
-// fake seam; the production seam body that builds the live ocufs-backed mounts
-// lands in a later wave.
+// production pointMounter seam constructed lazily inside Mount.
 type orchestratorMounter struct {
-	// newSeam constructs the production pointMounter. In wave 1 it returns the
-	// not-implemented stub so callers fail closed on a matchable error; a later
-	// wave swaps in the live, build-tagged seam.
+	// newSeam constructs the production pointMounter. It is built lazily inside
+	// Mount so the orchestrator's empty-broker-socket check fires BEFORE seam
+	// construction — on an empty socket the socket hard error wins regardless of
+	// platform, including where the unsupported-platform constructor would
+	// itself error.
 	newSeam func() (pointMounter, error)
-	// brokerSocketPath is the per-session socket path, an explicit runtime
-	// input (flag/env) supplied by the entrypoint. The wave-1 stub path never
-	// reaches the orchestrator's socket check.
+	// brokerSocketPath is the per-session socket path, an explicit runtime input
+	// (flag/env) supplied by the entrypoint.
 	brokerSocketPath string
 	// readiness carries the optional ready-file path (flag/env).
 	readiness ReadinessConfig
+	// signals is the termination-signal channel the entrypoint installs. When
+	// nil, Mount installs a default SIGTERM/SIGINT channel.
+	signals <-chan os.Signal
 }
 
-// Mount constructs the production seam and runs the orchestrator. In wave 1 the
-// seam constructor returns an error satisfying errors.Is(_, ErrNotImplemented),
-// so every Mount on a valid config fails closed on that matchable sentinel
-// until the live seam lands.
+// Mount runs the orchestrator over the lazily constructed production seam. The
+// orchestrator rejects an empty broker socket path before the seam is built, so
+// that hard error wins over an unsupported-platform seam error.
 func (m orchestratorMounter) Mount(cfg *mountcfg.Config) error {
-	seam, err := m.newSeam()
-	if err != nil {
-		return err
-	}
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
-	defer signal.Stop(sig)
-
 	o := &orchestrator{
-		seam:             seam,
+		newSeam:          m.newSeam,
 		readiness:        m.readiness,
-		signals:          sig,
+		signals:          m.signals,
 		brokerSocketPath: m.brokerSocketPath,
 	}
 	return o.run(context.Background(), cfg)
 }
 
-// notImplementedSeam is the wave-1 production seam stub. Its constructor returns
-// an error wrapping ErrNotImplemented so the orchestrator never starts and the
-// entrypoint fails closed on the matchable sentinel.
-func notImplementedSeam() (pointMounter, error) {
-	return nil, fmt.Errorf("mounter: live mount seam not yet wired: %w", ErrNotImplemented)
+// Option configures the mounter returned by New.
+type Option func(*orchestratorMounter)
+
+// WithReadiness sets the readiness configuration (the ready-file path sourced
+// from a flag/env by the entrypoint).
+func WithReadiness(rc ReadinessConfig) Option {
+	return func(m *orchestratorMounter) { m.readiness = rc }
 }
 
-// New returns the orchestrator-backed mounter wired with the wave-1 stub seam.
-// It exists so the entrypoint depends on a constructor rather than a concrete
-// type and need not change when the live seam replaces the stub.
-func New() Mounter {
-	return orchestratorMounter{newSeam: notImplementedSeam}
+// WithBrokerSocket sets the per-session broker socket path, an explicit runtime
+// input sourced from a flag/env. An empty value makes the orchestrator hard-fail
+// before any mount.
+func WithBrokerSocket(path string) Option {
+	return func(m *orchestratorMounter) { m.brokerSocketPath = path }
+}
+
+// WithSignals installs the termination-signal channel the orchestrator selects
+// on for teardown. When unset, the mounter installs a default SIGTERM/SIGINT
+// channel.
+func WithSignals(sig <-chan os.Signal) Option {
+	return func(m *orchestratorMounter) { m.signals = sig }
+}
+
+// New returns the orchestrator-backed mounter wired with the production seam
+// (the live build-tagged seam on a supported platform, the fail-closed stub
+// elsewhere). Functional options thread the readiness config, the broker socket
+// path, and the signal channel from the entrypoint without changing Mount.
+func New(opts ...Option) Mounter {
+	m := orchestratorMounter{newSeam: defaultRealSeam}
+	for _, opt := range opts {
+		opt(&m)
+	}
+	return m
 }

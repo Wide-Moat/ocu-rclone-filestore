@@ -325,13 +325,24 @@ func TestOrchestratorEmptyBrokerSocketIsHardError(t *testing.T) {
 	}
 }
 
-func TestNewMountReturnsNotImplemented(t *testing.T) {
+// TestNewMountEmptyBrokerSocketHardErrorWinsOverSeam asserts that New() with no
+// WithBrokerSocket option reaches the orchestrator's empty-broker-socket hard
+// error BEFORE the production seam is constructed (W6 error precedence). This
+// holds on every platform: on a mount2-supported host the real seam would
+// construct fine but is never reached; on an unsupported host the fail-closed
+// seam error is likewise pre-empted by the socket check. Either way the error
+// names the broker-socket gap, not a mount-method error — proving the check
+// runs first and no /dev/fuse is touched.
+func TestNewMountEmptyBrokerSocketHardErrorWinsOverSeam(t *testing.T) {
 	err := New().Mount(&mountcfg.Config{
 		ServiceURL: "https://broker.example",
 		Mounts:     []mountcfg.Mount{writableEntry("/mnt/w")},
 	})
-	if !errors.Is(err, ErrNotImplemented) {
-		t.Fatalf("New().Mount = %v; want errors.Is ErrNotImplemented", err)
+	if err == nil {
+		t.Fatal("New().Mount with no broker socket = nil; want the empty-broker-socket hard error")
+	}
+	if !strings.Contains(err.Error(), "broker socket path not provided") {
+		t.Fatalf("New().Mount error = %q; want the empty-broker-socket hard error to win over the seam", err.Error())
 	}
 }
 

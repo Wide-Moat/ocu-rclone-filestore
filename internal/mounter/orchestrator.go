@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"reflect"
+	"syscall"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mountcfg"
 )
@@ -67,7 +69,14 @@ type ReadinessConfig struct {
 // non-https service_urls, so the per-session socket path cannot come from the
 // validated config (D2). An empty value is a hard error before any mount.
 type orchestrator struct {
-	seam             pointMounter
+	// seam is the live pointMounter, constructed lazily by run via newSeam AFTER
+	// the empty-broker-socket check so the socket hard error wins over an
+	// unsupported-platform seam error.
+	seam pointMounter
+	// newSeam constructs the production seam. run builds it only after the
+	// broker-socket check passes; the fake-driven tests set seam directly and
+	// leave this nil.
+	newSeam          func() (pointMounter, error)
 	readiness        ReadinessConfig
 	signals          <-chan os.Signal
 	brokerSocketPath string
@@ -87,6 +96,29 @@ type orchestrator struct {
 func (o *orchestrator) run(ctx context.Context, cfg *mountcfg.Config) error {
 	if o.brokerSocketPath == "" {
 		return errors.New("broker socket path not provided: the per-session socket path is a runtime input (D2), not the frozen service_url")
+	}
+
+	// Construct the production seam only after the broker-socket check so the
+	// socket hard error wins over an unsupported-platform seam error. The
+	// fake-driven tests inject o.seam directly and leave o.newSeam nil.
+	if o.seam == nil {
+		if o.newSeam == nil {
+			return errors.New("orchestrator: no mount seam configured")
+		}
+		seam, err := o.newSeam()
+		if err != nil {
+			return err
+		}
+		o.seam = seam
+	}
+
+	// Install a default termination-signal channel when the entrypoint did not
+	// inject one. The fake-driven tests always inject their own.
+	if o.signals == nil {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+		defer signal.Stop(sig)
+		o.signals = sig
 	}
 
 	specs, err := o.buildSpecs(cfg)
