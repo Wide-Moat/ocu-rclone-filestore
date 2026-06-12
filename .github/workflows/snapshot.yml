@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# PR-time release smoke. Every pull request (and push to main) runs a
+# goreleaser snapshot build — static linux amd64+arm64 binaries, checksums, and
+# per-artifact SBOMs — to prove the release builds, WITHOUT publishing. The
+# dist artifacts are uploaded for inspection. goreleaser runs via its official
+# image pinned by digest (the same image the release workflow publishes with),
+# so the snapshot here proves the exact toolchain the tag release uses.
+
+name: snapshot
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    name: goreleaser snapshot (no publish)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: goreleaser snapshot build
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}":/repo -w /repo \
+            goreleaser/goreleaser@sha256:f5ce92e9a38fb9406ccd638b95e43402cd3f4c567cb677eb06af9fd161278c12 \
+            release --snapshot --clean
+      - name: Upload snapshot artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-snapshot
+          path: |
+            dist/*.tar.gz
+            dist/*.sbom.json
+            dist/checksums.txt
+          if-no-files-found: error

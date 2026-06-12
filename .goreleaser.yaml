@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Release build for the guest-side mount binary. One static build
+# (CGO_ENABLED=0 — mount2/go-fuse is pure Go, no libfuse), reproducible
+# (trimpath + mod_timestamp), for linux amd64+arm64, with a checksums file and
+# a per-artifact SBOM. The GitHub Release is published on a v* tag. The release
+# is gated behind the e2e job in the release workflow; goreleaser itself only
+# builds and publishes the artifacts.
+
+version: 2
+
+project_name: ocu-rclone-filestore
+
+builds:
+  - id: ocu-rclone-filestore
+    main: ./cmd/ocu-rclone-filestore
+    binary: ocu-rclone-filestore
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    # Reproducible builds: stamp the binary's mtime from the commit, not the
+    # build clock, and strip debug info.
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: ocu-rclone-filestore
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - id: archive-sbom
+    artifacts: archive
+
+release:
+  github:
+    owner: Wide-Moat
+    name: ocu-rclone-filestore
+  draft: false
+  prerelease: auto
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+changelog:
+  use: github
