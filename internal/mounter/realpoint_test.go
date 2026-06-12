@@ -259,3 +259,139 @@ type stubPoint struct{}
 
 func (stubPoint) destination() string { return "/stub" }
 func (stubPoint) wait() error         { return nil }
+
+// TestDefaultRealSeamResolves exercises defaultRealSeam on a mount2-supported
+// leg: it resolves the registered mount2 function and builds the production
+// seam. On this build tag the registry lookup succeeds, so the constructor must
+// return a non-nil seam and no error. (The unsupported-platform fail-closed path
+// is covered separately by the negated-tag test.)
+func TestDefaultRealSeamResolves(t *testing.T) {
+	seam, err := defaultRealSeam()
+	if err != nil {
+		t.Fatalf("defaultRealSeam() error = %v; want a resolved seam on a mount2-supported leg", err)
+	}
+	if seam == nil {
+		t.Fatal("defaultRealSeam() seam = nil; want the production seam built from the resolved mount2 MountFn")
+	}
+	if _, ok := seam.(*realPointMounter); !ok {
+		t.Fatalf("defaultRealSeam() returned %T; want *realPointMounter", seam)
+	}
+}
+
+// fedMountFn returns a MountFn that hands back the SAME errChan the caller owns,
+// so the test can make mp.Wait() return by feeding a terminal value onto it.
+// mountlib.MountPoint.Wait() blocks on the channel returned here; a no-op
+// unmount closure alone never unblocks it, so the test drives the terminal exit
+// explicitly.
+func fedMountFn(errChan chan error) mountlib.MountFn {
+	return func(_ *vfs.VFS, mountpoint string, _ *mountlib.Options) (<-chan error, func() error, string, error) {
+		unmount := func() error { return nil }
+		return errChan, unmount, mountpoint, nil
+	}
+}
+
+// TestRealPointDestinationAndWait covers realPoint.destination() and
+// realPoint.wait() by constructing a live point through a fake MountFn path:
+// destination() must echo the served path and wait() must return the terminal
+// error fed on the mount's errChan. No /dev/fuse is touched; the errChan the
+// MountFn hands back is what mp.Wait() ultimately observes, so feeding it a
+// terminal value drives wait() to return.
+func TestRealPointDestinationAndWait(t *testing.T) {
+	errChan := make(chan error, 1)
+	r := &realPointMounter{
+		mountFn:      fedMountFn(errChan),
+		readyTimeout: 10 * time.Millisecond,
+	}
+
+	info, err := fs.Find("ocufs")
+	if err != nil {
+		t.Fatalf("ocufs backend not registered: %v", err)
+	}
+	cm := configmap.Simple{}
+	cm.Set("socket_path", "/tmp/ocufs-unit-not-dialed.sock")
+	cm.Set("filesystem_id", "session_unit_fs")
+	cm.Set("read_only", "false")
+	fsObj, err := info.NewFs(context.Background(), "ocufs-destwait", "", cm)
+	if err != nil {
+		t.Fatalf("build ocufs Fs: %v", err)
+	}
+
+	dest := t.TempDir()
+	mp := mountlib.NewMountPoint(r.mountFn, dest, fsObj, &mountlib.Options{}, &vfscommon.Options{})
+	if _, err := mp.Mount(); err != nil {
+		t.Fatalf("mp.Mount(): %v", err)
+	}
+	p := &realPoint{dest: dest, mp: mp}
+
+	if got := p.destination(); got != dest {
+		t.Fatalf("realPoint.destination() = %q; want %q", got, dest)
+	}
+
+	// wait() blocks on mp.Wait() until the mount reports terminal exit. Feed the
+	// errChan a clean (nil) terminal value so wait() returns and the test never
+	// hangs.
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- p.wait() }()
+	errChan <- nil
+	select {
+	case <-waitErr:
+		// wait() returned, covering the method.
+	case <-time.After(2 * time.Second):
+		t.Fatal("realPoint.wait() did not return after a terminal value was fed on the mount errChan")
+	}
+}
+
+// TestWaitReadyDeadlineTimeout covers the deadline-timeout branch of waitReady on
+// the polling leg (linux, CanCheckMountReady=true): a tiny readyTimeout over a
+// plain non-mounted directory never reports ready, so the poll loop must reach
+// the deadline and return the wrapped readiness error. On the non-polling leg
+// (darwin/amd64) waitReady short-circuits to nil, so the assertion is
+// leg-dependent.
+func TestWaitReadyDeadlineTimeout(t *testing.T) {
+	r := &realPointMounter{readyTimeout: 5 * time.Millisecond}
+	dest := t.TempDir()
+
+	err := r.waitReady(context.Background(), dest)
+
+	if !mountlib.CanCheckMountReady {
+		if err != nil {
+			t.Fatalf("waitReady on a non-polling leg = %v; want nil (readiness blind-trusted)", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatal("waitReady over a non-mounted dir = nil; want the deadline-timeout readiness error")
+	}
+	if got := err.Error(); !strings.Contains(got, "wait for mount ready") {
+		t.Fatalf("waitReady error = %q; want the wrapped readiness-timeout error", got)
+	}
+}
+
+// TestWaitReadyContextCanceled covers the ctx-cancel branch of waitReady on the
+// polling leg: an already-canceled context must make the loop return the wrapped
+// context error on its first iteration rather than polling to the deadline. On
+// the non-polling leg waitReady returns nil before it ever inspects the context.
+func TestWaitReadyContextCanceled(t *testing.T) {
+	// A generous readyTimeout proves the early return is driven by the canceled
+	// context, not the deadline.
+	r := &realPointMounter{readyTimeout: 30 * time.Second}
+	dest := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := r.waitReady(ctx, dest)
+
+	if !mountlib.CanCheckMountReady {
+		if err != nil {
+			t.Fatalf("waitReady on a non-polling leg = %v; want nil (context never inspected)", err)
+		}
+		return
+	}
+	if err == nil {
+		t.Fatal("waitReady with a canceled context = nil; want the wrapped context error")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitReady error = %v; want it to wrap context.Canceled", err)
+	}
+}

@@ -467,6 +467,84 @@ func TestOrchestratorDuplicateDestinationHardError(t *testing.T) {
 	}
 }
 
+// TestOrchestratorSignalReadyFileError covers the signalReady file-error path:
+// when the ready-file path cannot be created, signalReady returns a wrapped
+// error and run treats it as terminal — tearing down every started point and
+// surfacing the failure. We point ReadyFilePath at a path whose parent directory
+// does not exist, so os.OpenFile fails on create. The stale-remove at start
+// tolerates the missing path (os.IsNotExist), so the failure surfaces only at
+// the signalReady stage, after the single mount is up.
+func TestOrchestratorSignalReadyFileError(t *testing.T) {
+	fake := newFake()
+	sig := make(chan os.Signal, 1)
+	// Parent directory does not exist: O_CREATE cannot make the file.
+	readyFile := filepath.Join(t.TempDir(), "no-such-dir", "ready")
+
+	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{writableEntry("/mnt/w")}}
+	o := &orchestrator{
+		seam:             fake,
+		readiness:        ReadinessConfig{ReadyFilePath: readyFile},
+		signals:          sig,
+		brokerSocketPath: "/run/x.sock",
+	}
+
+	err := o.run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("run = nil; want a terminal error when the ready-file cannot be created")
+	}
+	if !strings.Contains(err.Error(), "create ready-file") {
+		t.Fatalf("run error = %q; want the wrapped create-ready-file error", err.Error())
+	}
+	// The mount was started, then torn down when readiness signalling failed.
+	if fake.mountCount() != 1 {
+		t.Errorf("mountCount = %d; want 1 (the one mount started before signalReady)", fake.mountCount())
+	}
+	if fake.unmountCount() != 1 {
+		t.Errorf("unmountCount = %d; want 1 (the started point torn down on the terminal readiness error)", fake.unmountCount())
+	}
+}
+
+// TestOrchestratorStaleRemoveError covers the stale-file remove-error path at
+// the START of run: when a non-IsNotExist error occurs removing the pre-existing
+// ready-file, run returns the wrapped error before any mount starts. We plant a
+// NON-EMPTY DIRECTORY at the ready-file path so os.Remove fails with ENOTEMPTY
+// (not IsNotExist), driving the error branch.
+func TestOrchestratorStaleRemoveError(t *testing.T) {
+	fake := newFake()
+	sig := make(chan os.Signal, 1)
+
+	// A non-empty directory at the ready-file path: os.Remove returns a
+	// non-IsNotExist error (directory not empty), exercising the stale-remove
+	// error branch.
+	readyDir := filepath.Join(t.TempDir(), "ready")
+	if err := os.Mkdir(readyDir, 0o755); err != nil {
+		t.Fatalf("plant ready-dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(readyDir, "child"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("plant child in ready-dir: %v", err)
+	}
+
+	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{writableEntry("/mnt/w")}}
+	o := &orchestrator{
+		seam:             fake,
+		readiness:        ReadinessConfig{ReadyFilePath: readyDir},
+		signals:          sig,
+		brokerSocketPath: "/run/x.sock",
+	}
+
+	err := o.run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("run = nil; want the wrapped stale-remove error")
+	}
+	if !strings.Contains(err.Error(), "remove stale ready-file") {
+		t.Fatalf("run error = %q; want the wrapped remove-stale-ready-file error", err.Error())
+	}
+	// The stale-remove fails before any mount is attempted.
+	if fake.mountCount() != 0 {
+		t.Errorf("mountCount = %d; want 0 (stale-remove fails before any mount)", fake.mountCount())
+	}
+}
+
 // waitForFile polls until path exists or the test times out.
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
