@@ -37,6 +37,13 @@ RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
       -o /ocu-rclone-filestore \
       ./cmd/ocu-rclone-filestore
 
+# Stage the empty mount destination directories the guest config points at
+# (/workspace/out, /workspace/in). The distroless runtime has no shell and the
+# mount binary does not create destinations, so the mountpoints must exist in
+# the image; staged here and copied below so the runtime stage stays a plain
+# COPY. Root-owned, traversable by the root runtime user.
+RUN mkdir -p /staging/workspace/out /staging/workspace/in
+
 # Runtime. Distroless static, pinned by digest; the tag comment records the
 # human-readable reference. gcr.io/distroless/static-debian12 ROOT variant:
 # FUSE mount(2) needs the SYS_ADMIN capability in the effective set, and
@@ -46,9 +53,10 @@ RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
 # host at run time, the standard FUSE container posture.
 FROM gcr.io/distroless/static-debian12@sha256:9c346e4be81b5ca7ff31a0d89eaeade58b0f95cfd3baed1f36083ddb47ca3160 AS runtime
 
-# Only the static binary crosses into the runtime image. No shell, no package
-# manager, no extra tooling — the attack surface is the one binary plus the
-# bind-mounted socket.
+# Only the static binary and the empty mountpoint directories cross into the
+# runtime image. No shell, no package manager, no extra tooling — the attack
+# surface is the one binary plus the bind-mounted socket.
+COPY --from=builder /staging/ /
 COPY --from=builder /ocu-rclone-filestore /ocu-rclone-filestore
 
 # The container is invoked as the mount binary; the host supplies --config,
