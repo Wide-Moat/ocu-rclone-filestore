@@ -62,4 +62,14 @@ COPY --from=builder /ocu-rclone-filestore /ocu-rclone-filestore
 # The container is invoked as the mount binary; the host supplies --config,
 # --broker-socket (or OCU_BROKER_SOCKET), and --ready-file (or OCU_READY_FILE)
 # as args/env per the shipped entrypoint contract.
+#
+# Reviewed exception to the "last USER must not be root" rule: this guest MUST
+# run as root because the FUSE mount(2) syscall needs CAP_SYS_ADMIN in the
+# effective set and Docker grants added capabilities only to a root container
+# user (a non-root user gets empty permitted/effective sets and mount(2) is
+# permanently EPERM). The container is confined to exactly /dev/fuse +
+# SYS_ADMIN granted by the host, with no shell, package manager, or extra
+# tooling — the minimal FUSE container posture. The rationale is also recorded
+# above the runtime FROM.
+# nosemgrep: dockerfile.security.missing-user-entrypoint.missing-user-entrypoint
 ENTRYPOINT ["/ocu-rclone-filestore"]
