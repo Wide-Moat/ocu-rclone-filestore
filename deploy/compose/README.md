@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: FSL-1.1-Apache-2.0 -->
+<!-- Copyright (c) 2025 Open Computer Use Contributors -->
+
 # Compose harness — real end-to-end exercise
 
 This harness brings up the mount binary against a broker over a shared

@@ -21,9 +21,13 @@ Docker client at the VM's Docker context so `docker` / `docker compose` commands
 run against the Linux kernel:
 
 ```sh
-limactl start            # start (or create) a Docker-capable Linux VM
-docker context use lima  # use the VM's Docker context for the steps below
+limactl start                 # start (or create) a Docker-capable Linux VM
+docker context use lima-<vm>  # Lima registers the context as lima-<vmname>
 ```
+
+For a VM named `ocu-linux` the context is `lima-ocu-linux`. Alternatively, skip
+the context switch entirely and run every `docker` command inside the VM via
+`limactl shell <vm> docker ...`.
 
 Confirm the FUSE device is present inside the VM:
 
@@ -43,11 +47,15 @@ docker compose -f deploy/compose/docker-compose.yml up --build -d
 ```
 
 The mount entrypoint creates the ready-file at `/run/ocu/mount-ready` on the
-shared volume once every mount is up. Observe it to confirm readiness:
+shared volume once every mount is up. The mount image is distroless (no shell,
+no `ls`), so observe the shared volume from the broker side, which has busybox:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml exec mount ls /run/ocu/mount-ready
+docker compose -f deploy/compose/docker-compose.yml exec broker ls /run/ocu/
 ```
+
+(or stream the file out of the mount container without an exec:
+`docker compose -f deploy/compose/docker-compose.yml cp mount:/run/ocu/mount-ready -`)
 
 ## 3. Run the gated exercise
 
