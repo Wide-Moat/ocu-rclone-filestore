@@ -38,8 +38,13 @@ RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
       ./cmd/ocu-rclone-filestore
 
 # Runtime. Distroless static, pinned by digest; the tag comment records the
-# human-readable reference. gcr.io/distroless/static-debian12:nonroot.
-FROM gcr.io/distroless/static-debian12@sha256:d093aa3e30dbadd3efe1310db061a14da60299baff8450a17fe0ccc514a16639 AS runtime
+# human-readable reference. gcr.io/distroless/static-debian12 ROOT variant:
+# FUSE mount(2) needs the SYS_ADMIN capability in the effective set, and
+# Docker grants added capabilities only to a root container user — a non-root
+# user gets empty permitted/effective sets and mount(2) is permanently EPERM.
+# The container stays confined to exactly /dev/fuse + SYS_ADMIN granted by the
+# host at run time, the standard FUSE container posture.
+FROM gcr.io/distroless/static-debian12@sha256:9c346e4be81b5ca7ff31a0d89eaeade58b0f95cfd3baed1f36083ddb47ca3160 AS runtime
 
 # Only the static binary crosses into the runtime image. No shell, no package
 # manager, no extra tooling — the attack surface is the one binary plus the
