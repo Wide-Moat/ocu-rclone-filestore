@@ -31,7 +31,7 @@ type brokerClient interface {
 	DownloadRange(ctx context.Context, uuid string, offset, length int64) ([]byte, error)
 
 	// Mutating file ops.
-	Upload(ctx context.Context, path string, src io.Reader, totalBytes int64) error
+	Upload(ctx context.Context, path string, src io.Reader, totalBytes int64, overwrite bool) error
 	CopyFile(ctx context.Context, sourcePath, destinationPath string) (*brokerrpc.AckResponse, error)
 	MoveFile(ctx context.Context, sourcePath, destinationPath string) (*brokerrpc.AckResponse, error)
 	RemoveFile(ctx context.Context, path string) (*brokerrpc.AckResponse, error)
@@ -71,8 +71,8 @@ func (a *brokerClientAdapter) DownloadRange(ctx context.Context, uuid string, of
 	return a.c.DownloadRange(ctx, uuid, offset, length)
 }
 
-func (a *brokerClientAdapter) Upload(ctx context.Context, path string, src io.Reader, totalBytes int64) error {
-	return a.c.Upload(ctx, path, src, totalBytes)
+func (a *brokerClientAdapter) Upload(ctx context.Context, path string, src io.Reader, totalBytes int64, overwrite bool) error {
+	return a.c.Upload(ctx, path, src, totalBytes, overwrite)
 }
 
 func (a *brokerClientAdapter) CopyFile(ctx context.Context, sourcePath, destinationPath string) (*brokerrpc.AckResponse, error) {

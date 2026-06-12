@@ -16,7 +16,10 @@
 //  3. Frames 2…N (data flag 0x00): {chunk: <base64 bytes>} frames, each sized
 //     so the ENCODED frame payload stays strictly under MessageCeiling.
 //
-//  4. Half-close (EOF on the request body) signals completion.
+//  4. A terminating end-stream frame (flag 0x02) carrying an empty
+//     EndStreamResponse {} signals completion. The body half-close alone is
+//     not the completion signal: without this frame the broker keeps waiting
+//     and then aborts the (already-assembled) stream as malformed.
 //
 //  5. The broker replies with HTTP 200 and an EndStreamResponse trailer frame
 //     (flag 0x02). The caller must read this trailer for success/failure.
@@ -33,11 +36,17 @@ import (
 )
 
 // uploadParamsFrame is the JSON body for the first frame in a fileUpload
-// client-streaming request.
+// client-streaming request. OverwriteExisting selects whether an existing
+// destination is replaced in place (true) or the upload fails on a present
+// path (false): a create-new write (Put) sends false so a colliding path is a
+// conflict, while an overwrite-in-place write (Update) sends true so the
+// broker replaces the object atomically rather than the guest staging a
+// remove-then-upload with a non-atomic window between the two.
 type uploadParamsFrame struct {
 	FilesystemID          string                `json:"filesystem_id"`
 	Path                  string                `json:"path"`
 	DeclaredSizeBytes     int64                 `json:"declared_size_bytes"`
+	OverwriteExisting     bool                  `json:"overwrite_existing"`
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
@@ -53,7 +62,10 @@ type uploadChunkFrame struct {
 // a mismatch in either direction (over- or under-send) results in an
 // invalid_argument error from the broker, which the mapper returns as a
 // permanent no-retry error. path is the filesystem-relative destination path.
-func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBytes int64) error {
+// overwrite selects whether an existing destination is replaced in place
+// (true, the overwrite-in-place write) or the upload fails on a present path
+// (false, the create-new write).
+func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBytes int64, overwrite bool) error {
 	fsID, am, err := c.stamp(OpFileUpload)
 	if err != nil {
 		return err
@@ -68,7 +80,7 @@ func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBy
 	errCh := make(chan error, 1)
 	go func() {
 		defer pw.Close() //nolint:errcheck
-		errCh <- writeUploadFrames(pw, fsID, path, totalBytes, am, src, c.messageCeiling)
+		errCh <- writeUploadFrames(pw, fsID, path, totalBytes, overwrite, am, src, c.messageCeiling)
 	}()
 
 	url := streamingURL(OpFileUpload)
@@ -152,6 +164,7 @@ func writeUploadFrames(
 	w io.Writer,
 	fsID, path string,
 	totalBytes int64,
+	overwrite bool,
 	am AuthorizationMetadata,
 	src io.Reader,
 	ceiling int,
@@ -161,6 +174,7 @@ func writeUploadFrames(
 		FilesystemID:          fsID,
 		Path:                  path,
 		DeclaredSizeBytes:     totalBytes,
+		OverwriteExisting:     overwrite,
 		AuthorizationMetadata: am,
 	}
 	payload, err := json.Marshal(params)
@@ -198,6 +212,17 @@ func writeUploadFrames(
 		if readErr != nil {
 			return fmt.Errorf("read source: %w", readErr)
 		}
+	}
+
+	// Terminating frame: the Connect client-streaming protocol closes a request
+	// with an explicit end-stream frame (flag 0x02) carrying an empty
+	// EndStreamResponse {}, not a bare body half-close. Omitting it leaves the
+	// broker waiting on a frame that never arrives; after it has already
+	// assembled the object from the data frames it then aborts the stream as a
+	// malformed inbound frame, and the retry sees the object as already present.
+	// The end-stream frame is what tells the broker the upload is complete.
+	if err := writeEndStream(w, nil); err != nil {
+		return err
 	}
 	return nil
 }

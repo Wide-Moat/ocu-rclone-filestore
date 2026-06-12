@@ -52,9 +52,11 @@ type fakeClient struct {
 	moveFileResult         func(ctx context.Context, srcPath, dstPath string) (*brokerrpc.AckResponse, error)
 	removeFileResult       func(ctx context.Context, path string) (*brokerrpc.AckResponse, error)
 
-	// lastUploadPath and lastUploadSize capture what was passed to Upload.
-	lastUploadPath string
-	lastUploadSize int64
+	// lastUploadPath, lastUploadSize and lastUploadOverwrite capture what was
+	// passed to Upload.
+	lastUploadPath      string
+	lastUploadSize      int64
+	lastUploadOverwrite bool
 	// lastMakeDirectoryPath captures what was passed to MakeDirectory.
 	lastMakeDirectoryPath string
 	// lastRemoveDirectoryPath captures what was passed to RemoveDirectory.
@@ -120,10 +122,11 @@ func (f *fakeClient) DownloadRange(ctx context.Context, uuid string, offset, len
 	return []byte("bytes"), nil
 }
 
-func (f *fakeClient) Upload(ctx context.Context, path string, src io.Reader, totalBytes int64) error {
+func (f *fakeClient) Upload(ctx context.Context, path string, src io.Reader, totalBytes int64, overwrite bool) error {
 	f.uploadCount++
 	f.lastUploadPath = path
 	f.lastUploadSize = totalBytes
+	f.lastUploadOverwrite = overwrite
 	if f.uploadResult != nil {
 		return f.uploadResult(ctx, path, src, totalBytes)
 	}

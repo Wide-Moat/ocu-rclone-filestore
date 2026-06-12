@@ -41,6 +41,14 @@ import (
 // forever.
 const waitMountReadyTimeout = 30 * time.Second
 
+// writebackDrainTimeout bounds how long teardown waits for in-flight VFS
+// write-back uploads to reach the broker before unmounting. A write-back cache
+// holds dirty bytes locally and uploads them asynchronously; unmounting before
+// that queue drains discards whatever has not yet been sent, silently losing
+// the most recent writes. Bounding the wait keeps a wedged upload from blocking
+// teardown forever while still giving the queue a real chance to flush.
+const writebackDrainTimeout = 30 * time.Second
+
 // realPointMounter is the production pointMounter: it builds the ocufs Fs from
 // the orchestrator's configmap, hands it to a mountlib.MountPoint with the
 // mapped VFS/mount options, starts the live FUSE mount, and confirms readiness.
@@ -103,11 +111,26 @@ type realPoint struct {
 func (p *realPoint) destination() string { return p.dest }
 func (p *realPoint) wait() error         { return p.mp.Wait() }
 
-// doUnmount tears the mount down at most once, caching and returning the result
-// of the single mp.Unmount() call. Concurrent callers all observe that one
-// result.
+// doUnmount drains the VFS write-back queue, then tears the mount down — at most
+// once, caching and returning the result of the single mp.Unmount() call.
+// Concurrent callers all observe that one result.
+//
+// The drain runs BEFORE Unmount: a write-back cache uploads dirty bytes to the
+// broker asynchronously, so unmounting first would discard whatever the upload
+// queue has not yet flushed and silently lose the most recent writes (the
+// SIGTERM-teardown data-loss path). WaitForWriters blocks until active writers
+// and in-use cache items both reach zero or the bounded timeout elapses;
+// FlushDirCache then forgets the cached tree so the unmount sees a quiescent
+// VFS. mp.VFS is nil-guarded because a fake MountFn in a unit test never builds
+// one.
 func (p *realPoint) doUnmount() error {
-	p.unmountOnce.Do(func() { p.unmountErr = p.mp.Unmount() })
+	p.unmountOnce.Do(func() {
+		if p.mp.VFS != nil {
+			p.mp.VFS.WaitForWriters(writebackDrainTimeout)
+			p.mp.VFS.FlushDirCache()
+		}
+		p.unmountErr = p.mp.Unmount()
+	})
 	return p.unmountErr
 }
 

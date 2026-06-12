@@ -53,7 +53,7 @@ func (c *Client) Download(ctx context.Context, uuid string) ([]byte, error) {
 		return nil, err
 	}
 
-	respBody, respHeader, err := c.doDownloadRequest(ctx, fsID, uuid, am)
+	respBody, respHeader, err := c.doDownloadRequest(ctx, fsID, uuid, am, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -64,44 +64,63 @@ func (c *Client) Download(ctx context.Context, uuid string) ([]byte, error) {
 
 // DownloadRange is a distinctly-named helper that consumes the fileDownload
 // server-streaming response and returns the requested {offset, length} byte
-// slice from the reassembled content. This helper is the server-streaming
-// ranged-read path (D5); it is NOT a second readFile method (the unary
-// readFile op is in client.go, shipped in 02-01).
+// slice. It sends the {offset, length} window in the request so the broker
+// streams only those bytes — a ranged read transfers just the requested
+// window rather than the whole object. The local slice that follows is a
+// defensive clamp: a broker that honours the range returns exactly the window
+// and the slice is a no-op; a broker that ignores it (returning more) is still
+// trimmed to the contract, so the caller never sees over-delivery. This helper
+// is the server-streaming ranged-read path (D5); it is NOT a second readFile
+// method (the unary readFile op is in client.go, shipped in 02-01).
 func (c *Client) DownloadRange(ctx context.Context, uuid string, offset, length int64) ([]byte, error) {
-	full, err := c.Download(ctx, uuid)
-	if err != nil {
-		return nil, err
-	}
-
-	size := int64(len(full))
-	if offset < 0 || offset > size {
-		return nil, fmt.Errorf("brokerrpc: DownloadRange: offset %d out of bounds (size %d)", offset, size)
+	if offset < 0 {
+		return nil, fmt.Errorf("brokerrpc: DownloadRange: negative offset %d", offset)
 	}
 	if length < 0 {
 		return nil, fmt.Errorf("brokerrpc: DownloadRange: negative length %d", length)
 	}
-	// Clamp the length to what remains after offset. The offset check above
-	// guarantees size-offset is non-negative, which also makes offset+length
-	// overflow into a negative end (and the resulting make([]byte, negative)
-	// panic) impossible.
-	if length > size-offset {
-		length = size - offset
+
+	fsID, am, err := c.stamp(OpFileDownload)
+	if err != nil {
+		return nil, err
 	}
-	out := make([]byte, length)
-	copy(out, full[offset:offset+length])
-	return out, nil
+
+	rng := &Range{Offset: offset, Length: length}
+	respBody, respHeader, err := c.doDownloadRequest(ctx, fsID, uuid, am, rng)
+	if err != nil {
+		return nil, err
+	}
+	defer respBody.Close() //nolint:errcheck
+
+	content, err := reassembleDownloadStream(respBody, respHeader)
+	if err != nil {
+		return nil, err
+	}
+
+	// Defensive clamp against a broker that streamed more than the requested
+	// window. When the range was honoured, len(content) <= length and this is
+	// a no-op. Offset is NOT re-applied here: the broker already seeked to it,
+	// so the returned stream begins at offset.
+	if int64(len(content)) > length {
+		content = content[:length]
+	}
+	return content, nil
 }
 
-// doDownloadRequest builds and executes the fileDownload POST. It returns
-// the response body (caller must close) and the response headers.
+// doDownloadRequest builds and executes the fileDownload POST. rng is the
+// optional byte window: nil streams the whole object, non-nil streams only the
+// window. It returns the response body (caller must close) and the response
+// headers.
 func (c *Client) doDownloadRequest(
 	ctx context.Context,
 	fsID, uuid string,
 	am AuthorizationMetadata,
+	rng *Range,
 ) (io.ReadCloser, http.Header, error) {
 	req := FileDownloadRequest{
 		FilesystemID:          fsID,
 		UUID:                  uuid,
+		Range:                 rng,
 		AuthorizationMetadata: am,
 	}
 	reqPayload, err := json.Marshal(req)

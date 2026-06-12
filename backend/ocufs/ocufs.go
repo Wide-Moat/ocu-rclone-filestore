@@ -234,7 +234,9 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		return nil, fs.ErrorPermissionDenied
 	}
 	dstPath := absPath(f.root, src.Remote())
-	if err := f.client.Upload(ctx, dstPath, in, src.Size()); err != nil {
+	// overwrite=false: Put is the create-new write path, so a colliding
+	// destination is a conflict rather than a silent in-place replacement.
+	if err := f.client.Upload(ctx, dstPath, in, src.Size(), false); err != nil {
 		return nil, fmt.Errorf("ocufs: Put %q: %w", dstPath, err)
 	}
 	// The upload response carries no metadata on the current wire contract;

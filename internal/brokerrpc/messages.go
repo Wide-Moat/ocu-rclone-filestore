@@ -80,11 +80,12 @@ type MakeDirectoryRequest struct {
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
-// MoveDirectoryRequest is the request for the moveDirectory op.
+// MoveDirectoryRequest is the request for the moveDirectory op. The endpoints
+// are the bare source/destination fields (not source_path/destination_path).
 type MoveDirectoryRequest struct {
 	FilesystemID          string                `json:"filesystem_id"`
-	SourcePath            string                `json:"source_path"`
-	DestinationPath       string                `json:"destination_path"`
+	Source                string                `json:"source"`
+	Destination           string                `json:"destination"`
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
@@ -136,19 +137,29 @@ type ListFilesRequest struct {
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
-// CopyFileRequest is the request for the copyFile op.
+// CopyFileRequest is the request for the copyFile op. The endpoints are the
+// bare source/destination fields. OverwriteExisting selects whether an
+// existing destination is replaced (true) or the op fails on a present
+// destination (false); the mount sends true because the operations layer has
+// already decided the copy should proceed by the time it reaches the backend.
 type CopyFileRequest struct {
 	FilesystemID          string                `json:"filesystem_id"`
-	SourcePath            string                `json:"source_path"`
-	DestinationPath       string                `json:"destination_path"`
+	Source                string                `json:"source"`
+	Destination           string                `json:"destination"`
+	OverwriteExisting     bool                  `json:"overwrite_existing"`
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
-// MoveFileRequest is the request for the moveFile op.
+// MoveFileRequest is the request for the moveFile op. The endpoints are the
+// bare source/destination fields. OverwriteExisting selects whether an
+// existing destination is replaced (true) or the op fails on a present
+// destination (false); the mount sends true because a rename over an existing
+// path replaces it under filesystem semantics.
 type MoveFileRequest struct {
 	FilesystemID          string                `json:"filesystem_id"`
-	SourcePath            string                `json:"source_path"`
-	DestinationPath       string                `json:"destination_path"`
+	Source                string                `json:"source"`
+	Destination           string                `json:"destination"`
+	OverwriteExisting     bool                  `json:"overwrite_existing"`
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
@@ -170,10 +181,16 @@ type FileUploadRequest struct {
 }
 
 // FileDownloadRequest is the request for the fileDownload server-streaming
-// op (uuid-axis). The streaming transport is wired in a later phase.
+// op (uuid-axis). Range is the optional {offset, length} window: when it is
+// the zero value (omitted on the wire) the broker streams the whole object;
+// when set, the broker streams only that window. A ranged read therefore
+// transfers just the requested bytes rather than the full object. *Range is a
+// pointer with omitempty so a full Download serialises no range field at all,
+// keeping that request body byte-identical to the no-range form.
 type FileDownloadRequest struct {
 	FilesystemID          string                `json:"filesystem_id"`
 	UUID                  string                `json:"uuid"`
+	Range                 *Range                `json:"range,omitempty"`
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 

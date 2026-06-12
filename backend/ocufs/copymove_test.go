@@ -428,7 +428,7 @@ func TestPutKnownSizeRejectsNegative(t *testing.T) {
 	// Note: rclone guarantees src.Size() >= 0 when calling Put, so a negative
 	// size would be a rclone bug upstream. We verify the double catches it.
 	// To exercise the double's guard, call Upload directly with -1.
-	err = c.Upload(context.Background(), "/neg.txt", nil, -1)
+	err = c.Upload(context.Background(), "/neg.txt", nil, -1, false)
 	if err == nil {
 		t.Error("Upload with negative declared_size_bytes should return an error (D5 guard)")
 	}

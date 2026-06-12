@@ -174,7 +174,7 @@ func (c *Client) MoveDirectory(ctx context.Context, sourcePath, destinationPath 
 	if err != nil {
 		return nil, err
 	}
-	req := MoveDirectoryRequest{FilesystemID: fsID, SourcePath: sourcePath, DestinationPath: destinationPath, AuthorizationMetadata: am}
+	req := MoveDirectoryRequest{FilesystemID: fsID, Source: sourcePath, Destination: destinationPath, AuthorizationMetadata: am}
 	var resp AckResponse
 	return &resp, c.call(ctx, OpMoveDirectory, req, &resp)
 }
@@ -260,7 +260,7 @@ func (c *Client) CopyFile(ctx context.Context, sourcePath, destinationPath strin
 	if err != nil {
 		return nil, err
 	}
-	req := CopyFileRequest{FilesystemID: fsID, SourcePath: sourcePath, DestinationPath: destinationPath, AuthorizationMetadata: am}
+	req := CopyFileRequest{FilesystemID: fsID, Source: sourcePath, Destination: destinationPath, OverwriteExisting: true, AuthorizationMetadata: am}
 	var resp AckResponse
 	return &resp, c.call(ctx, OpCopyFile, req, &resp)
 }
@@ -271,7 +271,7 @@ func (c *Client) MoveFile(ctx context.Context, sourcePath, destinationPath strin
 	if err != nil {
 		return nil, err
 	}
-	req := MoveFileRequest{FilesystemID: fsID, SourcePath: sourcePath, DestinationPath: destinationPath, AuthorizationMetadata: am}
+	req := MoveFileRequest{FilesystemID: fsID, Source: sourcePath, Destination: destinationPath, OverwriteExisting: true, AuthorizationMetadata: am}
 	var resp AckResponse
 	return &resp, c.call(ctx, OpMoveFile, req, &resp)
 }

@@ -58,7 +58,7 @@ func TestUploadStreamRouteAndHeaders(t *testing.T) {
 
 	c, _ := New(sock, "fs-test-01")
 	payload := bytes.NewReader([]byte("hello"))
-	_ = c.Upload(context.Background(), "/a.txt", payload, 5)
+	_ = c.Upload(context.Background(), "/a.txt", payload, 5, false)
 
 	wantPath := "/ocu.filestore.v1alpha.FilesystemService/fileUpload"
 	if gotPath != wantPath {
@@ -100,10 +100,11 @@ func TestUploadParamsFrameDeclaredSizeBytes(t *testing.T) {
 
 	content := []byte("hello world") // 11 bytes
 	c, _ := New(sock, "fs-test-01")
-	_ = c.Upload(context.Background(), "/b.txt", bytes.NewReader(content), int64(len(content)))
+	_ = c.Upload(context.Background(), "/b.txt", bytes.NewReader(content), int64(len(content)), false)
 
 	var params struct {
 		DeclaredSizeBytes int64                 `json:"declared_size_bytes"`
+		OverwriteExisting bool                  `json:"overwrite_existing"`
 		AuthMetadata      AuthorizationMetadata `json:"authorization_metadata"`
 	}
 	if err := json.Unmarshal(paramsData, &params); err != nil {
@@ -111,6 +112,11 @@ func TestUploadParamsFrameDeclaredSizeBytes(t *testing.T) {
 	}
 	if params.DeclaredSizeBytes != int64(len(content)) {
 		t.Errorf("declared_size_bytes: got %d, want %d", params.DeclaredSizeBytes, len(content))
+	}
+	// This call passed overwrite=false (create-new write); the field must
+	// round-trip on the params frame.
+	if params.OverwriteExisting {
+		t.Error("overwrite_existing: got true, want false for a create-new upload")
 	}
 	if params.AuthMetadata.Intent != "write" {
 		t.Errorf("params auth intent: got %q, want %q", params.AuthMetadata.Intent, "write")
@@ -158,7 +164,7 @@ func TestUploadChunkFramesTotalExact(t *testing.T) {
 	})
 
 	c, _ := New(sock, "fs-test-01")
-	_ = c.Upload(context.Background(), "/c.txt", bytes.NewReader(content), int64(len(content)))
+	_ = c.Upload(context.Background(), "/c.txt", bytes.NewReader(content), int64(len(content)), false)
 
 	if totalChunkBytes != len(content) {
 		t.Errorf("total chunk bytes: got %d, want %d", totalChunkBytes, len(content))
@@ -208,7 +214,7 @@ func TestUploadCeilingChunksUnderLimit(t *testing.T) {
 	})
 
 	c, _ := NewWithOptions(sock, "fs-test-01", ClientOptions{MessageCeiling: ceiling})
-	_ = c.Upload(context.Background(), "/d.txt", bytes.NewReader(content), int64(len(content)))
+	_ = c.Upload(context.Background(), "/d.txt", bytes.NewReader(content), int64(len(content)), false)
 
 	if frameCount <= 1 {
 		t.Errorf("expected >1 chunk frame for payload larger than ceiling, got %d", frameCount)
@@ -233,7 +239,7 @@ func TestUploadResourceExhaustedIsRetryable(t *testing.T) {
 	})
 
 	c, _ := New(sock, "fs-test-01")
-	err := c.Upload(context.Background(), "/e.txt", bytes.NewReader([]byte("x")), 1)
+	err := c.Upload(context.Background(), "/e.txt", bytes.NewReader([]byte("x")), 1, false)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -261,7 +267,7 @@ func TestUploadToleratesResponseMessageFrame(t *testing.T) {
 	})
 
 	c, _ := New(sock, "fs-test-01")
-	err := c.Upload(context.Background(), "/g.txt", bytes.NewReader([]byte("x")), 1)
+	err := c.Upload(context.Background(), "/g.txt", bytes.NewReader([]byte("x")), 1, false)
 	if err != nil {
 		t.Fatalf("upload with leading response message frame must succeed: %v", err)
 	}
@@ -289,7 +295,7 @@ func TestUploadEarlyTrailerSurvivesPipeError(t *testing.T) {
 	// writer goroutine is mid-stream when the broker replies.
 	big := bytes.Repeat([]byte("a"), 8*1024*1024)
 	c, _ := New(sock, "fs-test-01")
-	err := c.Upload(context.Background(), "/big.bin", bytes.NewReader(big), int64(len(big)))
+	err := c.Upload(context.Background(), "/big.bin", bytes.NewReader(big), int64(len(big)), false)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -312,7 +318,7 @@ func TestUploadSizeMismatchIsPermanent(t *testing.T) {
 	})
 
 	c, _ := New(sock, "fs-test-01")
-	err := c.Upload(context.Background(), "/f.txt", bytes.NewReader([]byte("x")), 99)
+	err := c.Upload(context.Background(), "/f.txt", bytes.NewReader([]byte("x")), 99, false)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -321,5 +327,95 @@ func TestUploadSizeMismatchIsPermanent(t *testing.T) {
 	}
 	if !errors.Is(err, ErrInvalidArgument) {
 		t.Errorf("size_exceeded: errors.Is(ErrInvalidArgument) false")
+	}
+}
+
+// TestUploadSendsTerminatingEndStreamFrame verifies that the upload request
+// body ends with an explicit end-stream frame (flag 0x02) carrying an empty
+// EndStreamResponse {}, not a bare body half-close. The Connect
+// client-streaming protocol uses this frame as the completion signal: without
+// it the broker keeps waiting on a frame that never arrives and then aborts the
+// already-assembled stream as malformed, so a retry sees the object as already
+// present. This test reads every frame of the request body and asserts the LAST
+// one is the 0x02 {} terminator after all data frames.
+func TestUploadSendsTerminatingEndStreamFrame(t *testing.T) {
+	var lastFlag byte
+	var lastPayload []byte
+	var sawEndStream bool
+
+	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		for {
+			flag, payload, err := readFrame(r.Body)
+			if err != nil {
+				break
+			}
+			lastFlag = flag
+			lastPayload = payload
+			if flag == endStreamFlag {
+				sawEndStream = true
+			}
+		}
+		var buf bytes.Buffer
+		_ = writeEndStream(&buf, nil)
+		w.Header().Set("Content-Type", "application/connect+json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buf.Bytes())
+	})
+
+	content := bytes.Repeat([]byte("z"), 40)
+	c, _ := New(sock, "fs-test-01")
+	if err := c.Upload(context.Background(), "/term.txt", bytes.NewReader(content), int64(len(content)), false); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	if !sawEndStream {
+		t.Fatal("upload request body never sent an end-stream frame (flag 0x02)")
+	}
+	if lastFlag != endStreamFlag {
+		t.Errorf("final request frame flag: got 0x%02x, want 0x%02x (end-stream must be last)", lastFlag, endStreamFlag)
+	}
+	// The empty EndStreamResponse {} is the success terminator the broker
+	// expects: an error trailer on the REQUEST side would be wrong.
+	var esr EndStreamResponse
+	if err := json.Unmarshal(lastPayload, &esr); err != nil {
+		t.Fatalf("terminating frame payload is not a valid EndStreamResponse: %v", err)
+	}
+	if esr.Error != nil {
+		t.Errorf("terminating frame carried an error %+v, want empty {}", esr.Error)
+	}
+}
+
+// TestUploadOverwriteTrueRoundTrips verifies that an overwrite-in-place upload
+// (Update's path) sets overwrite_existing=true on the params frame.
+func TestUploadOverwriteTrueRoundTrips(t *testing.T) {
+	var paramsData []byte
+	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, payload, err := readFrame(r.Body)
+		if err != nil {
+			t.Errorf("read params frame: %v", err)
+			return
+		}
+		paramsData = payload
+		_, _ = io.ReadAll(r.Body)
+		var buf bytes.Buffer
+		_ = writeEndStream(&buf, nil)
+		w.Header().Set("Content-Type", "application/connect+json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buf.Bytes())
+	})
+
+	c, _ := New(sock, "fs-test-01")
+	if err := c.Upload(context.Background(), "/ow.txt", bytes.NewReader([]byte("y")), 1, true); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	var params struct {
+		OverwriteExisting bool `json:"overwrite_existing"`
+	}
+	if err := json.Unmarshal(paramsData, &params); err != nil {
+		t.Fatalf("parse params: %v", err)
+	}
+	if !params.OverwriteExisting {
+		t.Error("overwrite_existing: got false, want true for an overwrite-in-place upload")
 	}
 }

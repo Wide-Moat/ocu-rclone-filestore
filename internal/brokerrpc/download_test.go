@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"testing"
 )
@@ -134,20 +135,17 @@ func TestDownloadFullReassembly(t *testing.T) {
 }
 
 // TestDownloadRangeHelper verifies the distinct download-by-range helper
-// (DownloadRange) returns the requested {offset, length} slice from the
-// fileDownload stream — NOT the unary readFile op.
+// (DownloadRange) sends the {offset, length} window in the request so the
+// broker streams only that window, and returns exactly those bytes — NOT the
+// unary readFile op. The test server is range-aware: it reads the range from
+// the request params frame and streams only the windowed bytes, the real
+// broker's ranged behaviour. This both proves the helper transmits the range
+// (a server that ignored it would return the whole object and fail the slice
+// assertion) and that the returned content is the window.
 func TestDownloadRangeHelper(t *testing.T) {
 	content := []byte("abcdefghij") // 10 bytes
 
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		var buf bytes.Buffer
-		frame, _ := json.Marshal(map[string][]byte{"data": content})
-		_ = writeFrame(&buf, 0x00, frame)
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-	})
+	sock := rangeAwareDownloadServer(t, content)
 
 	c, _ := New(sock, "fs-dl-01")
 	// Request bytes [2, 5) → "cde"
@@ -158,6 +156,75 @@ func TestDownloadRangeHelper(t *testing.T) {
 	want := content[2:5]
 	if !bytes.Equal(got, want) {
 		t.Errorf("range slice: got %q, want %q", got, want)
+	}
+}
+
+// TestDownloadRangeRequestCarriesRange verifies that DownloadRange puts the
+// requested window on the wire as a non-nil range{offset,length}, while a full
+// Download serialises no range field at all (so the full-download request body
+// stays byte-identical to the no-range form).
+func TestDownloadRangeRequestCarriesRange(t *testing.T) {
+	var rangeReq, fullReq []byte
+
+	mk := func(capture *[]byte) string {
+		return uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+			_, payload, _ := readFrame(r.Body)
+			*capture = payload
+			var buf bytes.Buffer
+			frame, _ := json.Marshal(map[string][]byte{"data": []byte("z")})
+			_ = writeFrame(&buf, 0x00, frame)
+			_ = writeEndStream(&buf, nil)
+			w.Header().Set("Content-Type", "application/connect+json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(buf.Bytes())
+		})
+	}
+
+	cr, _ := New(mk(&rangeReq), "fs-dl-01")
+	_, _ = cr.DownloadRange(context.Background(), "uuid-abc", 4, 6)
+	cf, _ := New(mk(&fullReq), "fs-dl-01")
+	_, _ = cf.Download(context.Background(), "uuid-abc")
+
+	var ranged struct {
+		Range *Range `json:"range"`
+	}
+	if err := json.Unmarshal(rangeReq, &ranged); err != nil {
+		t.Fatalf("parse ranged request: %v", err)
+	}
+	if ranged.Range == nil {
+		t.Fatal("DownloadRange request carried no range field")
+	}
+	if ranged.Range.Offset != 4 || ranged.Range.Length != 6 {
+		t.Errorf("range: got {offset:%d length:%d}, want {4 6}", ranged.Range.Offset, ranged.Range.Length)
+	}
+
+	var full struct {
+		Range *Range `json:"range"`
+	}
+	if err := json.Unmarshal(fullReq, &full); err != nil {
+		t.Fatalf("parse full request: %v", err)
+	}
+	if full.Range != nil {
+		t.Errorf("full Download request carried a range field %+v, want none", full.Range)
+	}
+}
+
+// TestDownloadRangeClampsOverDelivery verifies the defensive clamp: a broker
+// that ignores the range and streams MORE than the requested length is trimmed
+// to the contract length, so the caller never sees over-delivery.
+func TestDownloadRangeClampsOverDelivery(t *testing.T) {
+	// Server ignores the range and returns the whole 10-byte object.
+	sock := downloadRangeContentServer(t, []byte("abcdefghij"))
+	c, _ := New(sock, "fs-dl-01")
+	// Ask for 3 bytes; an over-delivering broker returns 10. The clamp trims
+	// to the first 3 of what was streamed (offset already applied broker-side
+	// when honoured; here it was not, so this documents the trim-only guard).
+	got, err := c.DownloadRange(context.Background(), "uuid-abc", 0, 3)
+	if err != nil {
+		t.Fatalf("DownloadRange: %v", err)
+	}
+	if len(got) != 3 {
+		t.Errorf("over-delivery not clamped: got %d bytes, want 3", len(got))
 	}
 }
 
@@ -212,12 +279,53 @@ func TestDownloadTruncatedStreamErrors(t *testing.T) {
 }
 
 // downloadRangeContentServer serves the given content as a single download
-// content frame followed by a success trailer.
+// content frame followed by a success trailer, IGNORING any requested range.
+// It models a broker that streams the whole object regardless of range, used to
+// exercise the helper's defensive over-delivery clamp.
 func downloadRangeContentServer(t *testing.T, content []byte) string {
 	t.Helper()
 	return uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
 		var buf bytes.Buffer
 		frame, _ := json.Marshal(map[string][]byte{"data": content})
+		_ = writeFrame(&buf, 0x00, frame)
+		_ = writeEndStream(&buf, nil)
+		w.Header().Set("Content-Type", "application/connect+json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(buf.Bytes())
+	})
+}
+
+// rangeAwareDownloadServer serves only the windowed bytes of content selected
+// by the request's range{offset,length}, the real broker's ranged behaviour: a
+// nil/zero range streams the whole object; a non-nil range streams content
+// clamped to [offset, offset+length). offset is applied server-side, so the
+// streamed bytes already begin at offset.
+func rangeAwareDownloadServer(t *testing.T, content []byte) string {
+	t.Helper()
+	return uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, payload, _ := readFrame(r.Body)
+		_, _ = io.ReadAll(r.Body)
+		var req struct {
+			Range *Range `json:"range"`
+		}
+		_ = json.Unmarshal(payload, &req)
+
+		out := content
+		if req.Range != nil && (req.Range.Offset != 0 || req.Range.Length != 0) {
+			off := req.Range.Offset
+			if off > int64(len(content)) {
+				off = int64(len(content))
+			}
+			end := off + req.Range.Length
+			if end > int64(len(content)) {
+				end = int64(len(content))
+			}
+			out = content[off:end]
+		}
+
+		var buf bytes.Buffer
+		frame, _ := json.Marshal(map[string][]byte{"data": out})
 		_ = writeFrame(&buf, 0x00, frame)
 		_ = writeEndStream(&buf, nil)
 		w.Header().Set("Content-Type", "application/connect+json")
@@ -242,9 +350,9 @@ func TestDownloadRangeNegativeLength(t *testing.T) {
 // to the remaining bytes rather than panicking or over-reading (HI-02).
 func TestDownloadRangePastEOF(t *testing.T) {
 	content := []byte("abcdefghij") // 10 bytes
-	sock := downloadRangeContentServer(t, content)
+	sock := rangeAwareDownloadServer(t, content)
 	c, _ := New(sock, "fs-dl-01")
-	// Offset 7, length 100 → expect the final 3 bytes "hij".
+	// Offset 7, length 100 → the broker clamps to the final 3 bytes "hij".
 	got, err := c.DownloadRange(context.Background(), "uuid-abc", 7, 100)
 	if err != nil {
 		t.Fatalf("DownloadRange past EOF: %v", err)

@@ -97,6 +97,10 @@ func (o *Object) SetModTime(ctx context.Context, t time.Time) error {
 // Update writes new content in to the object, overwriting it in place.
 // Returns fs.ErrorPermissionDenied on a read-only Fs (BE-02).
 //
+// overwrite=true: the upload replaces the existing object atomically broker-side
+// in a single fileUpload, rather than the guest issuing a remove-then-upload
+// that would leave a non-atomic window in which the path does not exist.
+//
 // After upload the uuid is cleared so the next access re-resolves via the
 // defensive lazy fallback (the Upload response carries no metadata on the
 // current wire contract).
@@ -104,7 +108,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	if o.fs.readOnly {
 		return fs.ErrorPermissionDenied
 	}
-	if err := o.fs.client.Upload(ctx, o.path, in, src.Size()); err != nil {
+	if err := o.fs.client.Upload(ctx, o.path, in, src.Size(), true); err != nil {
 		return fmt.Errorf("ocufs: Update %q: %w", o.path, err)
 	}
 	// Clear uuid so the next access triggers the defensive fallback resolve
