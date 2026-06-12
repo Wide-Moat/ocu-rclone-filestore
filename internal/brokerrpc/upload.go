@@ -38,15 +38,22 @@ import (
 // uploadParamsFrame is the JSON body for the first frame in a fileUpload
 // client-streaming request. OverwriteExisting selects whether an existing
 // destination is replaced in place (true) or the upload fails on a present
-// path (false): a create-new write (Put) sends false so a colliding path is a
-// conflict, while an overwrite-in-place write (Update) sends true so the
+// path (false): a create-new write (Put) leaves it false so a colliding path
+// is a conflict, while an overwrite-in-place write (Update) sets it true so the
 // broker replaces the object atomically rather than the guest staging a
 // remove-then-upload with a non-atomic window between the two.
+//
+// The field is omitempty: a create-new upload (the overwhelmingly common path)
+// serialises NO overwrite_existing key at all. The upload params frame is
+// strict-decoded broker-side, so a broker build that predates the upload
+// overwrite knob accepts the create-new frame unchanged; only the
+// overwrite-in-place upload carries the key, and that path depends on a broker
+// build that reads it.
 type uploadParamsFrame struct {
 	FilesystemID          string                `json:"filesystem_id"`
 	Path                  string                `json:"path"`
 	DeclaredSizeBytes     int64                 `json:"declared_size_bytes"`
-	OverwriteExisting     bool                  `json:"overwrite_existing"`
+	OverwriteExisting     bool                  `json:"overwrite_existing,omitempty"`
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 

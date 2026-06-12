@@ -130,11 +130,30 @@ func requireLive(t *testing.T) liveEnv {
 // transport (SEC-25). Each step is a subtest with its assertion fully written;
 // 05-02 supplies the live endpoint and the throttle test-mode without changing
 // any assertion.
+// e2eDirName is the single top-level directory under the rw mount that the
+// exercise operates within. Cold reads and listings of any path are authorized
+// broker-side only when the path lies under a configured downloadable prefix
+// (SEC-73, broker-resolved and default-deny); the bare root "/" is a sentinel
+// that authorizes only itself, not the tree beneath it. So the harness
+// enumerates this one prefix as downloadable and the exercise confines its
+// objects to it, exercising real cold reads/lists rather than only warm-cache
+// hits. The mount itself never enforces this — it sends no downloadable flag.
+const e2eDirName = "e2e"
+
 func TestE2EExercise(t *testing.T) {
 	env := requireLive(t)
 
+	// rwBase is the downloadable working directory under the rw mount; rel()
+	// joins a name under it, and scopeRel() yields the filesystem-scope-relative
+	// path used for the broker-side persistence assertion.
+	rwBase := filepath.Join(env.rwMount, e2eDirName)
+	rel := func(name string) string { return filepath.Join(rwBase, name) }
+	scopeRel := func(name string) string { return e2eDirName + "/" + name }
+
 	// Step 1 — multimount: at least two mounts (rw + ro) must be present and
-	// distinct, proving the multimount harness brought up >=2 filesystems.
+	// distinct, proving the multimount harness brought up >=2 filesystems. The
+	// rw working directory is created here so every later step operates under
+	// the downloadable prefix.
 	t.Run("01_multimount_present", func(t *testing.T) {
 		for name, p := range map[string]string{envRWMount: env.rwMount, envROMount: env.roMount} {
 			info, err := os.Stat(p)
@@ -148,12 +167,15 @@ func TestE2EExercise(t *testing.T) {
 		if env.rwMount == env.roMount {
 			t.Fatalf("rw and ro mountpoints must be distinct, both are %q", env.rwMount)
 		}
+		if err := os.Mkdir(rwBase, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			t.Fatalf("create rw working directory %q: %v", rwBase, err)
+		}
 	})
 
 	// Step 2 — write a small file then read it back byte-identical
 	// (createFile/fileUpload + readFile).
 	smallName := "small.txt"
-	smallPath := filepath.Join(env.rwMount, smallName)
+	smallPath := rel(smallName)
 	smallData := []byte("end-to-end small payload\n")
 	t.Run("02_write_read_small", func(t *testing.T) {
 		if err := os.WriteFile(smallPath, smallData, 0o644); err != nil {
@@ -166,17 +188,17 @@ func TestE2EExercise(t *testing.T) {
 		// De-vacuum: prove the bytes reached the broker's workspace, not just
 		// the local VFS write-back cache (a cache-served read-back passes the
 		// assertion above while no fileUpload ever succeeded).
-		assertBrokerPersisted(t, env, smallName, smallData)
+		assertBrokerPersisted(t, env, scopeRel(smallName), smallData)
 	})
 
 	// Step 3 — list a directory and assert the union (the written file and a
 	// created subdir both appear: listDirectory unions files + subdirs).
 	subDir := "listed-subdir"
 	t.Run("03_list_union", func(t *testing.T) {
-		if err := os.Mkdir(filepath.Join(env.rwMount, subDir), 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+		if err := os.Mkdir(rel(subDir), 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
 			t.Fatalf("mkdir for list union: %v", err)
 		}
-		names := listEventually(t, env.rwMount, smallName, subDir)
+		names := listEventually(t, rwBase, smallName, subDir)
 		assertContains(t, names, smallName)
 		assertContains(t, names, subDir)
 	})
@@ -184,7 +206,7 @@ func TestE2EExercise(t *testing.T) {
 	// Step 4 — mkdir then rmdir (makeDirectory/removeDirectory): create, assert
 	// present, remove, assert absent.
 	t.Run("04_mkdir_rmdir", func(t *testing.T) {
-		dir := filepath.Join(env.rwMount, "transient-dir")
+		dir := rel("transient-dir")
 		if err := os.Mkdir(dir, 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
@@ -201,8 +223,8 @@ func TestE2EExercise(t *testing.T) {
 	// new path present.
 	t.Run("05_rename_file_and_dir", func(t *testing.T) {
 		// File rename.
-		srcFile := filepath.Join(env.rwMount, "rename-src.txt")
-		dstFile := filepath.Join(env.rwMount, "rename-dst.txt")
+		srcFile := rel("rename-src.txt")
+		dstFile := rel("rename-dst.txt")
 		payload := []byte("rename payload\n")
 		if err := os.WriteFile(srcFile, payload, 0o644); err != nil {
 			t.Fatalf("write rename source: %v", err)
@@ -217,8 +239,8 @@ func TestE2EExercise(t *testing.T) {
 		}
 
 		// Dir rename.
-		srcDir := filepath.Join(env.rwMount, "rename-src-dir")
-		dstDir := filepath.Join(env.rwMount, "rename-dst-dir")
+		srcDir := rel("rename-src-dir")
+		dstDir := rel("rename-dst-dir")
 		if err := os.Mkdir(srcDir, 0o755); err != nil {
 			t.Fatalf("mkdir rename source dir: %v", err)
 		}
@@ -233,7 +255,7 @@ func TestE2EExercise(t *testing.T) {
 
 	// Step 6 — large file over the RPC ceiling: write, read back byte-identical,
 	// proving chunked upload + ranged reassembly.
-	largePath := filepath.Join(env.rwMount, "large.bin")
+	largePath := rel("large.bin")
 	largeData := make([]byte, largeFileSize)
 	t.Run("06_large_file_chunked", func(t *testing.T) {
 		if _, err := rand.Read(largeData); err != nil {
@@ -248,7 +270,7 @@ func TestE2EExercise(t *testing.T) {
 		}
 		// De-vacuum: the chunked upload must land byte-identical broker-side,
 		// not merely round-trip through the local cache.
-		assertBrokerPersisted(t, env, "large.bin", largeData)
+		assertBrokerPersisted(t, env, scopeRel("large.bin"), largeData)
 	})
 
 	// Step 7 — ranged read: read a byte range mid-file and assert exact bytes
@@ -313,7 +335,7 @@ func TestE2EExercise(t *testing.T) {
 				"assertion actually runs; set %s=1 only to opt into a partial run "+
 				"on purpose", envThrottleFile, envGate, envAllowPartial)
 		}
-		path := filepath.Join(env.rwMount, env.throttleFile)
+		path := rel(env.throttleFile)
 		payload := []byte("throttled write must survive the retry without loss\n")
 		if err := os.WriteFile(path, payload, 0o644); err != nil {
 			t.Fatalf("throttled write failed: %v", err)
@@ -353,7 +375,7 @@ func TestE2EExercise(t *testing.T) {
 		}
 		deadline := time.Now().Add(settleTimeout)
 		for {
-			_, rwErr := os.Stat(filepath.Join(env.rwMount, smallName))
+			_, rwErr := os.Stat(smallPath)
 			if rwErr != nil {
 				return // the mount no longer serves the path: torn down
 			}

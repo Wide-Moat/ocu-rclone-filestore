@@ -54,14 +54,19 @@ services:
       - /audit/audit.log
       - -broker-max-file-size
       - "67108864"
-      # SEC-73 is broker-resolved and default-deny: content is downloadable
-      # only from explicitly enumerated prefixes. The rw exercise reads back
-      # what it writes, so its whole tree is made downloadable here. The mount
-      # never enforces this and never sends a downloadable flag (the wire flag
-      # is always false); enumerating the prefix at broker launch is the
-      # intended posture for a readable scope.
+      # SEC-73 is broker-resolved and default-deny: a path is downloadable
+      # (and so cold-readable / cold-listable) only when it lies UNDER an
+      # explicitly enumerated prefix on a path boundary. The bare root "/" is a
+      # sentinel that authorizes ONLY itself, not the tree beneath it, so two
+      # entries are needed: "/" makes the root directory itself listable (the
+      # parent-directory lookup the exercise's top-level mkdir triggers), and
+      # "/e2e" makes the working subtree the exercise confines its objects to
+      # cold-readable and cold-listable. The mount never enforces this and never
+      # sends a downloadable flag (the wire flag is always false); enumerating
+      # the prefixes at broker launch is the intended posture for a readable
+      # scope.
       - -downloadable-prefixes
-      - /
+      - /,/e2e
       - -south-socket-dir
       - /sock
     volumes:
@@ -86,6 +91,14 @@ services:
       - /audit/audit.log
       - -broker-max-file-size
       - "67108864"
+      # The read-only mount is only ever listed at its root and written-to-fail.
+      # Enumerating the literal root "/" makes that root listing authorized so
+      # the read-only write is denied at the intent gate (surfacing EROFS/EACCES
+      # through FUSE) instead of failing at the parent-directory lookup. The
+      # sentinel root authorizes only itself, so no file content under it
+      # becomes downloadable — the ro scope stays non-egressable.
+      - -downloadable-prefixes
+      - /
       - -south-socket-dir
       - /sock
     volumes:
@@ -195,11 +208,13 @@ services:
       OCU_E2E_RW_MOUNT: /workspace/out
       OCU_E2E_RO_MOUNT: /workspace/in
       OCU_E2E_READY_FILE: /run/ocu/mount-ready
-      # The broker-rw engine-root, mounted read-only below. The write steps
-      # hash the bytes the broker actually persisted here (not the FUSE
-      # read-back, which the local cache can serve), so the gate proves the
-      # broker data path rather than the cache.
-      OCU_E2E_BROKER_RW_WORKSPACE: /broker-rw-workspace
+      # The broker-rw engine-root SCOPE directory, mounted read-only below. The
+      # local-volume engine nests each filesystem's objects under a
+      # <filesystem_id>/ subdirectory of the engine root, so the rw scope (fsrw)
+      # lands at /broker-rw-workspace/fsrw. The write steps hash the bytes the
+      # broker actually persisted here (not the FUSE read-back, which the local
+      # cache can serve), so the gate proves the broker data path, not the cache.
+      OCU_E2E_BROKER_RW_WORKSPACE: /broker-rw-workspace/fsrw
       # OCU_E2E_MOUNT_PID is resolved by the command below from the shared
       # (host) PID namespace, not hardcoded here.
       #
