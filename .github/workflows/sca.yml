@@ -22,10 +22,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Run trivy filesystem scan
-        uses: aquasecurity/trivy-action@dc5a429b52fcf669ce959baa2c2dd26090d2a6c4 # 0.32.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          severity: CRITICAL
-          exit-code: "1"
-          ignore-unfixed: false
+        # Run trivy from its official image (pinned by digest) rather than the
+        # action wrapper, whose install script fetches the binary from GitHub
+        # release downloads and fails intermittently under rate limiting. The
+        # image is pulled from a registry, avoiding that path. The job fails on
+        # any CRITICAL finding (--exit-code 1), keeping this gate blocking.
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/repo" \
+            ghcr.io/aquasecurity/trivy@sha256:de90a656e79b175a294abe85cb8b99670fab83ebf339cccd163e6f584846809a \
+            filesystem --scanners vuln --severity CRITICAL --exit-code 1 \
+            --ignore-unfixed=false --no-progress /repo
