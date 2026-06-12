@@ -14,17 +14,14 @@ import (
 	"github.com/rclone/rclone/cmd/mountlib"
 	"github.com/rclone/rclone/fs"
 
-	// Blank-import the mount2 backend so its init() self-registers its mount
-	// function under the name "mount2" via mountlib.AddRc. ResolveMountMethod
-	// then resolves it from the registry with ZERO upstream diff: no rclone
-	// source is forked to export the (unexported) mount symbol. mount2 carries
-	// the same build tag as this file, so on a platform where mount2 registers
-	// nothing the resolved MountFn is nil and the constructor fails closed.
-	//
-	// mount2 is preferred over the cmd/mount path because its direct kernel
-	// mount avoids spawning a fusermount helper subprocess, which matters in a
-	// minimal guest where that helper may be absent and an extra process is
-	// undesirable.
+	// Keep rclone's mount2 package linked: its exported FS/Node surface is what
+	// the first-party direct-mount frontend (directmount.go) builds the
+	// rclone<->FUSE node tree from, with ZERO upstream diff — no rclone source
+	// is forked. Its init() also self-registers under "mount2" via
+	// mountlib.AddRc; the tests use that registry entry to prove the seam is
+	// wired to the first-party MountFn INSTEAD of the registry-resolved one.
+	// mount2 carries the same build tag as this file, so both supported legs
+	// see the same package set.
 	_ "github.com/rclone/rclone/cmd/mount2"
 
 	// Blank-import the local backend so the VFS disk cache can build its cache
@@ -50,10 +47,10 @@ const waitMountReadyTimeout = 30 * time.Second
 // It opens no second transport and stamps no auth material of its own — the
 // only handle is the ocufs Fs scoped by filesystem_id (SEC-25).
 type realPointMounter struct {
-	// mountFn is the registered mount function resolved from the mountlib
-	// registry. It is injected through the constructor so a test can drive the
-	// option-assembly and MountPoint wiring with a fake function and no
-	// /dev/fuse.
+	// mountFn is the mount function the seam drives — in production the
+	// first-party directMountFn. It is injected through the constructor so a
+	// test can drive the option-assembly and MountPoint wiring with a fake
+	// function and no /dev/fuse.
 	mountFn mountlib.MountFn
 	// readyTimeout bounds the readiness poll. It defaults to
 	// waitMountReadyTimeout and is a field so a unit test driving a fake MountFn
@@ -73,11 +70,16 @@ func newRealPointMounter(fn mountlib.MountFn) (pointMounter, error) {
 	return &realPointMounter{mountFn: fn, readyTimeout: waitMountReadyTimeout}, nil
 }
 
-// defaultRealSeam resolves the mount2 MountFn from the registry and builds the
-// production seam. This is what New() wires on a mount2-supported platform.
+// defaultRealSeam builds the production seam over the first-party direct-mount
+// MountFn (directmount.go). This is what New() wires on a supported platform.
+//
+// The registry-resolved mount2 function is deliberately NOT used: without
+// DirectMount set, go-fuse's default mount path execs a fusermount helper
+// binary, and the minimal static guest image carries none — the mount would
+// fail at runtime. The first-party frontend performs the mount syscall itself
+// (DirectMountStrict), so only /dev/fuse and CAP_SYS_ADMIN are needed.
 func defaultRealSeam() (pointMounter, error) {
-	_, fn := mountlib.ResolveMountMethod("mount2")
-	return newRealPointMounter(fn)
+	return newRealPointMounter(directMountFn)
 }
 
 // realPoint bridges a live mountlib.MountPoint into the orchestrator's opaque
