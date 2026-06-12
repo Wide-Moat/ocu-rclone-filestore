@@ -8,6 +8,7 @@ package e2e
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"io/fs"
 	"os"
@@ -43,11 +44,20 @@ const (
 	// data loss.
 	envThrottleFile = "OCU_E2E_THROTTLE_FILE"
 	// envAllowPartial is the explicit escape hatch for a partial live run: with
-	// the gate set, missing OCU_E2E_THROTTLE_FILE / OCU_E2E_MOUNT_PID is a hard
-	// failure (fail-closed — a release must never publish with the SC2 throttle
-	// and teardown assertions silently skipped) UNLESS this is set to a truthy
-	// value (e.g. 1/true), which opts into skipping those steps on purpose.
+	// the gate set, missing OCU_E2E_THROTTLE_FILE / OCU_E2E_MOUNT_PID /
+	// OCU_E2E_BROKER_RW_WORKSPACE is a hard failure (fail-closed — a release must
+	// never publish with the SC2 throttle, teardown, or broker-persistence
+	// assertions silently skipped) UNLESS this is set to a truthy value (e.g.
+	// 1/true), which opts into skipping those steps on purpose.
 	envAllowPartial = "OCU_E2E_ALLOW_PARTIAL"
+	// envBrokerRWWorkspace is the broker-rw engine-root workspace, mounted
+	// READ-ONLY into the runner. Asserting against the bytes the broker actually
+	// persisted here — not the bytes read back through the FUSE mount, which the
+	// local VFS write-back cache can serve without any upload ever reaching the
+	// broker — is what makes the write steps prove the broker data path rather
+	// than the cache. The relative path under the rw mount maps 1:1 to the path
+	// under this workspace root (both are filesystem-relative to the same scope).
+	envBrokerRWWorkspace = "OCU_E2E_BROKER_RW_WORKSPACE"
 )
 
 // allowPartial reports whether the operator explicitly opted into a partial
@@ -68,11 +78,12 @@ const settleTimeout = 30 * time.Second
 
 // liveEnv carries the resolved harness contract for a single run.
 type liveEnv struct {
-	rwMount      string
-	roMount      string
-	readyFile    string
-	mountPID     int
-	throttleFile string
+	rwMount           string
+	roMount           string
+	readyFile         string
+	mountPID          int
+	throttleFile      string
+	brokerRWWorkspace string
 }
 
 // requireLive resolves the env contract or skips the whole exercise. With the
@@ -104,11 +115,12 @@ func requireLive(t *testing.T) liveEnv {
 	}
 
 	return liveEnv{
-		rwMount:      rw,
-		roMount:      ro,
-		readyFile:    os.Getenv(envReadyFile),
-		mountPID:     pid,
-		throttleFile: os.Getenv(envThrottleFile),
+		rwMount:           rw,
+		roMount:           ro,
+		readyFile:         os.Getenv(envReadyFile),
+		mountPID:          pid,
+		throttleFile:      os.Getenv(envThrottleFile),
+		brokerRWWorkspace: os.Getenv(envBrokerRWWorkspace),
 	}
 }
 
@@ -151,6 +163,10 @@ func TestE2EExercise(t *testing.T) {
 		if !bytes.Equal(got, smallData) {
 			t.Fatalf("small file round-trip mismatch: got %d bytes, want %d", len(got), len(smallData))
 		}
+		// De-vacuum: prove the bytes reached the broker's workspace, not just
+		// the local VFS write-back cache (a cache-served read-back passes the
+		// assertion above while no fileUpload ever succeeded).
+		assertBrokerPersisted(t, env, smallName, smallData)
 	})
 
 	// Step 3 — list a directory and assert the union (the written file and a
@@ -230,6 +246,9 @@ func TestE2EExercise(t *testing.T) {
 		if !bytes.Equal(got, largeData) {
 			t.Fatalf("large file round-trip mismatch over the RPC ceiling")
 		}
+		// De-vacuum: the chunked upload must land byte-identical broker-side,
+		// not merely round-trip through the local cache.
+		assertBrokerPersisted(t, env, "large.bin", largeData)
 	})
 
 	// Step 7 — ranged read: read a byte range mid-file and assert exact bytes
@@ -344,6 +363,61 @@ func TestE2EExercise(t *testing.T) {
 			time.Sleep(200 * time.Millisecond)
 		}
 	})
+}
+
+// assertBrokerPersisted proves that the bytes written through the rw mount
+// actually reached the broker's engine-root workspace, hashing the file as it
+// sits in that workspace volume (mounted read-only into the runner) rather than
+// reading it back through the FUSE mount — a FUSE read-back can be served from
+// the local VFS write-back cache without any fileUpload ever succeeding, which
+// is exactly how the earlier gate passed while the broker workspace stayed
+// empty. relPath is the path under the rw mount; it maps 1:1 to the path under
+// the workspace root (both filesystem-relative to the same scope).
+//
+// It is fail-closed under the live gate: with the workspace env unset it fatals
+// unless the operator explicitly opted into a partial run, so a release can
+// never go green with the broker-persistence assertion silently skipped. The
+// poll tolerates the asynchronous write-back delay before the bytes appear.
+func assertBrokerPersisted(t *testing.T, env liveEnv, relPath string, want []byte) {
+	t.Helper()
+	if env.brokerRWWorkspace == "" {
+		if allowPartial() {
+			t.Logf("%s unset and partial mode explicitly opted into via %s — "+
+				"skipping the broker-side persistence assertion for %q (the FUSE "+
+				"read-back alone does not prove the upload reached the broker)",
+				envBrokerRWWorkspace, envAllowPartial, relPath)
+			return
+		}
+		t.Fatalf("%s is required under the live gate (%s): it names the broker-rw "+
+			"engine-root workspace (mounted read-only into the runner) so the write "+
+			"steps assert the bytes reached the broker, not just the local VFS cache; "+
+			"set %s=1 only to opt into a partial run on purpose",
+			envBrokerRWWorkspace, envGate, envAllowPartial)
+	}
+
+	wantSum := sha256.Sum256(want)
+	brokerPath := filepath.Join(env.brokerRWWorkspace, filepath.FromSlash(relPath))
+	deadline := time.Now().Add(settleTimeout)
+	var lastErr error
+	var lastLen int
+	for {
+		b, err := os.ReadFile(brokerPath)
+		if err == nil {
+			lastLen = len(b)
+			if sha256.Sum256(b) == wantSum {
+				return // byte-identical broker-side: the upload landed.
+			}
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("broker-side persistence of %q never matched: broker path %q "+
+				"(last read %d bytes, want %d, err %v) — the bytes written through the "+
+				"mount did not reach the broker workspace byte-identical",
+				relPath, brokerPath, lastLen, len(want), lastErr)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // readBackEventually reads path, polling until it reaches the wanted length or
