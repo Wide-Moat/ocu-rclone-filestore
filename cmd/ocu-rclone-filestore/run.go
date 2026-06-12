@@ -12,6 +12,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/rclone/rclone/lib/atexit"
+
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mountcfg"
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mounter"
 )
@@ -62,6 +64,16 @@ func runWith(args []string, stderr io.Writer, mount mountFunc) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+
+	// This process owns signal handling: the orchestrator's channel below is
+	// the SOLE handler, and the clean-shutdown contract (ordered unmount of
+	// every mount, ready-file removal, return nil -> exit 0) depends on it.
+	// rclone's atexit package would otherwise install its own SIGTERM/SIGINT
+	// handler the first time a mount is waited on and os.Exit(128+sig) past
+	// our ordered teardown — exit 143, mounts left up, a stale ready-file on
+	// the shared volume. rclone exports IgnoreSignals exactly so an embedding
+	// program can claim signal ownership; call it BEFORE any mount starts.
+	atexit.IgnoreSignals()
 
 	// Install the real termination-signal channel. The orchestrator selects on
 	// it to tear down every live mount on SIGTERM/SIGINT.
