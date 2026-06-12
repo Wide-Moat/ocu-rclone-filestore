@@ -33,8 +33,9 @@ func (p *fakePoint) wait() error         { return <-p.waitErr }
 type fakePointMounter struct {
 	mu sync.Mutex
 
-	mountCalls   []string // destinations passed to mountAndWaitReady, in order
-	unmountCalls []string // destinations passed to unmount, in order
+	mountCalls   []string    // destinations passed to mountAndWaitReady, in order
+	mountSpecs   []mountSpec // full specs passed to mountAndWaitReady, in order
+	unmountCalls []string    // destinations passed to unmount, in order
 	points       []*fakePoint
 
 	failNth        int // 1-based index of the start to fail; 0 = never fail
@@ -51,6 +52,7 @@ func (f *fakePointMounter) mountAndWaitReady(_ context.Context, spec mountSpec) 
 	f.mu.Lock()
 	n := len(f.mountCalls) + 1
 	f.mountCalls = append(f.mountCalls, spec.mount.Destination)
+	f.mountSpecs = append(f.mountSpecs, spec)
 	f.mu.Unlock()
 
 	if f.failNth != 0 && n == f.failNth {
@@ -85,6 +87,18 @@ func (f *fakePointMounter) mountCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.mountCalls)
+}
+
+// socketPathByDest returns the socket path each started spec carried, keyed by
+// destination, so the per-mount socket derivation is assertable.
+func (f *fakePointMounter) socketPathByDest() map[string]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[string]string, len(f.mountSpecs))
+	for _, s := range f.mountSpecs {
+		out[s.mount.Destination] = s.socketPath
+	}
+	return out
 }
 
 // writableEntry / readonlyEntry build minimal valid config mounts for the
@@ -359,6 +373,108 @@ func TestOrchestratorEmptyBrokerSocketIsHardError(t *testing.T) {
 	}
 	if fake.mountCount() != 0 {
 		t.Errorf("mountCount = %d; want 0 (no spec started)", fake.mountCount())
+	}
+}
+
+// TestOrchestratorSocketDirDerivesPerMountSocket asserts the socket-dir mode:
+// with brokerSocketDirPath set, every spec derives its own socket path as
+// <dir>/<filesystem_id>.sock — the broker provisions exactly one session socket
+// per filesystem scope under that directory, so a multi-filesystem config dials
+// one broker instance per scope instead of forcing one per-process socket onto
+// every mount.
+func TestOrchestratorSocketDirDerivesPerMountSocket(t *testing.T) {
+	fake := newFake()
+	sig := make(chan os.Signal, 1)
+
+	rw := writableEntry("/mnt/w")
+	rw.FilesystemID = ptrStr("fsrw")
+	ro := readonlyEntry("/mnt/r")
+	ro.FilesystemID = ptrStr("fsro")
+	cfg := &mountcfg.Config{
+		Mounts:         []mountcfg.Mount{rw},
+		ReadonlyMounts: []mountcfg.Mount{ro},
+	}
+
+	o := &orchestrator{
+		seam:                fake,
+		signals:             sig,
+		brokerSocketDirPath: "/run/sockets",
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- o.run(context.Background(), cfg) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for fake.mountCount() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d mounts started; want 2", fake.mountCount())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	want := map[string]string{
+		"/mnt/w": filepath.Join("/run/sockets", "fsrw.sock"),
+		"/mnt/r": filepath.Join("/run/sockets", "fsro.sock"),
+	}
+	got := fake.socketPathByDest()
+	for dest, wantSock := range want {
+		if got[dest] != wantSock {
+			t.Errorf("socket for %q = %q; want %q", dest, got[dest], wantSock)
+		}
+	}
+
+	sig <- syscall.SIGTERM
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run = %v; want nil on clean signal teardown", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run did not return after signal")
+	}
+}
+
+// TestOrchestratorSocketPathAndDirMutuallyExclusive asserts that supplying BOTH
+// the single socket path and the socket directory is a hard error before any
+// mount starts: an ambiguous socket input must never silently pick one.
+func TestOrchestratorSocketPathAndDirMutuallyExclusive(t *testing.T) {
+	fake := newFake()
+	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{writableEntry("/mnt/w")}}
+	o := &orchestrator{
+		seam:                fake,
+		signals:             make(chan os.Signal, 1),
+		brokerSocketPath:    "/run/x.sock",
+		brokerSocketDirPath: "/run/sockets",
+	}
+	err := o.run(context.Background(), cfg)
+	if err == nil {
+		t.Fatal("run = nil; want a hard error when both socket inputs are set")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("run error = %q; want the mutual-exclusion hard error", err.Error())
+	}
+	if fake.mountCount() != 0 {
+		t.Errorf("mountCount = %d; want 0 (no spec started)", fake.mountCount())
+	}
+}
+
+// TestNewMountSocketDirOptionReachesOrchestrator asserts the WithBrokerSocketDir
+// option threads through New().Mount: with ONLY the dir set the run proceeds
+// past both socket-input checks. The zero-mount config keeps the test off any
+// real mount; the only error a platform may surface is the fail-closed seam
+// constructor (on an unsupported platform/arch), never a socket-input error.
+func TestNewMountSocketDirOptionReachesOrchestrator(t *testing.T) {
+	err := New(WithBrokerSocketDir("/run/sockets")).Mount(&mountcfg.Config{
+		ServiceURL: "https://broker.example",
+		Mounts:     []mountcfg.Mount{},
+	})
+	if err != nil {
+		if strings.Contains(err.Error(), "broker socket path not provided") ||
+			strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("New(WithBrokerSocketDir).Mount = %v; the socket check must accept dir-only input", err)
+		}
+		// Any other error is the platform seam failing closed on an unsupported
+		// platform/arch — out of scope for this option-threading assertion.
 	}
 }
 

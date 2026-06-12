@@ -111,26 +111,29 @@ func TestRun(t *testing.T) {
 	}
 }
 
-// TestRunResolvesReadyFileAndBrokerSocket asserts that --ready-file and
-// --broker-socket parse, that the OCU_READY_FILE / OCU_BROKER_SOCKET env
-// fallbacks resolve when the flag is unset, and that the flag wins over the env.
-// It drives runWith with a recording double so the resolved values are asserted
-// WITHOUT mounting (no /dev/fuse).
+// TestRunResolvesReadyFileAndBrokerSocket asserts that --ready-file,
+// --broker-socket and --broker-socket-dir parse, that the OCU_READY_FILE /
+// OCU_BROKER_SOCKET / OCU_BROKER_SOCKET_DIR env fallbacks resolve when the flag
+// is unset, and that the flag wins over the env. It drives runWith with a
+// recording double so the resolved values are asserted WITHOUT mounting (no
+// /dev/fuse).
 func TestRunResolvesReadyFileAndBrokerSocket(t *testing.T) {
 	validPath := writeTemp(t, "valid.json", validConfig)
 
 	type captured struct {
-		rc           mounter.ReadinessConfig
-		brokerSocket string
-		signals      bool
+		rc              mounter.ReadinessConfig
+		brokerSocket    string
+		brokerSocketDir string
+		signals         bool
 	}
 
 	tests := []struct {
-		name           string
-		args           []string
-		env            map[string]string
-		wantReadyFile  string
-		wantBrokerSock string
+		name              string
+		args              []string
+		env               map[string]string
+		wantReadyFile     string
+		wantBrokerSock    string
+		wantBrokerSockDir string
 	}{
 		{
 			name:           "flags supply both runtime inputs",
@@ -152,6 +155,23 @@ func TestRunResolvesReadyFileAndBrokerSocket(t *testing.T) {
 			wantReadyFile:  "/flag/ready",
 			wantBrokerSock: "/flag/broker.sock",
 		},
+		{
+			name:              "socket-dir flag resolves",
+			args:              []string{"--config", validPath, "--broker-socket-dir", "/run/sockets"},
+			wantBrokerSockDir: "/run/sockets",
+		},
+		{
+			name:              "socket-dir env fallback resolves when the flag is unset",
+			args:              []string{"--config", validPath},
+			env:               map[string]string{"OCU_BROKER_SOCKET_DIR": "/env/sockets"},
+			wantBrokerSockDir: "/env/sockets",
+		},
+		{
+			name:              "socket-dir flag wins over env",
+			args:              []string{"--config", validPath, "--broker-socket-dir", "/flag/sockets"},
+			env:               map[string]string{"OCU_BROKER_SOCKET_DIR": "/env/sockets"},
+			wantBrokerSockDir: "/flag/sockets",
+		},
 	}
 
 	for _, tc := range tests {
@@ -161,8 +181,8 @@ func TestRunResolvesReadyFileAndBrokerSocket(t *testing.T) {
 			}
 
 			var got captured
-			recorder := func(_ *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket string, signals <-chan os.Signal) error {
-				got = captured{rc: rc, brokerSocket: brokerSocket, signals: signals != nil}
+			recorder := func(_ *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket, brokerSocketDir string, signals <-chan os.Signal) error {
+				got = captured{rc: rc, brokerSocket: brokerSocket, brokerSocketDir: brokerSocketDir, signals: signals != nil}
 				return nil
 			}
 
@@ -174,6 +194,9 @@ func TestRunResolvesReadyFileAndBrokerSocket(t *testing.T) {
 			}
 			if got.brokerSocket != tc.wantBrokerSock {
 				t.Errorf("brokerSocket = %q; want %q", got.brokerSocket, tc.wantBrokerSock)
+			}
+			if got.brokerSocketDir != tc.wantBrokerSockDir {
+				t.Errorf("brokerSocketDir = %q; want %q", got.brokerSocketDir, tc.wantBrokerSockDir)
 			}
 			if !got.signals {
 				t.Error("signals channel was nil; want a real signal.Notify channel threaded into the mounter")

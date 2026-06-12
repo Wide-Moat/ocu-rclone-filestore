@@ -60,6 +60,11 @@ type orchestratorMounter struct {
 	// brokerSocketPath is the per-session socket path, an explicit runtime input
 	// (flag/env) supplied by the entrypoint.
 	brokerSocketPath string
+	// brokerSocketDirPath is the per-session socket DIRECTORY alternative:
+	// each mount derives <dir>/<filesystem_id>.sock, matching the broker's
+	// one-socket-per-filesystem provisioning. Exactly one of the two socket
+	// inputs may be set; the orchestrator enforces the exclusivity.
+	brokerSocketDirPath string
 	// readiness carries the optional ready-file path (flag/env).
 	readiness ReadinessConfig
 	// signals is the termination-signal channel the entrypoint installs. When
@@ -72,10 +77,11 @@ type orchestratorMounter struct {
 // that hard error wins over an unsupported-platform seam error.
 func (m orchestratorMounter) Mount(cfg *mountcfg.Config) error {
 	o := &orchestrator{
-		newSeam:          m.newSeam,
-		readiness:        m.readiness,
-		signals:          m.signals,
-		brokerSocketPath: m.brokerSocketPath,
+		newSeam:             m.newSeam,
+		readiness:           m.readiness,
+		signals:             m.signals,
+		brokerSocketPath:    m.brokerSocketPath,
+		brokerSocketDirPath: m.brokerSocketDirPath,
 	}
 	return o.run(context.Background(), cfg)
 }
@@ -94,6 +100,16 @@ func WithReadiness(rc ReadinessConfig) Option {
 // before any mount.
 func WithBrokerSocket(path string) Option {
 	return func(m *orchestratorMounter) { m.brokerSocketPath = path }
+}
+
+// WithBrokerSocketDir sets the per-session broker socket DIRECTORY, an explicit
+// runtime input sourced from a flag/env. Each mount derives its own socket path
+// as <dir>/<filesystem_id>.sock, matching the broker's one-session-socket-per-
+// filesystem provisioning, so a multi-filesystem config dials one broker
+// instance per scope. Mutually exclusive with WithBrokerSocket; setting both
+// makes the orchestrator hard-fail before any mount.
+func WithBrokerSocketDir(dir string) Option {
+	return func(m *orchestratorMounter) { m.brokerSocketDirPath = dir }
 }
 
 // WithSignals installs the termination-signal channel the orchestrator selects

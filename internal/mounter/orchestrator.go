@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"syscall"
 
@@ -80,6 +81,14 @@ type orchestrator struct {
 	readiness        ReadinessConfig
 	signals          <-chan os.Signal
 	brokerSocketPath string
+	// brokerSocketDirPath is the per-session socket DIRECTORY alternative to
+	// brokerSocketPath: when set, each mount derives its own socket path as
+	// <dir>/<filesystem_id>.sock. The broker side provisions exactly one unix
+	// socket per filesystem scope under its session socket directory using that
+	// filename convention, so a config with N mounts (N filesystem scopes) needs
+	// N distinct sockets — a single per-process socket path cannot serve them.
+	// Exactly one of brokerSocketPath / brokerSocketDirPath must be set.
+	brokerSocketDirPath string
 }
 
 // run realizes every mount in cfg and blocks until teardown.
@@ -94,8 +103,11 @@ type orchestrator struct {
 // points and returns nil; on a spontaneous point error it unmounts the rest and
 // returns that error.
 func (o *orchestrator) run(ctx context.Context, cfg *mountcfg.Config) error {
-	if o.brokerSocketPath == "" {
-		return errors.New("broker socket path not provided: the per-session socket path is a runtime input (D2), not the frozen service_url")
+	if o.brokerSocketPath == "" && o.brokerSocketDirPath == "" {
+		return errors.New("broker socket path not provided: pass the per-session socket path (--broker-socket) or the per-session socket directory (--broker-socket-dir); it is a runtime input (D2), not the frozen service_url")
+	}
+	if o.brokerSocketPath != "" && o.brokerSocketDirPath != "" {
+		return errors.New("broker socket path and broker socket directory are mutually exclusive: pass exactly one of --broker-socket / --broker-socket-dir")
 	}
 
 	// Construct the production seam only after the broker-socket check so the
@@ -222,11 +234,19 @@ func (o *orchestrator) shutdownDuringStartup(started []point) error {
 }
 
 // buildSpecs orders the writable mounts before the read-only mounts and stamps
-// each with the broker socket path. A memory-store mount is a hard error here,
+// each with its broker socket path. A memory-store mount is a hard error here,
 // before any point is started, so it is never silently skipped. A destination
 // that repeats across Mounts ∪ ReadonlyMounts is likewise a hard error (ME-02):
 // two specs targeting the same path would have the second silently shadow the
 // first, violating the never-silently-mis-mounted discipline.
+//
+// Socket resolution: in single-socket mode every spec carries the one
+// per-process brokerSocketPath. In socket-dir mode each spec derives
+// <dir>/<filesystem_id>.sock — the broker provisions one session socket per
+// filesystem scope under that directory with exactly that filename, so the
+// filesystem_id is the natural per-mount socket axis. The id is guaranteed
+// non-empty by the loader's scope XOR; it is re-checked here so a hand-built
+// config can never derive a directory-shaped socket path.
 func (o *orchestrator) buildSpecs(cfg *mountcfg.Config) ([]mountSpec, error) {
 	specs := make([]mountSpec, 0, len(cfg.Mounts)+len(cfg.ReadonlyMounts))
 	seen := make(map[string]struct{}, cap(specs))
@@ -239,7 +259,14 @@ func (o *orchestrator) buildSpecs(cfg *mountcfg.Config) ([]mountSpec, error) {
 				return fmt.Errorf("mount %q: duplicate destination across mounts/readonly_mounts (a second mount would silently shadow the first)", m.Destination)
 			}
 			seen[m.Destination] = struct{}{}
-			specs = append(specs, mountSpec{mount: m, readOnly: readOnly, socketPath: o.brokerSocketPath})
+			socketPath := o.brokerSocketPath
+			if o.brokerSocketDirPath != "" {
+				if m.FilesystemID == nil || *m.FilesystemID == "" {
+					return fmt.Errorf("mount %q: filesystem_id is required to derive the per-mount socket from the socket directory", m.Destination)
+				}
+				socketPath = filepath.Join(o.brokerSocketDirPath, *m.FilesystemID+".sock")
+			}
+			specs = append(specs, mountSpec{mount: m, readOnly: readOnly, socketPath: socketPath})
 		}
 		return nil
 	}

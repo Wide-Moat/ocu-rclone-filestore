@@ -20,8 +20,11 @@ import (
 
 // mountFunc realizes a loaded config under the given runtime inputs. run wires
 // the production mounter; the table test injects a recording double so the
-// flag/env resolution is asserted without a real mount.
-type mountFunc func(cfg *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket string, signals <-chan os.Signal) error
+// flag/env resolution is asserted without a real mount. brokerSocket and
+// brokerSocketDir are the two mutually exclusive socket inputs (single
+// per-session socket vs per-session socket directory the mounts derive
+// <filesystem_id>.sock from); the orchestrator enforces the exclusivity.
+type mountFunc func(cfg *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket, brokerSocketDir string, signals <-chan os.Signal) error
 
 // run parses args, loads the guest mount config from the --config path, sources
 // the runtime inputs (ready-file and broker socket, each from a flag with an env
@@ -46,6 +49,7 @@ func runWith(args []string, stderr io.Writer, mount mountFunc) error {
 	configPath := fs.String("config", "", "path to the guest mount config file")
 	readyFile := fs.String("ready-file", "", "optional path to create once all mounts are ready (env: OCU_READY_FILE)")
 	brokerSocket := fs.String("broker-socket", "", "per-session broker socket path supplied at provision (env: OCU_BROKER_SOCKET)")
+	brokerSocketDir := fs.String("broker-socket-dir", "", "per-session broker socket directory; each mount dials <dir>/<filesystem_id>.sock (env: OCU_BROKER_SOCKET_DIR; mutually exclusive with --broker-socket)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
@@ -59,6 +63,7 @@ func runWith(args []string, stderr io.Writer, mount mountFunc) error {
 	// the frozen guest mount config schema (D2).
 	resolvedReadyFile := resolveFlagOrEnv(*readyFile, "OCU_READY_FILE")
 	resolvedBrokerSocket := resolveFlagOrEnv(*brokerSocket, "OCU_BROKER_SOCKET")
+	resolvedBrokerSocketDir := resolveFlagOrEnv(*brokerSocketDir, "OCU_BROKER_SOCKET_DIR")
 
 	cfg, err := mountcfg.Load(*configPath)
 	if err != nil {
@@ -82,7 +87,7 @@ func runWith(args []string, stderr io.Writer, mount mountFunc) error {
 	defer signal.Stop(sig)
 
 	rc := mounter.ReadinessConfig{ReadyFilePath: resolvedReadyFile}
-	return mount(cfg, rc, resolvedBrokerSocket, sig)
+	return mount(cfg, rc, resolvedBrokerSocket, resolvedBrokerSocketDir, sig)
 }
 
 // resolveFlagOrEnv returns the flag value when set, otherwise the env var. An
@@ -98,10 +103,11 @@ func resolveFlagOrEnv(flagVal, envKey string) string {
 // productionMount wires the runtime inputs into the functional-options mounter
 // and runs it. Mount(cfg) stays unchanged; the entrypoint contract does not
 // break.
-func productionMount(cfg *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket string, signals <-chan os.Signal) error {
+func productionMount(cfg *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket, brokerSocketDir string, signals <-chan os.Signal) error {
 	return mounter.New(
 		mounter.WithReadiness(rc),
 		mounter.WithBrokerSocket(brokerSocket),
+		mounter.WithBrokerSocketDir(brokerSocketDir),
 		mounter.WithSignals(signals),
 	).Mount(cfg)
 }
