@@ -228,12 +228,16 @@ func (o *Object) resolve(ctx context.Context) error {
 		}
 		return fmt.Errorf("ocufs: resolve %q: %w", o.path, err)
 	}
-	if resp == nil || (resp.File.UUID == "" && resp.File.Path == "" && resp.Directory.Path == "") {
-		return fs.ErrorObjectNotFound
-	}
-	if resp.File.UUID == "" && resp.Directory.Path != "" {
+	// Discriminate on ARM PRESENCE via the SAME helper NewObject uses, so the
+	// two surfaces cannot desync (WR-02/WR-03/WR-05). A real file always carries
+	// an mtime, so a 0-byte file with empty path/uuid still classifies as a
+	// file; a directory arm with a stray file uuid still classifies as a dir.
+	switch classifyReadMetadata(resp) {
+	case metaArmDirectory:
 		// Path resolves to a directory — not a file.
 		return fs.ErrorIsDir
+	case metaArmAbsent:
+		return fs.ErrorObjectNotFound
 	}
 
 	o.uuid = resp.File.UUID

@@ -484,6 +484,57 @@ func TestNewObjectNotFoundViaBrokerError(t *testing.T) {
 	}
 }
 
+// TestNewObjectZeroByteFileDetected verifies that a 0-byte file whose
+// ReadMetadata response omits path and uuid but stamps an mtime is still
+// classified as a FILE (arm presence keyed on mtime), not ErrorObjectNotFound
+// (WR-02).
+func TestNewObjectZeroByteFileDetected(t *testing.T) {
+	c := &fakeClient{}
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		return &brokerrpc.ReadMetadataResponse{
+			File: brokerrpc.File{
+				// No path, no uuid, size 0 — but a real file carries an mtime.
+				Mtime: "2026-03-01T00:00:00Z",
+			},
+		}, nil
+	}
+
+	f := newTestFs(t, c, false)
+	obj, err := f.NewObject(context.Background(), "empty.txt")
+	if err != nil {
+		t.Fatalf("NewObject(0-byte file): %v, want a file *Object", err)
+	}
+	o, ok := obj.(*Object)
+	if !ok {
+		t.Fatalf("returned %T, want *Object", obj)
+	}
+	if o.size != 0 {
+		t.Errorf("size = %d, want 0", o.size)
+	}
+	if o.mtime.IsZero() {
+		t.Error("mtime is zero; the stamped mtime should have decoded")
+	}
+}
+
+// TestNewObjectDualArmIsDir verifies that a malformed dual-arm response
+// (directory.path set plus a stray file.uuid) classifies as a DIRECTORY
+// (ErrorIsDir), never as a readable file (WR-03).
+func TestNewObjectDualArmIsDir(t *testing.T) {
+	c := &fakeClient{}
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		return &brokerrpc.ReadMetadataResponse{
+			File:      brokerrpc.File{UUID: "stray-uuid"},
+			Directory: brokerrpc.Directory{Path: "/somedir"},
+		}, nil
+	}
+
+	f := newTestFs(t, c, false)
+	_, err := f.NewObject(context.Background(), "somedir")
+	if !errors.Is(err, fs.ErrorIsDir) {
+		t.Errorf("NewObject(dual-arm) error = %v, want fs.ErrorIsDir", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Read-only guard tests — Task 1 (registration/Options level)
 // ---------------------------------------------------------------------------

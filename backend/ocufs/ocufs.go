@@ -198,9 +198,12 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	if resp == nil {
 		return nil, fs.ErrorObjectNotFound
 	}
-	// A populated File takes priority over a Directory in the response
-	// (file arm wins per design decision 2).
-	if resp.File.UUID != "" || resp.File.Size != 0 || resp.File.Path != "" {
+	// Discriminate file vs directory vs absent on ARM PRESENCE, via the shared
+	// helper that NewObject and resolve() both use so they cannot desync
+	// (WR-02/WR-03/WR-05). A real file always carries an mtime, so a 0-byte
+	// file with empty path/uuid is still detected as a file (not not-found).
+	switch classifyReadMetadata(resp) {
+	case metaArmFile:
 		return &Object{
 			fs:    f,
 			path:  p,
@@ -211,11 +214,11 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 			sha:   resp.File.SHA,
 			mime:  resp.File.MIME,
 		}, nil
-	}
-	if resp.Directory.Path != "" {
+	case metaArmDirectory:
 		return nil, fs.ErrorIsDir
+	default:
+		return nil, fs.ErrorObjectNotFound
 	}
-	return nil, fs.ErrorObjectNotFound
 }
 
 // Put writes the content of in to the remote path, returning the resulting
@@ -352,6 +355,67 @@ func objectFromFile(f *Fs, remote string, ff *brokerrpc.FilesystemFile) *Object 
 		// remote is the rclone-relative path (used by Remote()).
 		remote: remote,
 	}
+}
+
+// metaArm is the classification of a ReadMetadata union response: which arm
+// (file, directory, or neither) the response carries.
+type metaArm int
+
+const (
+	metaArmAbsent    metaArm = iota // neither arm present → not found
+	metaArmFile                     // file arm present → an *Object
+	metaArmDirectory                // directory arm present, no file → ErrorIsDir
+)
+
+// classifyMetaArms is the single discrimination predicate shared by NewObject
+// and resolve(). It decides file-vs-directory-vs-absent by ARM PRESENCE rather
+// than by guessing from value emptiness, which avoids two desync hazards:
+//
+//   - WR-02: a legitimate 0-byte file whose response omits path and whose uuid
+//     is not yet reconciled would have size/path/uuid all zero; including the
+//     mtime (always stamped for a real file) in the file-arm presence test
+//     keeps it classified as a file instead of not-found.
+//   - WR-03: a malformed dual-arm response (directory arm set plus a stray file
+//     uuid) must surface as a directory, not a readable file. The file arm only
+//     wins when the directory arm is absent.
+//
+// The arguments are the presence-relevant fields of the file arm and the path
+// of the directory arm; the wrappers below adapt each wire type (File via
+// ReadMetadataResponse, FilesystemFile via listing) onto this one predicate so
+// the two surfaces apply identical rules (WR-05).
+func classifyMetaArms(filePath, fileUUID, fileMtime string, fileSize int64, dirPath string) metaArm {
+	// A SUBSTANTIVE file signal is path, mtime, or size — fields a real file
+	// always carries (mtime is always stamped, closing the 0-byte gap of
+	// WR-02). A bare uuid is NOT treated as substantive on its own: in a
+	// malformed dual-arm response (directory path set plus a stray file uuid),
+	// a lone uuid must not override a present directory arm (WR-03).
+	fileSubstantive := filePath != "" || fileMtime != "" || fileSize != 0
+	fileArm := fileSubstantive || fileUUID != ""
+	dirArm := dirPath != ""
+	switch {
+	case dirArm && !fileSubstantive:
+		// Directory arm present and the file arm carries no substantive signal
+		// (at most a stray uuid) → directory wins.
+		return metaArmDirectory
+	case fileArm:
+		// File arm present (substantive, or uuid with no competing directory) →
+		// a file. File wins over a directory only when it is substantive.
+		return metaArmFile
+	default:
+		return metaArmAbsent
+	}
+}
+
+// classifyReadMetadata classifies a ReadMetadataResponse (whose file arm is a
+// brokerrpc.File) via the shared predicate.
+func classifyReadMetadata(resp *brokerrpc.ReadMetadataResponse) metaArm {
+	if resp == nil {
+		return metaArmAbsent
+	}
+	return classifyMetaArms(
+		resp.File.Path, resp.File.UUID, resp.File.Mtime, resp.File.Size,
+		resp.Directory.Path,
+	)
 }
 
 // parseMtime parses an mtime string using RFC3339Nano (falling back to
