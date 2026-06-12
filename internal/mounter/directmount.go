@@ -15,6 +15,7 @@
 package mounter
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"time"
@@ -66,7 +67,10 @@ func directMountFn(VFS *vfs.VFS, mountpoint string, opt *mountlib.Options) (<-ch
 		return nil, nil, "", err
 	}
 
-	mo := buildFuseMountOptions(fsys, opt)
+	mo, err := buildFuseMountOptions(fsys, opt)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("direct mount %q: %w", mountpoint, err)
+	}
 	nodeOpts := buildNodeFSOptions(fsys, opt, mo)
 
 	rawFS := fusefs.NewNodeFS(root, &nodeOpts)
@@ -119,6 +123,14 @@ func serveFuse(srv fuseServer, shutdownVFS func()) (<-chan error, func() error) 
 	return errs, umount
 }
 
+// errUnsupportedDirectMountOption is the typed rejection for mount options
+// that only a fusermount-style userspace helper could honour. Under
+// DirectMountStrict every option string is handed raw to the mount syscall,
+// and anything the kernel does not parse fails the WHOLE mount with a
+// misleading EINVAL — so the unsupported axes are rejected up front with a
+// clear error instead.
+var errUnsupportedDirectMountOption = errors.New("unsupported under direct mount")
+
 // buildFuseMountOptions maps *mountlib.Options onto go-fuse's fuse.MountOptions
 // for the direct-mount frontend. The field mapping matches what rclone's mount2
 // frontend feeds go-fuse (same names, same defaults: MaxWrite pinned to 1 MiB,
@@ -127,8 +139,29 @@ func serveFuse(srv fuseServer, shutdownVFS func()) (<-chan error, func() error) 
 // and never execs a fusermount helper — the load-bearing property for the
 // static guest image. DirectMountStrict wins over DirectMount and has no
 // helper fallback.
-func buildFuseMountOptions(fsys *mount2.FS, opt *mountlib.Options) fuse.MountOptions {
+//
+// Because the option string goes raw into the mount syscall, the two axes the
+// kernel cannot parse are rejected with errUnsupportedDirectMountOption:
+// allow_root is a userspace-helper concept (the kernel knows only
+// allow_other), and ExtraFlags are helper-era flags with no kernel meaning.
+// Production sets neither; the guard turns a latent kernel EINVAL into a
+// typed, attributable error for any future caller.
+func buildFuseMountOptions(fsys *mount2.FS, opt *mountlib.Options) (fuse.MountOptions, error) {
+	if opt.AllowRoot {
+		return fuse.MountOptions{}, fmt.Errorf("allow-root: only a fusermount-style helper can enforce it and the kernel rejects the option string: %w", errUnsupportedDirectMountOption)
+	}
+	if len(opt.ExtraFlags) > 0 {
+		return fuse.MountOptions{}, fmt.Errorf("extra mount flags %v: helper-era flags have no kernel meaning (use kernel-recognized ExtraOptions instead): %w", opt.ExtraFlags, errUnsupportedDirectMountOption)
+	}
+	if opt.WritebackCache {
+		// Not mapped by this frontend (matching rclone's mount2, which also
+		// does not support it); say so instead of silently dropping it.
+		fs.Logf(fsys.VFS.Fs(), "--write-back-cache is not supported by the direct-mount frontend and is ignored")
+	}
 	mo := fuse.MountOptions{
+		// AllowOther rides the field only: go-fuse appends the kernel-valid
+		// allow_other option itself under direct mount, so an explicit string
+		// append here would just duplicate it in the mount data.
 		AllowOther:         opt.AllowOther,
 		FsName:             opt.DeviceName,
 		Name:               "rclone",
@@ -140,12 +173,6 @@ func buildFuseMountOptions(fsys *mount2.FS, opt *mountlib.Options) fuse.MountOpt
 		DirectMountStrict:  true,
 	}
 	var opts []string
-	if opt.AllowOther {
-		opts = append(opts, "allow_other")
-	}
-	if opt.AllowRoot {
-		opts = append(opts, "allow_root")
-	}
 	if opt.DefaultPermissions {
 		opts = append(opts, "default_permissions")
 	}
@@ -162,12 +189,11 @@ func buildFuseMountOptions(fsys *mount2.FS, opt *mountlib.Options) fuse.MountOpt
 		)
 	}
 	// With no helper subprocess there is only one channel for extra options:
-	// the option string handed to the mount syscall. Both extra-option axes
-	// ride it.
+	// the option string handed to the mount syscall. Only kernel-recognized
+	// options may ride it.
 	opts = append(opts, opt.ExtraOptions...)
-	opts = append(opts, opt.ExtraFlags...)
 	mo.Options = opts
-	return mo
+	return mo, nil
 }
 
 // buildNodeFSOptions wraps the assembled fuse.MountOptions with the node-layer

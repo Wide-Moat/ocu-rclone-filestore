@@ -7,6 +7,7 @@ package mounter
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -50,23 +51,25 @@ func newTestMount2FS(t *testing.T, name string, vfsOpt *vfscommon.Options, mount
 // the first-party frontend: DirectMountStrict is ALWAYS set, so go-fuse
 // performs the mount syscall itself and never execs a fusermount helper — the
 // static guest image carries none. It also asserts the mountlib.Options fields
-// map onto the fuse.MountOptions the kernel mount sees: AllowOther (field and
-// "-o allow_other"), DebugFUSE, DeviceName, read-only, and the
-// ExtraOptions/ExtraFlags pass-through.
+// map onto the fuse.MountOptions the kernel mount sees: AllowOther (field only
+// — go-fuse appends the kernel option itself under direct mount, so no
+// duplicate string append), DebugFUSE, DeviceName, read-only, and the
+// ExtraOptions pass-through.
 func TestBuildFuseMountOptionsDirectMountStrict(t *testing.T) {
 	vfsOpt := vfscommon.Opt
 	vfsOpt.ReadOnly = true
 	mountOpt := mountlib.Opt
 	mountOpt.AllowOther = true
-	mountOpt.AllowRoot = true
 	mountOpt.DefaultPermissions = true
 	mountOpt.DebugFUSE = true
 	mountOpt.DeviceName = "ocufs-unit-dev"
 	mountOpt.ExtraOptions = []string{"max_read=131072"}
-	mountOpt.ExtraFlags = []string{"sync"}
 
 	fsys := newTestMount2FS(t, "ocufs-fuseopts", &vfsOpt, &mountOpt)
-	mo := buildFuseMountOptions(fsys, &mountOpt)
+	mo, err := buildFuseMountOptions(fsys, &mountOpt)
+	if err != nil {
+		t.Fatalf("buildFuseMountOptions: %v; want the default option set to build", err)
+	}
 
 	if !mo.DirectMountStrict {
 		t.Fatal("DirectMountStrict = false: the mount would fall back to a fusermount helper the static guest image does not carry")
@@ -74,16 +77,54 @@ func TestBuildFuseMountOptionsDirectMountStrict(t *testing.T) {
 	if !mo.AllowOther {
 		t.Fatal("AllowOther was not mapped from mountlib.Options")
 	}
+	if slices.Contains(mo.Options, "allow_other") {
+		t.Fatalf("allow_other appears in the option strings %v: it must ride the AllowOther field only, or the mount data carries it twice", mo.Options)
+	}
 	if !mo.Debug {
 		t.Fatal("DebugFUSE was not mapped onto fuse.MountOptions.Debug")
 	}
 	if mo.FsName != "ocufs-unit-dev" {
 		t.Fatalf("FsName = %q; want the mapped DeviceName", mo.FsName)
 	}
-	for _, want := range []string{"allow_other", "allow_root", "default_permissions", "ro", "max_read=131072", "sync"} {
+	for _, want := range []string{"default_permissions", "ro", "max_read=131072"} {
 		if !slices.Contains(mo.Options, want) {
 			t.Fatalf("mount option %q missing from %v", want, mo.Options)
 		}
+	}
+}
+
+// TestBuildFuseMountOptionsRejectsHelperOnlyOptions pins the EINVAL guard:
+// under DirectMountStrict every option string is handed raw to the mount
+// syscall, so the two axes the kernel cannot parse — allow_root (a
+// userspace-helper concept) and ExtraFlags (helper-era flags) — must be
+// rejected up front with the typed unsupported-under-direct-mount error
+// instead of failing the whole mount with a misleading kernel EINVAL.
+func TestBuildFuseMountOptionsRejectsHelperOnlyOptions(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*mountlib.Options)
+	}{
+		{name: "allow-root", mutate: func(o *mountlib.Options) { o.AllowRoot = true }},
+		{name: "extra-flags", mutate: func(o *mountlib.Options) { o.ExtraFlags = []string{"sync"} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vfsOpt := vfscommon.Opt
+			mountOpt := mountlib.Opt
+			tc.mutate(&mountOpt)
+
+			fsys := newTestMount2FS(t, "ocufs-reject-"+tc.name, &vfsOpt, &mountOpt)
+			_, err := buildFuseMountOptions(fsys, &mountOpt)
+			if err == nil {
+				t.Fatalf("%s built mount options for the kernel; want the typed rejection", tc.name)
+			}
+			if !errors.Is(err, errUnsupportedDirectMountOption) {
+				t.Fatalf("error = %v; want errors.Is(err, errUnsupportedDirectMountOption)", err)
+			}
+			if !strings.Contains(err.Error(), "unsupported under direct mount") {
+				t.Fatalf("error = %q; want a clear unsupported-under-direct-mount message", err)
+			}
+		})
 	}
 }
 
@@ -99,7 +140,10 @@ func TestBuildNodeFSOptionsMapsTimeoutsAndIDs(t *testing.T) {
 	mountOpt.AttrTimeout = fs.Duration(7 * time.Second)
 
 	fsys := newTestMount2FS(t, "ocufs-nodeopts", &vfsOpt, &mountOpt)
-	mo := buildFuseMountOptions(fsys, &mountOpt)
+	mo, err := buildFuseMountOptions(fsys, &mountOpt)
+	if err != nil {
+		t.Fatalf("buildFuseMountOptions: %v; want the default option set to build", err)
+	}
 	nodeOpts := buildNodeFSOptions(fsys, &mountOpt, mo)
 
 	if nodeOpts.AttrTimeout == nil || *nodeOpts.AttrTimeout != 7*time.Second {
