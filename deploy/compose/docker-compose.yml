@@ -110,6 +110,16 @@ services:
     # not merely no route to an object store. The broker unix sockets on the
     # shared volume are the sole channel; a unix socket needs no network.
     network_mode: "none"
+    # Shared (host) PID namespace, mirrored by the test-runner: the runner
+    # signals the REAL mount process for the graceful-teardown step and must
+    # survive that process's exit to finish its assertions. Joining the mount
+    # container's own namespace (pid: "service:mount") cannot work: the mount
+    # binary is that namespace's init, and when it exits on SIGTERM the kernel
+    # kills every process in the namespace — the runner would die before the
+    # teardown assertions run. The host namespace is the shared namespace that
+    # survives. Harness-only posture; the production guest does not share a
+    # PID namespace with anything.
+    pid: "host"
     # SEC-25: ONLY the read-only guest config, the shared socket volume, the
     # ready-file volume and the workspace bind cross into the mount container.
     # No object-store network alias, no credential env, no second transport.
@@ -142,6 +152,70 @@ services:
     # creates it once every mount is up and removes it on teardown. The minimal
     # runtime image has no shell, so readiness is observed from the SHARED
     # VOLUME (the e2e runner polls that file before starting the exercise).
+
+  # ---------------------------------------------------------------------------
+  # Test runner — the live e2e gate (profile "test": started explicitly via
+  # `docker compose run --rm test-runner`, never by a plain `up`). It runs the
+  # gated exercise binary against the FUSE mountpoints, which exist only where
+  # the mount service's rshared bind propagates them. The runner shares the
+  # HOST PID namespace with the mount service so the graceful-teardown step
+  # signals the real mount process and the runner survives that process's
+  # exit (see the pid note on the mount service).
+  # ---------------------------------------------------------------------------
+  test-runner:
+    profiles: ["test"]
+    build:
+      context: ../..
+      dockerfile: deploy/compose/runner.Dockerfile
+    depends_on:
+      - mount
+    network_mode: "none"
+    pid: "host"
+    environment:
+      # The live gate: the exercise runs for real in this service.
+      RCLONE_OCUFS_LIVE: "1"
+      OCU_E2E_RW_MOUNT: /workspace/out
+      OCU_E2E_RO_MOUNT: /workspace/in
+      OCU_E2E_READY_FILE: /run/ocu/mount-ready
+      # OCU_E2E_MOUNT_PID is resolved by the command below from the shared
+      # (host) PID namespace, not hardcoded here.
+      #
+      # Throttle: SEC-46 throttling is broker-side; the guest never simulates
+      # it. Until the broker's ops-per-second test affordance is present in
+      # the pinned ref, the SC2 throttle step stays FAIL-CLOSED: it fails the
+      # run unless the operator explicitly opts into a partial run with
+      # OCU_E2E_ALLOW_PARTIAL=1. Do not cut a release on a partial run.
+      OCU_E2E_THROTTLE_FILE: ${OCU_E2E_THROTTLE_FILE:-}
+      OCU_E2E_ALLOW_PARTIAL: ${OCU_E2E_ALLOW_PARTIAL:-}
+    volumes:
+      - mount-shared:/run/ocu
+      # rslave: receive the FUSE mounts the mount service propagates out
+      # through its rshared bind; never propagate anything back.
+      - type: bind
+        source: /tmp/ocu-e2e-workspace
+        target: /workspace
+        bind:
+          propagation: rslave
+    command:
+      - sh
+      - -c
+      - |
+        i=0
+        while [ ! -f /run/ocu/mount-ready ]; do
+          i=$$((i+1))
+          if [ "$$i" -gt 120 ]; then
+            echo "mount never became ready within 120s" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        OCU_E2E_MOUNT_PID="$$(pgrep -f '^/ocu-rclone-filestore' | head -n1)"
+        if [ -z "$$OCU_E2E_MOUNT_PID" ]; then
+          echo "could not resolve the mount process in the shared PID namespace" >&2
+          exit 1
+        fi
+        export OCU_E2E_MOUNT_PID
+        exec /e2e.test -test.v -test.run '^TestE2EExercise$$' -test.count=1
 
 volumes:
   # Shared session-socket directory. Each broker creates its own

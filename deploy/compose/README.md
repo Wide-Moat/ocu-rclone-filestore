@@ -32,6 +32,19 @@ file operations through the FUSE mount path.
   filesystem provisioning. Nothing else crosses into the container: no
   object-store network path, no credential env, no second transport (SEC-25).
 
+- **test-runner** — the live e2e gate (profile `test`; started explicitly via
+  `docker compose run --rm test-runner`). `runner.Dockerfile` compiles the
+  gated exercise package (`test/e2e`, build tag `e2e`) into a standalone test
+  binary on a busybox base. The service presets the live gate
+  (`RCLONE_OCUFS_LIVE`) and the mountpoint/ready-file env, polls the
+  ready-file, resolves the mount process PID from the shared PID namespace,
+  and runs the exercise. It receives the FUSE mounts through an `rslave` bind
+  and shares the HOST PID namespace with the mount service: the
+  graceful-teardown step signals the real mount process, and the runner
+  survives that process's exit to finish its assertions (joining the mount
+  container's own namespace would not survive it — the mount binary is that
+  namespace's init, and its exit kills every process in the namespace).
+
 Every service runs `network_mode: "none"`: the unix sockets on the shared
 volume are the sole channel, and a unix socket needs no network stack.
 
