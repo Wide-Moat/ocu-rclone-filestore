@@ -42,7 +42,21 @@ const (
 	// throttle (SEC-46 is broker-side); it only drives the write and asserts no
 	// data loss.
 	envThrottleFile = "OCU_E2E_THROTTLE_FILE"
+	// envAllowPartial is the explicit escape hatch for a partial live run: with
+	// the gate set, missing OCU_E2E_THROTTLE_FILE / OCU_E2E_MOUNT_PID is a hard
+	// failure (fail-closed — a release must never publish with the SC2 throttle
+	// and teardown assertions silently skipped) UNLESS this is set to a truthy
+	// value (e.g. 1/true), which opts into skipping those steps on purpose.
+	envAllowPartial = "OCU_E2E_ALLOW_PARTIAL"
 )
+
+// allowPartial reports whether the operator explicitly opted into a partial
+// live run via the escape hatch. Only an explicit truthy value counts; unset,
+// empty, or non-boolean values keep the gate fail-closed.
+func allowPartial() bool {
+	v, err := strconv.ParseBool(os.Getenv(envAllowPartial))
+	return err == nil && v
+}
 
 // largeFileSize exceeds the ~4MiB RPC ceiling so the write exercises chunked
 // upload and the read exercises ranged reassembly.
@@ -269,8 +283,16 @@ func TestE2EExercise(t *testing.T) {
 		// retryable closed-code is handled with backoff by the backend and the
 		// VFS cache holds the data, so the write completes without loss.
 		if env.throttleFile == "" {
-			t.Skipf("%s unset — broker throttle test-mode is coordinated with the "+
-				"peer in 05-02; the guest never simulates throttling (SEC-46)", envThrottleFile)
+			if allowPartial() {
+				t.Skipf("%s unset and partial mode explicitly opted into via %s — "+
+					"skipping the SC2 throttle-no-data-loss assertion; the broker "+
+					"throttle test-mode is coordinated with the peer (the guest never "+
+					"simulates throttling, SEC-46)", envThrottleFile, envAllowPartial)
+			}
+			t.Fatalf("%s is required under the live gate (%s): it names the path the "+
+				"broker test-mode throttles so the SC2 throttle-no-data-loss "+
+				"assertion actually runs; set %s=1 only to opt into a partial run "+
+				"on purpose", envThrottleFile, envGate, envAllowPartial)
 		}
 		path := filepath.Join(env.rwMount, env.throttleFile)
 		payload := []byte("throttled write must survive the retry without loss\n")
@@ -290,8 +312,13 @@ func TestE2EExercise(t *testing.T) {
 		// 05-02: the harness exports the mount process PID and the ready-file
 		// path; on the live host this signals the process and asserts teardown.
 		if env.mountPID == 0 {
-			t.Skipf("%s unset — the harness exports the mount process PID in 05-02; "+
-				"the teardown assertion targets that process", envMountPID)
+			if allowPartial() {
+				t.Skipf("%s unset and partial mode explicitly opted into via %s — "+
+					"skipping the graceful-teardown assertion", envMountPID, envAllowPartial)
+			}
+			t.Fatalf("%s is required under the live gate (%s): the graceful-teardown "+
+				"assertion must signal the real mount process; set %s=1 only to opt "+
+				"into a partial run on purpose", envMountPID, envGate, envAllowPartial)
 		}
 		proc, err := os.FindProcess(env.mountPID)
 		if err != nil {
