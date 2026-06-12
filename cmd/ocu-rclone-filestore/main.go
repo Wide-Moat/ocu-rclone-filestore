@@ -11,6 +11,12 @@ import (
 	"os"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=...". It
+// defaults to "dev" for plain `go build` and is set to the release tag by the
+// goreleaser build and the container image build-arg. It is exported as a
+// linker symbol only; the binary's behaviour does not depend on it.
+var version = "dev"
+
 // main is a thin wrapper around run: it maps a non-nil run error to a non-zero
 // exit code and a nil error to a zero exit. All logic lives in run so it stays
 // testable without spawning a process.

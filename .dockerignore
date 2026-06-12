@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Narrow the build context to the source tree the static build needs. Version
+# control, planning notes, local-only study material, the gated e2e package,
+# docs, and markdown never enter the image build.
+
+.git
+.github
+.planning
+# Local-only study material (a dot-prefixed, version-control-ignored directory)
+# never belongs in the build context; matched by glob so this ignore file holds
+# no studied-source token.
+.ref*
+test/e2e
+docs
+**/*.md
+deploy
+Dockerfile
+.dockerignore
