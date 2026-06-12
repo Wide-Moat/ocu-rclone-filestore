@@ -15,6 +15,12 @@ Code derived from upstream rclone (https://github.com/rclone/rclone) remains
 under rclone's MIT license; upstream copyright notices and headers are
 preserved in the derived files.
 
+Derived files:
+- internal/mounter/directmount.go — the FUSE mount option assembly and mount
+  lifecycle are derived from rclone's cmd/mount2 (mount.go, fs.go), MIT,
+  Copyright (C) 2012 by Nick Craig-Wood. Additions in that file are
+  FSL-1.1-Apache-2.0; the header marks the split.
+
 You may use, copy, modify, fork, and redistribute the Software for any purpose
 other than offering a hosted or embedded service that competes with our paid
 version(s) of the Software. Self-hosting for internal use within your

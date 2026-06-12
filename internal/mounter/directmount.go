@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 // Copyright (c) 2025 Open Computer Use Contributors
+//
+// Portions of this file are derived from rclone's cmd/mount2 frontend
+// (mount.go and fs.go) and are used under rclone's MIT license:
+//
+//	Copyright (C) 2012 by Nick Craig-Wood
+//
+// See LICENSE-MIT for the full MIT license text. License split: additions
+// authored by this project carry FSL-1.1-Apache-2.0 (the SPDX line above);
+// the rclone-derived portions remain under MIT.
 
 //go:build linux || (darwin && amd64)
 
