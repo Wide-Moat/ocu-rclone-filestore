@@ -145,6 +145,13 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	if err := o.resolve(ctx); err != nil {
 		return nil, err
 	}
+	// resolve() can succeed while leaving uuid empty (a file arm whose uuid
+	// field is not populated). Download addresses by uuid, so guard here and
+	// emit a clear diagnostic instead of issuing Download with an empty handle
+	// and relying on the broker to reject it (WR-04).
+	if o.uuid == "" {
+		return nil, fmt.Errorf("ocufs: Open %q: resolved metadata carries no uuid handle", o.path)
+	}
 
 	var (
 		haveRange bool

@@ -263,6 +263,45 @@ func TestFallbackResolveNotFound(t *testing.T) {
 	}
 }
 
+// TestOpenEmptyUUIDAfterResolve verifies that when resolve() succeeds but
+// leaves the uuid empty (a file arm with no uuid), Open returns a clear
+// diagnostic error and issues NO Download/DownloadRange call (WR-04).
+func TestOpenEmptyUUIDAfterResolve(t *testing.T) {
+	c := &fakeClient{}
+	// resolve() succeeds and classifies as a file (substantive mtime/size) but
+	// the uuid field is empty.
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		return &brokerrpc.ReadMetadataResponse{
+			File: brokerrpc.File{
+				Path:  path,
+				Size:  10,
+				Mtime: "2026-04-01T00:00:00Z",
+				// UUID intentionally empty.
+			},
+		}, nil
+	}
+	downloadCalled := false
+	c.downloadResult = func(ctx context.Context, uuid string) ([]byte, error) {
+		downloadCalled = true
+		return nil, nil
+	}
+	c.downloadRangeResult = func(ctx context.Context, uuid string, offset, length int64) ([]byte, error) {
+		downloadCalled = true
+		return nil, nil
+	}
+
+	f := &Fs{name: "ocufs", root: "/", client: c, readOnly: false}
+	obj := &Object{fs: f, path: "/no-uuid.bin", uuid: ""}
+
+	_, err := obj.Open(context.Background())
+	if err == nil {
+		t.Fatal("Open with empty uuid after resolve: got nil error, want a diagnostic")
+	}
+	if downloadCalled {
+		t.Error("Open issued a Download/DownloadRange with an empty uuid; want none")
+	}
+}
+
 // TestListDerivedObjectOpenNoResolve verifies that a List-derived Object
 // (uuid already set) opens via DownloadRange WITHOUT calling ReadMetadata.
 func TestListDerivedObjectOpenNoResolve(t *testing.T) {
