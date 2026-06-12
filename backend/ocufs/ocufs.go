@@ -239,9 +239,10 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	// fallback: it fetches uuid+size on the first access that needs them.
 	// Documented in plan 03-01 SUMMARY as a known follow-up.
 	return &Object{
-		fs:   f,
-		path: dstPath,
-		size: src.Size(),
+		fs:     f,
+		path:   dstPath,
+		remote: src.Remote(),
+		size:   src.Size(),
 	}, nil
 }
 

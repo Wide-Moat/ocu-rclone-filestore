@@ -669,6 +669,12 @@ func TestWritablePathPutInvokesUpload(t *testing.T) {
 	if obj == nil {
 		t.Fatal("Put returned nil object")
 	}
+	// The returned Object must report the source remote so callers' transfer
+	// accounting, post-upload verification, and VFS cache keying all key on the
+	// same remote (dst.Remote() == src.Remote()).
+	if obj.Remote() != src.Remote() {
+		t.Errorf("Put returned Object.Remote()=%q, want %q", obj.Remote(), src.Remote())
+	}
 	if c.uploadCount != 1 {
 		t.Errorf("Upload called %d times, want 1", c.uploadCount)
 	}
