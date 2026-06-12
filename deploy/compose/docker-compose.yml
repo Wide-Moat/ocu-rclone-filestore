@@ -1,37 +1,89 @@
 # SPDX-License-Identifier: FSL-1.1-Apache-2.0
 # Copyright (c) 2025 Open Computer Use Contributors
 #
-# Compose harness for the real end-to-end exercise. Two services share one
-# named volume that carries the per-session broker unix socket: the broker
-# creates the socket, the mount dials it. The mount service gets ONLY the
-# socket volume and a read-only guest config — no network path to any object
-# store, no credential env, no second transport (SEC-25). Real /dev/fuse needs
-# a Linux kernel; run this under Lima locally (see ../../docs/e2e-local.md).
+# Compose harness for the real end-to-end exercise. Two real broker instances
+# (one per filesystem scope — the broker binds exactly one session socket per
+# filesystem_id, named <filesystem_id>.sock under its session socket
+# directory) share a socket volume with the mount service: each broker creates
+# its socket, the mount derives the per-mount socket from the shared directory
+# (--broker-socket-dir) and dials it. The mount service gets ONLY the socket
+# volume, a read-only guest config, and the workspace bind for the runner — no
+# network path to any object store, no credential env, no second transport
+# (SEC-25). Every service runs with no network stack at all; the unix sockets
+# on the shared volume are the sole channel. Real /dev/fuse needs a Linux
+# kernel; run this under Lima locally (see ../../docs/e2e-local.md).
+
+# Both broker services build the same image from the clone-at-ref builder
+# (broker.Dockerfile): the sibling PUBLIC broker repo pinned at BROKER_REF
+# (default b31673f, the peer-confirmed south-face ref). The shared image name
+# makes the second service's build a pure cache hit.
+x-broker-build: &broker-build
+  context: .
+  dockerfile: broker.Dockerfile
+  args:
+    BROKER_REF: ${BROKER_REF:-b31673f}
 
 services:
   # ---------------------------------------------------------------------------
-  # PLACEHOLDER BROKER — wave 05-01 only. DO NOT treat as the real broker.
+  # Brokers — one instance per filesystem scope. The broker requires
+  # -engine-root, -audit-sink and -broker-max-file-size or it exits before
+  # binding; -profile trusted_operator and -tenancy single-tenant are the
+  # defaults and are left implicit. The containers run uid 0 (image default)
+  # because the broker accepts a unix-socket peer only with the SAME uid, and
+  # the mount container must be root for FUSE mount(2).
   #
-  # >>> 05-02 REPLACES THIS SERVICE <<< with a multi-stage build of the sibling
-  #     broker repo at a pinned ref (its cmd entrypoint serving the south-face
-  #     over the exported Serve), creating the per-session unix socket on the
-  #     shared volume below so the mount can dial it. Until then this is a
-  #     do-nothing pinned base image that simply holds the socket volume mount
-  #     in place; it serves nothing, so a local run skips the live assertions.
+  # Workspace seeding: none. The exercise writes everything it later reads via
+  # the rw mount, so the rw workspace starts empty by design; the ro mount is
+  # only ever stat'ed and written-to-fail (the deny is the assertion), so the
+  # ro workspace stays empty too.
   # ---------------------------------------------------------------------------
-  broker:
-    # Do-nothing placeholder base, pinned by digest (busybox 1.37.0-glibc). It
-    # idles so the harness topology (shared socket volume, start ordering) is
-    # exercisable now; it does NOT emit any file-op bodies.
-    image: busybox@sha256:4279d9b47df4c1b02d80efd8d02cd59b3a8182c1e785a4ff3f6983bee19dc8b0
-    command: ["sh", "-c", "echo '05-01 placeholder broker: idling; 05-02 builds the real south-face server here'; sleep infinity"]
-    # No network: the only channel between the services is the shared unix
-    # socket volume, so neither side needs a network stack at all.
+  broker-rw:
+    build: *broker-build
+    image: ocu-filestored:${BROKER_REF:-b31673f}
     network_mode: "none"
+    command:
+      - -filesystem-id
+      - fsrw
+      - -granted-intents
+      - read,write
+      - -engine
+      - local-volume
+      - -engine-root
+      - /workspace
+      - -audit-sink
+      - /audit/audit.log
+      - -broker-max-file-size
+      - "67108864"
+      - -south-socket-dir
+      - /sock
     volumes:
-      # The per-session socket directory shared with the mount service. 05-02's
-      # real broker creates the unix socket here.
-      - broker-socket:/run/ocu
+      - broker-socket:/sock
+      - broker-rw-workspace:/workspace
+      - broker-rw-audit:/audit
+
+  broker-ro:
+    build: *broker-build
+    image: ocu-filestored:${BROKER_REF:-b31673f}
+    network_mode: "none"
+    command:
+      - -filesystem-id
+      - fsro
+      - -granted-intents
+      - read
+      - -engine
+      - local-volume
+      - -engine-root
+      - /workspace
+      - -audit-sink
+      - /audit/audit.log
+      - -broker-max-file-size
+      - "67108864"
+      - -south-socket-dir
+      - /sock
+    volumes:
+      - broker-socket:/sock
+      - broker-ro-workspace:/workspace
+      - broker-ro-audit:/audit
 
   mount:
     # Built from the repo-root Dockerfile (the static mount image).
@@ -39,7 +91,8 @@ services:
       context: ../..
       dockerfile: Dockerfile
     depends_on:
-      - broker
+      - broker-rw
+      - broker-ro
     # FUSE needs the device node and the mount capability from the host. No
     # other capabilities, no privileged: true.
     devices:
@@ -50,37 +103,55 @@ services:
     # CAP_SYS_ADMIN alone is insufficient under the default container
     # AppArmor profile, which denies the mount syscall outright. A tailored
     # profile allowing 'mount fstype=fuse.*' is the stricter alternative.
-    # Only this service mounts; the broker stays confined.
+    # Only this service mounts; the brokers stay confined.
     security_opt:
       - apparmor=unconfined
     # SEC-25 made structural: the mount container has NO network stack at all —
-    # not merely no route to an object store. The broker unix socket on the
-    # shared volume is the sole channel; a unix socket needs no network.
+    # not merely no route to an object store. The broker unix sockets on the
+    # shared volume are the sole channel; a unix socket needs no network.
     network_mode: "none"
-    # SEC-25: ONLY the read-only guest config and the shared socket volume cross
-    # into the mount container. No object-store network alias, no credential
-    # env, no second transport.
+    # SEC-25: ONLY the read-only guest config, the shared socket volume, the
+    # ready-file volume and the workspace bind cross into the mount container.
+    # No object-store network alias, no credential env, no second transport.
     volumes:
       - ./fixtures/guest-config.json:/etc/ocu/guest-config.json:ro
-      - broker-socket:/run/ocu
-    # The shipped entrypoint contract: --config (required), --broker-socket
-    # (the per-session socket on the shared volume), --ready-file (created once
-    # all mounts are up; the healthcheck waits on it).
+      - broker-socket:/sock
+      - mount-shared:/run/ocu
+      # The mount destinations are a host BIND with rshared propagation so the
+      # FUSE mounts the entrypoint creates INSIDE this container propagate out
+      # to the host path and from there into the test-runner's rslave bind —
+      # a named volume does not propagate mounts created after container
+      # start. Create out/ and in/ under this path on the Docker host before
+      # `up` (see docs/e2e-local.md).
+      - type: bind
+        source: /tmp/ocu-e2e-workspace
+        target: /workspace
+        bind:
+          propagation: rshared
+    # The shipped entrypoint contract: --config (required), --broker-socket-dir
+    # (each mount derives <filesystem_id>.sock in it: fsrw.sock / fsro.sock on
+    # the shared socket volume), --ready-file (created once all mounts are up).
     command:
       - --config
       - /etc/ocu/guest-config.json
-      - --broker-socket
-      - /run/ocu/broker.sock
+      - --broker-socket-dir
+      - /sock
       - --ready-file
       - /run/ocu/mount-ready
-    # Readiness is the ready-file at /run/ocu/mount-ready: the entrypoint creates
-    # it once every mount is up and removes it on teardown. The minimal runtime
-    # image has no shell, so readiness is observed from the SHARED VOLUME rather
-    # than a CMD-SHELL container healthcheck — the e2e runner (and a local
-    # operator) waits on that file via the harness, which is the same signal the
-    # ready-file exists to provide. 05-02 wires the runner's wait to this path.
+    # Readiness is the ready-file at /run/ocu/mount-ready: the entrypoint
+    # creates it once every mount is up and removes it on teardown. The minimal
+    # runtime image has no shell, so readiness is observed from the SHARED
+    # VOLUME (the e2e runner polls that file before starting the exercise).
 
 volumes:
-  # Shared per-session unix socket directory. The broker creates the socket;
-  # the mount dials it. The sole channel between the two services.
+  # Shared session-socket directory. Each broker creates its own
+  # <filesystem_id>.sock here; the mount derives and dials them. The sole
+  # channel between the brokers and the mount.
   broker-socket:
+  # Ready-file handoff between the mount and the test runner.
+  mount-shared:
+  # Per-broker engine roots (the workspace each broker serves) and audit sinks.
+  broker-rw-workspace:
+  broker-ro-workspace:
+  broker-rw-audit:
+  broker-ro-audit:

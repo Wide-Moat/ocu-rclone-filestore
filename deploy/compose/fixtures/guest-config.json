@@ -4,7 +4,7 @@
   "mounts": [
     {
       "destination": "/workspace/out",
-      "filesystem_id": "session_e2e_chat",
+      "filesystem_id": "fsrw",
       "writes": true,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
@@ -16,7 +16,7 @@
   "readonly_mounts": [
     {
       "destination": "/workspace/in",
-      "filesystem_id": "session_e2e_inputs",
+      "filesystem_id": "fsro",
       "writes": false,
       "vfs_cache_mode": "minimal",
       "cache_duration_s": 5,
