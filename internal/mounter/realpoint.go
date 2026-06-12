@@ -96,7 +96,17 @@ func (r *realPointMounter) mountAndWaitReady(ctx context.Context, spec mountSpec
 	if err != nil {
 		return nil, fmt.Errorf("mount %q: ocufs backend not registered: %w", dest, err)
 	}
-	fsObj, err := info.NewFs(ctx, "ocufs", "", cm)
+	// Give every Fs a name unique to its destination so fs.ConfigString never
+	// collides across mounts. rclone's vfs.New keeps a package-level active-VFS
+	// cache keyed on (ConfigString, Options); two mounts with identical mapped
+	// VFS options — the common case (same cache mode/cap/duration/perms/
+	// read-only) — would otherwise share one cached VFS, and the second mount
+	// would silently serve the FIRST filesystem. The destination is the natural
+	// unique axis. The root parameter stays EMPTY: the ocufs backend joins root
+	// into broker paths, so a non-empty root would corrupt those paths; the name
+	// is display-only on this backend (scope comes from the configmap's
+	// filesystem_id, not the name), so it is safe to vary.
+	fsObj, err := info.NewFs(ctx, "ocufs-"+dest, "", cm)
 	if err != nil {
 		return nil, fmt.Errorf("mount %q: build ocufs Fs: %w", dest, err)
 	}

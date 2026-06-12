@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/cmd/mountlib"
+	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/vfs"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mountcfg"
@@ -99,6 +100,70 @@ func TestMountAndWaitReadyAssemblesOptions(t *testing.T) {
 	// error string names the destination and the wait stage.
 	if got := err.Error(); !strings.Contains(got, "wait for mount ready") {
 		t.Fatalf("mountAndWaitReady error = %q; want the WaitMountReady stage to fail after option assembly", got)
+	}
+}
+
+// capturingMountFn records the *vfs.VFS handed to each Mount call so a test can
+// assert two mounts received DISTINCT VFS instances (no active-cache collision).
+func capturingMountFn(seen *[]*vfs.VFS) mountlib.MountFn {
+	return func(v *vfs.VFS, mountpoint string, _ *mountlib.Options) (<-chan error, func() error, string, error) {
+		*seen = append(*seen, v)
+		errChan := make(chan error, 1)
+		unmount := func() error { return nil }
+		return errChan, unmount, mountpoint, nil
+	}
+}
+
+// TestMountIdentityIsPerMount is the CR-01 regression: two specs with IDENTICAL
+// mapped VFS options but DIFFERENT destinations must NOT collide in rclone's
+// package-level active-VFS cache (keyed on the Fs ConfigString + options). With
+// the constant Fs identity the second mount silently received the first mount's
+// VFS bound to the first filesystem_id — a cross-scope exposure. We drive two
+// mountAndWaitReady calls through a capturing fake MountFn and assert the two
+// mounts received DISTINCT *vfs.VFS and DISTINCT Fs ConfigString.
+func TestMountIdentityIsPerMount(t *testing.T) {
+	var seen []*vfs.VFS
+	r := &realPointMounter{
+		mountFn:      capturingMountFn(&seen),
+		readyTimeout: 10 * time.Millisecond,
+	}
+
+	mk := func(dest, fsid string) mountSpec {
+		return mountSpec{
+			mount: mountcfg.Mount{
+				Destination:     dest,
+				FilesystemID:    fsID(fsid),
+				VfsCacheMode:    "writes",
+				VfsCacheMaxSize: "256M",
+				DirPerms:        "0755",
+				FilePerms:       "0644",
+			},
+			readOnly:   false,
+			socketPath: "/tmp/ocufs-unit-not-dialed.sock",
+		}
+	}
+
+	specA := mk(t.TempDir(), "session_fs_a")
+	specB := mk(t.TempDir(), "session_fs_b")
+
+	// The MountFn records the VFS before readiness is polled, so the captured
+	// handles are populated regardless of the leg's readiness outcome (linux
+	// times out over the non-mounted dir; darwin/amd64 blind-trusts). We ignore
+	// the readiness error here — this test is about VFS/Fs identity, not
+	// readiness.
+	_, _ = r.mountAndWaitReady(context.Background(), specA)
+	_, _ = r.mountAndWaitReady(context.Background(), specB)
+
+	if len(seen) != 2 {
+		t.Fatalf("MountFn invoked %d times; want 2 (both mounts reached Mount)", len(seen))
+	}
+	if seen[0] == seen[1] {
+		t.Fatal("the two mounts received the SAME *vfs.VFS: active-cache collision (CR-01) — the second mount serves the first filesystem")
+	}
+	csA := fs.ConfigString(seen[0].Fs())
+	csB := fs.ConfigString(seen[1].Fs())
+	if csA == csB {
+		t.Fatalf("Fs ConfigString identical for distinct mounts (%q == %q): the active-VFS cache key collides (CR-01)", csA, csB)
 	}
 }
 
