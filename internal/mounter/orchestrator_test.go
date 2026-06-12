@@ -264,6 +264,43 @@ func TestOrchestratorSpontaneousPointError(t *testing.T) {
 	}
 }
 
+// TestOrchestratorSignalDuringFanOut is the HI-01 regression: a termination
+// signal already pending when run starts the fan-out must abort startup BEFORE
+// readiness is advertised. The orchestrator polls the signal channel before each
+// mountAndWaitReady; with a signal buffered up front it should start no point
+// (or unmount whatever it started), create NO ready-file, and return cleanly.
+func TestOrchestratorSignalDuringFanOut(t *testing.T) {
+	fake := newFake()
+	sig := make(chan os.Signal, 1)
+	sig <- syscall.SIGTERM // pending before run polls
+	readyFile := filepath.Join(t.TempDir(), "ready")
+
+	cfg := &mountcfg.Config{
+		Mounts: []mountcfg.Mount{writableEntry("/mnt/a"), writableEntry("/mnt/b")},
+	}
+
+	o := &orchestrator{
+		seam:             fake,
+		readiness:        ReadinessConfig{ReadyFilePath: readyFile},
+		signals:          sig,
+		brokerSocketPath: "/run/x.sock",
+	}
+
+	err := o.run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("run = %v; want nil on a clean signal-driven shutdown during fan-out", err)
+	}
+	// The signal was observed before the first mount, so no point starts and the
+	// fan-out aborts. Every started point (here zero) must be unmounted.
+	if fake.mountCount() > fake.unmountCount() {
+		t.Errorf("started %d points but unmounted only %d; started points must be torn down on signal",
+			fake.mountCount(), fake.unmountCount())
+	}
+	if _, statErr := os.Stat(readyFile); !os.IsNotExist(statErr) {
+		t.Error("ready-file created after a termination signal during fan-out; readiness must never appear after termination requested")
+	}
+}
+
 func TestOrchestratorMemoryStoreHardError(t *testing.T) {
 	fake := newFake()
 	cfg := &mountcfg.Config{

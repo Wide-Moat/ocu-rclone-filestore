@@ -131,9 +131,28 @@ func (o *orchestrator) run(ctx context.Context, cfg *mountcfg.Config) error {
 		return nil
 	}
 
+	// Derive a cancelable context for the fan-out so a termination signal
+	// arriving mid-mount aborts an in-flight mountAndWaitReady (its ctx is
+	// threaded into NewFs and the readiness poll) rather than letting it block
+	// up to readyTimeout. We cancel it on every exit from this scope; the
+	// pending-signal path also cancels explicitly before tearing down.
+	mountCtx, cancelMount := context.WithCancel(ctx)
+	defer cancelMount()
+
 	started := make([]point, 0, len(specs))
 	for _, spec := range specs {
-		p, err := o.seam.mountAndWaitReady(ctx, spec)
+		// A SIGTERM/SIGINT arriving during the sequential fan-out (each mount
+		// can block up to readyTimeout, serialized over N specs) must not be
+		// ignored until the loop finishes. Poll before each mount: on a pending
+		// signal, cancel the fan-out, best-effort-unmount what is up, and return
+		// cleanly WITHOUT creating the ready-file (no readiness after a
+		// termination request — SC3 ordering).
+		if o.signalPending() {
+			cancelMount()
+			return o.shutdownDuringStartup(started)
+		}
+
+		p, err := o.seam.mountAndWaitReady(mountCtx, spec)
 		if err != nil {
 			// Fail fast: best-effort-unmount everything already started and
 			// return a single aggregated error naming the failed destination.
@@ -144,6 +163,14 @@ func (o *orchestrator) run(ctx context.Context, cfg *mountcfg.Config) error {
 		started = append(started, p)
 	}
 
+	// Re-check immediately before signalling readiness: a signal that arrived
+	// after the last mount completed but before this point must still suppress
+	// the ready-file (readiness must never appear after termination requested).
+	if o.signalPending() {
+		cancelMount()
+		return o.shutdownDuringStartup(started)
+	}
+
 	// Every point is ready: signal readiness exactly once, on the all-up path.
 	if err := o.signalReady(len(started)); err != nil {
 		// A readiness-signal failure is terminal: tear down and surface it.
@@ -152,6 +179,29 @@ func (o *orchestrator) run(ctx context.Context, cfg *mountcfg.Config) error {
 	}
 
 	return o.blockUntilTeardown(started)
+}
+
+// signalPending reports whether a termination signal is already waiting on the
+// signal channel, consuming it if so. It never blocks. A consumed signal is the
+// orchestrator's cue to abort startup; because the pending-signal path returns
+// before blockUntilTeardown, consuming here does not race that later select.
+func (o *orchestrator) signalPending() bool {
+	select {
+	case <-o.signals:
+		return true
+	default:
+		return false
+	}
+}
+
+// shutdownDuringStartup handles a termination signal observed mid-fan-out: it
+// best-effort-unmounts every already-started point and returns a clean (nil on
+// success) result, matching blockUntilTeardown's signal path. The ready-file is
+// never created on this path, so readiness is never advertised after a
+// termination request.
+func (o *orchestrator) shutdownDuringStartup(started []point) error {
+	cleanupErrs := o.unmountAll(started)
+	return errors.Join(cleanupErrs...)
 }
 
 // buildSpecs orders the writable mounts before the read-only mounts and stamps
