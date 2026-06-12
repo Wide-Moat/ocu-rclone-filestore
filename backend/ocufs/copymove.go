@@ -83,20 +83,28 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, dstRemote string) (fs.Obje
 
 // DirMove moves the directory at srcRemote under srcFs to dstRemote under
 // this Fs. Returns fs.ErrorPermissionDenied immediately on a read-only Fs
-// before any client call (BE-02, T-03-07). Returns fs.ErrorCantDirMove if
-// srcFs is not the same backend type as this Fs.
+// before any client call (BE-02, T-03-07). Returns fs.ErrorCantDirMove unless
+// srcFs is the SAME *Fs instance as this Fs.
 //
 // Cross-Fs moves are not supported: the broker's moveDirectory op is scoped to
 // a single filesystem_id, so both the source and destination must be the same
-// ocufs Fs instance.
+// ocufs Fs instance. A bare type check is insufficient — a second ocufs mount
+// bound to a different filesystem_id is still an *Fs, so we require pointer
+// identity to guarantee the move stays inside one filesystem_id scope.
 func (f *Fs) DirMove(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote string) error {
 	if f.readOnly {
 		return fs.ErrorPermissionDenied
 	}
 
-	// Validate that the source Fs is an ocufs Fs. Cross-backend DirMove is
-	// not supported; rclone falls back to copy+delete when this returns an error.
-	if _, ok := srcFs.(*Fs); !ok {
+	// Require pointer identity with this Fs. A type check alone proves only
+	// that srcFs is *some* ocufs Fs, not that it shares this Fs's scope. The
+	// moveDirectory op is scoped to a single filesystem_id (the one held by
+	// f.client), so a source bound to a different filesystem_id (or socket)
+	// must NOT be moved against this Fs's scope. Cross-backend OR
+	// cross-filesystem DirMove is unsupported; rclone falls back to
+	// copy+delete on this error, which crosses scopes correctly.
+	src, ok := srcFs.(*Fs)
+	if !ok || src != f {
 		return fs.ErrorCantDirMove
 	}
 

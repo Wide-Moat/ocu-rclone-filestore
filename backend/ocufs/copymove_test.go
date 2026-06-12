@@ -225,6 +225,40 @@ func TestDirMoveCallsMoveDirectory(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestDirMoveRejectsForeignFs — a DirMove from a DIFFERENT *Fs instance returns
+// fs.ErrorCantDirMove with zero client calls (CR-01: scope identity, not just
+// type, is required because the moveDirectory op is scoped to one filesystem_id).
+// ---------------------------------------------------------------------------
+
+// TestDirMoveRejectsForeignFs verifies that DirMove rejects a source Fs that is
+// a different *Fs instance (a second ocufs mount, potentially a different
+// filesystem_id scope) — the bare type check would pass, but pointer identity
+// must not. No MoveDirectory RPC may be issued in that case.
+func TestDirMoveRejectsForeignFs(t *testing.T) {
+	dstClient := &fakeClient{}
+	dstClient.moveDirectoryResult = func(ctx context.Context, srcPath, dstPath string) (*brokerrpc.AckResponse, error) {
+		return &brokerrpc.AckResponse{}, nil
+	}
+	srcClient := &fakeClient{}
+
+	dst := newTestFsWithRoot(t, dstClient, "/", false)
+	// foreign is a SEPARATE *Fs (distinct pointer, distinct client/scope) — it
+	// still satisfies the *Fs type assertion but must fail the identity check.
+	foreign := newTestFsWithRoot(t, srcClient, "/", false)
+
+	err := dst.DirMove(context.Background(), foreign, "src/dir", "dst/dir")
+	if !errors.Is(err, fs.ErrorCantDirMove) {
+		t.Errorf("DirMove from foreign *Fs: got %v, want fs.ErrorCantDirMove", err)
+	}
+	if dstClient.moveDirectoryCount != 0 {
+		t.Errorf("MoveDirectory called %d times on cross-Fs DirMove, want 0", dstClient.moveDirectoryCount)
+	}
+	if dstClient.totalMutatingCalls() != 0 || srcClient.totalMutatingCalls() != 0 {
+		t.Errorf("cross-Fs DirMove issued client calls; want zero on both Fs")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestReadOnlyBlocksCopyMoveDir — read-only guard fires before any client call.
 // ---------------------------------------------------------------------------
 
