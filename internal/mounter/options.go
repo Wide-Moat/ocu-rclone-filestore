@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: FSL-1.1-Apache-2.0
+// Copyright (c) 2025 Open Computer Use Contributors
+
+package mounter
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/rclone/rclone/cmd/mountlib"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/vfs/vfscommon"
+
+	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mountcfg"
+)
+
+// buildVFSOptions maps one config mount and its read-only posture to the VFS
+// options that drive its cache and permissions.
+//
+// The result starts from a copy of the package-level registered defaults
+// (vfscommon.Opt) and overrides ONLY the five mapped knobs plus Umask. Building
+// from a zero vfscommon.Options{} literal would zero CachePollInterval, which
+// disables the vfscache cleaner — the only thing that enforces CacheMaxSize —
+// making the configured vfs_cache_max_size decorative. Keeping the registered
+// defaults preserves that cleaner and every other non-mapped sane default.
+//
+// Umask is set to 0 so a later Options.Init masks no bits off the configured
+// dir_perms / file_perms; UID and GID stay at the registered default for the
+// production seam to fill from process defaults.
+func buildVFSOptions(m mountcfg.Mount, readOnly bool) (vfscommon.Options, error) {
+	opt := vfscommon.Opt // copy of the registered defaults
+
+	var mode vfscommon.CacheMode
+	if err := mode.Set(m.VfsCacheMode); err != nil {
+		return vfscommon.Options{}, fmt.Errorf("vfs_cache_mode %q: %w", m.VfsCacheMode, err)
+	}
+	opt.CacheMode = mode
+
+	var size fs.SizeSuffix
+	if err := size.Set(m.VfsCacheMaxSize); err != nil {
+		return vfscommon.Options{}, fmt.Errorf("vfs_cache_max_size %q: %w", m.VfsCacheMaxSize, err)
+	}
+	opt.CacheMaxSize = size
+
+	seconds := 0
+	if m.CacheDurationS != nil {
+		seconds = *m.CacheDurationS
+	}
+	opt.DirCacheTime = fs.Duration(time.Duration(seconds) * time.Second)
+
+	var dirPerms vfscommon.FileMode
+	if err := dirPerms.Set(m.DirPerms); err != nil {
+		return vfscommon.Options{}, fmt.Errorf("dir_perms %q: %w", m.DirPerms, err)
+	}
+	opt.DirPerms = dirPerms
+
+	var filePerms vfscommon.FileMode
+	if err := filePerms.Set(m.FilePerms); err != nil {
+		return vfscommon.Options{}, fmt.Errorf("file_perms %q: %w", m.FilePerms, err)
+	}
+	opt.FilePerms = filePerms
+
+	// Umask 0 so a later Init() preserves the configured perms verbatim.
+	opt.Umask = 0
+
+	opt.ReadOnly = readOnly
+
+	return opt, nil
+}
+
+// buildMountOptions maps one config mount to the FUSE mount options. The result
+// starts from a copy of the registered defaults (mountlib.Opt) so AttrTimeout,
+// MaxReadAhead, AsyncRead and the rest keep their sane defaults; only
+// AllowOther is overridden.
+//
+// AllowOther is set true so a non-root process serving the VFS can let other
+// uids read the mount. No config field controls this today; the choice is
+// pinned here and in the test.
+func buildMountOptions(_ mountcfg.Mount) (mountlib.Options, error) {
+	opt := mountlib.Opt // copy of the registered defaults
+	opt.AllowOther = true
+	return opt, nil
+}
+
+// buildOcufsConfigmap builds the configmap the ocufs backend reads via
+// configstruct.Set: socket_path, filesystem_id, read_only. The filesystem_id is
+// the mount's sole scope handle; read_only matches the posture.
+//
+// A memory-store mount (MemoryStoreID set, FilesystemID absent) is a hard error
+// here — there is no memory scope axis on the backend today, so such a mount is
+// never silently skipped or mounted unscoped. The socketPath is the
+// orchestrator's explicit runtime input and is assumed non-empty (the
+// orchestrator rejects an empty value before any spec is built).
+func buildOcufsConfigmap(m mountcfg.Mount, readOnly bool, socketPath string) (configmap.Simple, error) {
+	if m.MemoryStoreID != nil {
+		return nil, fmt.Errorf("mount %q: memory-store mounts are not yet supported (no memory scope axis)", m.Destination)
+	}
+	if m.FilesystemID == nil || *m.FilesystemID == "" {
+		return nil, fmt.Errorf("mount %q: filesystem_id is required", m.Destination)
+	}
+
+	cm := configmap.Simple{}
+	cm.Set("socket_path", socketPath)
+	cm.Set("filesystem_id", *m.FilesystemID)
+	if readOnly {
+		cm.Set("read_only", "true")
+	} else {
+		cm.Set("read_only", "false")
+	}
+	return cm, nil
+}
