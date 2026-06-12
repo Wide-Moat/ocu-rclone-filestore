@@ -25,6 +25,9 @@ services:
     # exercisable now; it does NOT emit any file-op bodies.
     image: busybox@sha256:4279d9b47df4c1b02d80efd8d02cd59b3a8182c1e785a4ff3f6983bee19dc8b0
     command: ["sh", "-c", "echo '05-01 placeholder broker: idling; 05-02 builds the real south-face server here'; sleep infinity"]
+    # No network: the only channel between the services is the shared unix
+    # socket volume, so neither side needs a network stack at all.
+    network_mode: "none"
     volumes:
       # The per-session socket directory shared with the mount service. 05-02's
       # real broker creates the unix socket here.
@@ -43,6 +46,10 @@ services:
       - /dev/fuse
     cap_add:
       - SYS_ADMIN
+    # SEC-25 made structural: the mount container has NO network stack at all —
+    # not merely no route to an object store. The broker unix socket on the
+    # shared volume is the sole channel; a unix socket needs no network.
+    network_mode: "none"
     # SEC-25: ONLY the read-only guest config and the shared socket volume cross
     # into the mount container. No object-store network alias, no credential
     # env, no second transport.
