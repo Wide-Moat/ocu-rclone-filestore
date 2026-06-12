@@ -3,16 +3,36 @@
 
 # CI /dev/fuse availability — decision record
 
-## Working assumption — to be probed in 05-02
+## Probe wiring (05-02)
 
 Whether the standard GitHub-hosted `ubuntu-latest` runner exposes `/dev/fuse`
 to a workload container (and permits the `--device /dev/fuse` +
-`--cap-add SYS_ADMIN` mount pattern) has **not been verified** and is treated
-here as an open question, not a finding. Wave 05-02 runs an explicit probe on
-the hosted runner — `test -e /dev/fuse` plus a container smoke that performs a
-trivial FUSE mount — before committing to a runner placement. If the hosted
-runner suffices, the live gate runs there and no self-hosted/Lima host is
-needed for CI; the decision below covers the case where it does not.
+`--cap-add SYS_ADMIN` mount pattern) is now **probed in CI itself** rather
+than assumed. The probe runs in two places with two distinct roles:
+
+- **`ci.yml` → `fuse-probe` job (informational, every PR/push).** It checks
+  `test -e /dev/fuse` on the runner, then performs a REAL FUSE mount inside a
+  container granted only `/dev/fuse` + `SYS_ADMIN` (AppArmor unconfined —
+  the exact device/capability posture the e2e harness uses), using the public
+  rclone image pinned by digest mounting an in-memory remote (no credentials,
+  no network). The outcome is written to the job summary and surfaced as a
+  notice/warning. This job never fails the PR: it produces placement
+  evidence, not enforcement.
+- **`release.yml` → `e2e` job (hard, release path).** The job's first step
+  requires `/dev/fuse` and **fails red** when absent, with no
+  `continue-on-error` and no manual bypass. With the device present it runs
+  the full live harness (real brokers + mount + test-runner).
+
+What the workflow does with each probe outcome:
+
+- **Hosted runner mounts FUSE in a container** → the live e2e gate runs on
+  `ubuntu-latest` in GitHub CI as wired; no self-hosted/Lima host is needed.
+- **Hosted runner cannot** → the release-path `e2e` job is red on the hosted
+  runner *by design*, structurally blocking publish; the gate must then run
+  on a **self-hosted runner** (or the tag must be cut from a flow whose `e2e`
+  ran on a Lima host) as a HARD required check. The red job is the forcing
+  function: there is no path to a published release that skipped the live
+  gate.
 
 ## Decision
 
@@ -20,7 +40,7 @@ The **live** end-to-end exercise — the one that performs a real FUSE mount and
 drives file operations through it against a live broker — runs on a host that
 provides a real `/dev/fuse`:
 
-- the **hosted runner itself**, if the 05-02 probe shows it exposes the FUSE
+- the **hosted runner itself**, if the probe above shows it exposes the FUSE
   device to containers (the preferred, cheapest placement), or
 - a **self-hosted runner** on a Linux host that grants the FUSE device and the
   mount capability to the container, or
@@ -43,9 +63,8 @@ release path. This is success criterion SC3.
 
 ## Scope
 
-This is the decision recorded in wave 05-01. The `e2e` job's body in wave 05-01
-is a placeholder that builds the gated runner and runs it with the live gate
-unset, so it skips clean and the gate is green; the gate's structure (the job
-and the publish dependency on it) is complete now. Wave 05-02 replaces the
-`e2e` job body with the live broker exercise on a `/dev/fuse`-capable host,
-keeping the job name and the publish dependency unchanged.
+The decision was recorded in wave 05-01 with a placeholder `e2e` body
+(skip-clean with the live gate unset). Wave 05-02 replaced that body with the
+live broker exercise (hard `/dev/fuse` requirement, harness up, test-runner
+run, teardown) and added the informational `fuse-probe` job to `ci.yml`; the
+job name (`e2e`) and the publish dependency (`needs: [e2e]`) are unchanged.

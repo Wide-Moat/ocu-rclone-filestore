@@ -84,3 +84,56 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Check FSL headers
         run: bash scripts/check-fsl-headers.sh
+
+  # WR-03: probe whether the hosted runner grants /dev/fuse to a container
+  # running with the same device/capability pattern the e2e harness uses.
+  # This job is INFORMATIONAL — it records the placement evidence in the job
+  # summary on every run and never fails the PR. The HARD enforcement lives on
+  # the release path: release.yml's e2e job requires /dev/fuse and fails red
+  # without it (no continue-on-error, no bypass), so when the hosted runner
+  # cannot mount FUSE the live gate must run on a self-hosted/Lima host.
+  # See docs/ci-fuse-decision.md for the decision record.
+  fuse-probe:
+    name: /dev/fuse availability probe
+    runs-on: ubuntu-latest
+    steps:
+      # The smoke performs a REAL FUSE mount inside a container granted only
+      # /dev/fuse + SYS_ADMIN (AppArmor unconfined, mirroring the harness
+      # posture), using the public rclone image pinned by digest — rclone is
+      # the public project this binary openly builds on, and its image can
+      # mount an in-memory remote with no credentials and no network.
+      # rclone/rclone:1.74.3.
+      - name: Probe the device and a container FUSE mount
+        run: |
+          host_fuse=no
+          container_fuse=no
+          if [ -e /dev/fuse ]; then
+            host_fuse=yes
+            if docker run --rm \
+                 --device /dev/fuse --cap-add SYS_ADMIN \
+                 --security-opt apparmor=unconfined \
+                 --entrypoint /bin/sh \
+                 rclone/rclone@sha256:623378ad0ff3ebd5cebf77720843c0e02edfe46e2d5b5ac6bed54c6371780dfb \
+                 -c 'set -e; mkdir -p /probe; rclone mount :memory: /probe --daemon; grep -q " /probe fuse" /proc/mounts'; then
+              container_fuse=yes
+            fi
+          fi
+          {
+            echo "## /dev/fuse probe (WR-03)"
+            echo ""
+            echo "| check | result |"
+            echo "| --- | --- |"
+            echo "| /dev/fuse present on the hosted runner | ${host_fuse} |"
+            echo "| real FUSE mount inside a /dev/fuse + SYS_ADMIN container | ${container_fuse} |"
+            echo ""
+            if [ "${container_fuse}" = yes ]; then
+              echo "The hosted runner can run the live e2e gate: release.yml's e2e job runs here as-is."
+            else
+              echo "The hosted runner cannot run the live e2e gate: the release-path e2e job fails hard on this host by design and must run on a self-hosted/Lima host (docs/ci-fuse-decision.md)."
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${container_fuse}" = yes ]; then
+            echo "::notice::hosted runner FUSE probe: container FUSE mount works; the live e2e gate can run in GitHub CI"
+          else
+            echo "::warning::hosted runner FUSE probe: container FUSE mount unavailable; the live e2e gate must run on a self-hosted/Lima host (the release-path job fails hard there by design)"
+          fi
