@@ -69,9 +69,11 @@ func (o *Object) Size() int64 { return o.size }
 
 // Hash returns the hash of the object for the given type. The broker carries
 // a `sha` field (D6 field-name reconciliation pending — sha vs checksum_md5);
-// we return "" for all types until the hash type and wire key are confirmed.
+// until the hash type and wire key are confirmed we advertise an empty
+// Hashes() set and report hash.ErrUnsupported here, so a caller that requests
+// a hash anyway reads "unsupported" rather than "the hash is the empty string."
 func (o *Object) Hash(ctx context.Context, ty hash.Type) (string, error) {
-	return "", nil
+	return "", hash.ErrUnsupported
 }
 
 // Storable returns true — all Objects returned by the backend can be stored.

@@ -905,11 +905,11 @@ func TestObjectAccessors(t *testing.T) {
 		t.Error("Storable() returned false, want true")
 	}
 	h, err := obj.Hash(context.Background(), 0)
-	if err != nil {
-		t.Errorf("Hash() returned error: %v", err)
+	if !errors.Is(err, hash.ErrUnsupported) {
+		t.Errorf("Hash() error = %v, want hash.ErrUnsupported (advertised empty Hashes() set)", err)
 	}
 	if h != "" {
-		t.Errorf("Hash() = %q, want empty (hash.None)", h)
+		t.Errorf("Hash() = %q, want empty", h)
 	}
 }
 
