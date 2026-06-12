@@ -31,7 +31,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, dstRemote string) (fs.Obje
 	if srcObj, ok := src.(*Object); ok {
 		srcPath = srcObj.path
 	} else {
-		// src is not an *Object from this backend; reconstruct the path from
+		// src is not an *Object from this backend; derive the path from
 		// the source's remote string relative to the same root.
 		srcPath = absPath(f.root, src.Remote())
 	}
