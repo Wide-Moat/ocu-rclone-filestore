@@ -157,8 +157,8 @@ func (r *realPointMounter) mountAndWaitReady(ctx context.Context, spec mountSpec
 
 // waitReady confirms the mountpoint is live using only the exported, nil-safe
 // mountlib primitives, so it carries zero upstream diff and never reaches the
-// nil-daemon nil-pointer path inside mountlib.WaitMountReady (which dereferences
-// the daemon process unconditionally on every poll; our non-daemon mp.Mount()
+// nil-daemon nil-pointer path inside mountlib.WaitMountReady (which reads the
+// daemon process pid unconditionally on every poll; our non-daemon mp.Mount()
 // always returns a nil daemon, so calling WaitMountReady would crash on the
 // first not-ready poll).
 //
