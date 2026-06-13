@@ -136,6 +136,10 @@ jobs:
   fuse-probe:
     name: /dev/fuse availability probe
     runs-on: ubuntu-latest
+    # Expose the container-FUSE result so the live-e2e job below runs only where
+    # a real FUSE mount is possible, and skips cleanly (not red) where it is not.
+    outputs:
+      container_fuse: ${{ steps.probe.outputs.container_fuse }}
     steps:
       # The smoke performs a REAL FUSE mount inside a container granted only
       # /dev/fuse + SYS_ADMIN (AppArmor unconfined, mirroring the harness
@@ -144,6 +148,7 @@ jobs:
       # mount an in-memory remote with no credentials and no network.
       # rclone/rclone:1.74.3.
       - name: Probe the device and a container FUSE mount
+        id: probe
         run: |
           host_fuse=no
           container_fuse=no
@@ -177,3 +182,43 @@ jobs:
           else
             echo "::warning::hosted runner FUSE probe: container FUSE mount unavailable; the live e2e gate must run on a self-hosted/Lima host (the release-path job fails hard there by design)"
           fi
+          echo "container_fuse=${container_fuse}" >> "${GITHUB_OUTPUT}"
+
+  # Live e2e gate on pull requests. It runs the SAME real harness as the
+  # release-path e2e (real brokers at BROKER_REF + the mount with /dev/fuse +
+  # SYS_ADMIN + the test-runner driving the full gated exercise, including the
+  # cold read through a second fresh mount and the SC2 throttle), so a PR that
+  # touches the data path is verified live before merge — not only at release.
+  #
+  # It runs ONLY when the fuse-probe above confirms the hosted runner can mount
+  # FUSE in a container; otherwise it skips cleanly (a skipped required check is
+  # treated as passed by branch protection, so this never deadlocks a PR for a
+  # capability reason). On a host that CAN mount FUSE, a real e2e failure fails
+  # the job and blocks the merge. The release-path e2e (release.yml) remains the
+  # hard, non-skippable gate that fail-closes a publish.
+  live-e2e:
+    name: live e2e (data path)
+    runs-on: ubuntu-latest
+    needs: [fuse-probe]
+    if: needs.fuse-probe.outputs.container_fuse == 'yes'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # Every mount destination is a host bind with rshared propagation; the
+      # subdirectories must exist before the harness starts (the mount binary
+      # does not create them). out = rw scope, in = ro scope, out2 = the
+      # cold-read second mount of the rw scope, throttle = the SC2 throttle scope.
+      - name: Prepare the workspace bind
+        run: mkdir -p /tmp/ocu-e2e-workspace/out /tmp/ocu-e2e-workspace/in /tmp/ocu-e2e-workspace/out2 /tmp/ocu-e2e-workspace/throttle
+      - name: Bring up the harness (real brokers + mount)
+        run: docker compose -f deploy/compose/docker-compose.yml up --build -d broker-rw broker-ro broker-throttle mount
+      - name: Run the live exercise (test-runner service)
+        run: docker compose -f deploy/compose/docker-compose.yml run --rm --build test-runner
+      - name: Harness logs on failure
+        if: failure()
+        run: docker compose -f deploy/compose/docker-compose.yml logs
+      - name: Teardown
+        if: always()
+        run: docker compose -f deploy/compose/docker-compose.yml down -v
