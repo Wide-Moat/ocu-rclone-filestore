@@ -21,17 +21,31 @@ The architecture and specifications live in
 the broker component spec (`docs/architecture/components/04-storage-broker.md`,
 south face) and the contracts `contracts/storage/mount-config.schema.json`
 (what the mount is told) and `contracts/storage/file-ops.schema.json` (what
-the mount speaks).
+the mount speaks). For how this binary fits that system — the trust boundaries,
+the host-side credential seam, the end-to-end data path of a file operation,
+and what each package in this repo is responsible for — see
+[`docs/architecture.md`](./docs/architecture.md).
 
 ## Status
 
-Early development. The binary is built as a **thin wrapper module** over
-rclone: rclone is a pinned dependency in `go.mod`, our backend registers
-through rclone's public backend registry, and our own entrypoint drives
-rclone's mount machinery for multiple concurrent mounts. The diff against
-upstream rclone is zero. See [`docs/fork-shape.md`](./docs/fork-shape.md) for
-why this shape was chosen over a source fork, and
-[`docs/requirements.md`](./docs/requirements.md) for what the binary must do.
+Prerelease, tracking the broker toward a joint `v0.1.0`. The full data path is
+implemented — multi-mount, chunked upload, ranged read and whole-object
+download, the read-only double-gate, and the broker deny/throttle mapping — and
+every release is gated by a live end-to-end exercise that drives real broker
+instances and asserts the bytes reach the broker's own workspace (not just the
+local cache). Supply-chain hardening is in place: keyless Sigstore signing, a
+per-archive SBOM, and a SLSA build-provenance attestation, with the publish step
+fail-closed behind the e2e gate (see [Verifying a release](#verifying-a-release)).
+
+The binary is built as a **thin wrapper module** over rclone: rclone is a pinned
+dependency in `go.mod`, our backend registers through rclone's public backend
+registry, and our own entrypoint drives rclone's mount machinery for multiple
+concurrent mounts. The diff against upstream rclone is zero. See
+[`docs/architecture.md`](./docs/architecture.md) for the system architecture and
+per-package responsibilities, [`docs/fork-shape.md`](./docs/fork-shape.md) for
+why this wrapper shape was chosen over a source fork, and
+[`docs/requirements.md`](./docs/requirements.md) for the invariants the binary
+must satisfy.
 
 ## Language note
 
