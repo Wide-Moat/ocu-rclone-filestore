@@ -260,6 +260,14 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 	p := absPath(f.root, dir)
 	_, err := f.client.MakeDirectory(ctx, p)
 	if err != nil {
+		// rclone's Mkdir contract is idempotent: creating a directory that
+		// already exists is a successful no-op, not an error. The broker
+		// signals an existing path with already_exists; swallow that and
+		// report success so repeated/own-root Mkdir calls behave as rclone
+		// (and its standard backend tests) expect.
+		if errors.Is(err, brokerrpc.ErrAlreadyExists) {
+			return nil
+		}
 		return fmt.Errorf("ocufs: Mkdir %q: %w", p, err)
 	}
 	return nil
