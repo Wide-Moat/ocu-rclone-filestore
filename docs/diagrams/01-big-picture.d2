@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Big picture: where this binary sits and who talks to whom.
+# Render: d2 docs/diagrams/01-big-picture.d2 docs/diagrams/01-big-picture.svg
+
+direction: right
+
+title: |md
+  # What this is, and where it sits
+| {near: top-center; style.font-size: 28}
+
+guest: Guest sandbox {
+  style: {fill: "#fff1f0"; stroke: "#cf3b3b"; stroke-width: 2; border-radius: 16; font-color: "#7a1f1f"}
+  tooltip: Untrusted. Anything in here is assumed reachable by an attacker.
+  label.near: top-center
+
+  app: "Apps & agent\n(read / write files)" {
+    shape: person
+    style: {fill: "#ffd6d1"; stroke: "#cf3b3b"; font-color: "#000"}
+  }
+  mount: "ocu-rclone-filestore\n— THIS binary —\nrclone mount + ocufs backend" {
+    style: {fill: "#ffffff"; stroke: "#cf3b3b"; stroke-width: 3; border-radius: 12; bold: true; font-color: "#000"}
+    tooltip: Holds NO credential, NO object-store client. Only a unix socket + a filesystem_id.
+  }
+  app -> mount: "normal file ops\n(open, read, write, ls, rename)" {style.stroke: "#cf3b3b"}
+}
+
+host: Host (trusted) {
+  style: {fill: "#eef3ff"; stroke: "#3b5bcf"; stroke-width: 2; border-radius: 16; font-color: "#1f2f7a"}
+  tooltip: Trusted control plane. Holds the one backend credential.
+  label.near: top-center
+
+  broker: "Storage broker\n(ocu-filestore)" {
+    shape: hexagon
+    style: {fill: "#d6e0ff"; stroke: "#3b5bcf"; stroke-width: 2; font-color: "#000"}
+    tooltip: Custodies the backend credential, signs every backend request, decides authorization per request.
+  }
+}
+
+store: "Backend object store\n(local volume or S3-class)" {
+  shape: cylinder
+  style: {fill: "#eafaef"; stroke: "#2e9e54"; stroke-width: 2; font-color: "#13502a"}
+}
+
+guest.mount -> host.broker: "file-ops RPC\nover a per-session unix socket\n(the ONLY way out — no credential crosses)" {
+  style: {stroke: "#3b5bcf"; stroke-width: 3; bold: true}
+}
+host.broker -> store: "broker signs it,\nbytes go out byte-intact" {
+  style: {stroke: "#2e9e54"; stroke-width: 3}
+}
+
+legend: |md
+  **How to read this**
+  - 🔴 red = untrusted guest — where this binary runs
+  - 🔵 blue = trusted host — where the broker and the one credential live
+  - 🟢 green = the real storage, reached only by the broker
+  - The guest can only talk through **one unix socket**, and it never holds a key.
+| {near: bottom-center; style: {fill: "#fafafa"; stroke: "#bbb"; font-size: 14}}

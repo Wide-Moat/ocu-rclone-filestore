@@ -12,6 +12,7 @@ binary. Pick the door that matches what you came for.
 | --- | --- |
 | Build it and see one mount work in five minutes | the [Quickstart](../README.md#quickstart) in the root README |
 | Understand what it is and where it sits in the system | [`architecture.md`](./architecture.md) — trust boundaries, the host-side credential seam, the data path of one file operation |
+| See it, not read it | [`diagrams/`](./diagrams/) — rendered SVGs: the big picture, a file's read/write path, the package map, and the setup flow |
 | Read one package in depth | [`components/`](./components/README.md) — one document per package, in call-chain order, plus the deep wire reference |
 | Run it locally against real brokers | [`e2e-local.md`](./e2e-local.md) — the Lima + docker-compose end-to-end harness |
 | Know why this is a wrapper, not a fork of rclone | [`fork-shape.md`](./fork-shape.md) |
@@ -21,7 +22,8 @@ binary. Pick the door that matches what you came for.
 ## A suggested first pass
 
 1. Skim the root [README](../README.md) and run the **Quickstart**.
-2. Read [`architecture.md`](./architecture.md) for the whole-system picture.
+2. Read [`architecture.md`](./architecture.md) for the whole-system picture, with
+   the [diagrams](./diagrams/) open beside it.
 3. Dive into a package under [`components/`](./components/README.md) when you need
    to change one.
 
