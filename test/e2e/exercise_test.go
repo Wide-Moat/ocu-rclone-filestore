@@ -46,10 +46,11 @@ const (
 	// (resource_exhausted, deny_class throttle). Under SEC-46 that refusal is a
 	// uniform per-op fail-closed ceiling: a throttled metadata op surfaces EIO to
 	// the caller, which is correct, not a bug. Step 12 (SC2) proves (a) the
-	// throttle fires, (b) no torn object — a throttled upload never partially
-	// stages, so the bytes are only ever asserted byte-identical broker-side, and
-	// (c) a caller that backs off and retries recovers the write byte-identical.
-	// It does NOT claim the pacer transparently completes every op. The guest
+	// throttle fires (a write is refused under the burst), and (b) a caller that
+	// backs off and retries recovers the write byte-identical broker-side
+	// (eventual success). It does NOT claim the pacer transparently completes
+	// every op, nor does it itself prove broker-side atomicity (the
+	// no-partial-stage property is the broker's, asserted broker-side). The guest
 	// never simulates the throttle (SEC-46 is broker-side).
 	envThrottleMount = "OCU_E2E_THROTTLE_MOUNT"
 	// envReadyFile is the ready-file path the mount process creates once all
@@ -376,8 +377,8 @@ func TestE2EExercise(t *testing.T) {
 
 	// Step 9 — throttle (thin alias): the real SC2 throttle proof moved to step 12,
 	// which drives a genuine over-budget burst against a broker-throttled scope and
-	// proves the SEC-46 invariants — the throttle fires, no torn object is left,
-	// and a caller that backs off and retries recovers the write byte-identical.
+	// proves the SEC-46 invariants — the throttle fires, and a caller that backs
+	// off and retries recovers the write byte-identical (eventual success).
 	// The earlier path-named broker test-mode is retired (the broker drives
 	// throttling from daemon flags, needing no coordination file). This step is
 	// kept as a stable, named pointer so a localized failure still reads in step
@@ -385,8 +386,8 @@ func TestE2EExercise(t *testing.T) {
 	t.Run("09_throttle_no_data_loss", func(t *testing.T) {
 		t.Skip("SC2 throttle is proven in step 12 (12_throttle_retry_no_loss): a " +
 			"flag-driven broker throttle drives an over-budget burst; the test asserts " +
-			"the throttle fires, leaves no torn object, and that a caller backing off " +
-			"and retrying recovers byte-identical bytes broker-side. The throttle is a " +
+			"the throttle fires and that a caller backing off and retrying recovers " +
+			"byte-identical bytes broker-side (eventual success). The throttle is a " +
 			"uniform per-op fail-closed ceiling — a throttled metadata op EIO'ing is " +
 			"expected, not the pacer transparently completing every op (SEC-46).")
 	})
@@ -451,7 +452,7 @@ func TestE2EExercise(t *testing.T) {
 		}
 	})
 
-	// Step 12 — throttle fires, no torn object, caller-retry recovers (SC2).
+	// Step 12 — throttle fires, caller-retry recovers byte-identical (SC2).
 	//
 	// SEC-46 framing (the only canon-true invariant this step may prove). The
 	// broker throttle is a fail-closed DoS-containment ceiling and it is UNIFORM
@@ -473,10 +474,13 @@ func TestE2EExercise(t *testing.T) {
 	//       returns an error (a throttled metadata op surfacing EIO is the expected
 	//       signal). If no throttle is ever observed the bucket was too loose and
 	//       the test FAILS — it did not actually exercise the ceiling.
-	//   (b) NO TORN OBJECT (atomicity) — every name is only ever asserted by
-	//       byte-identity broker-side, so a partial/torn object left by a throttled
-	//       upload would mismatch the sha256 and fail. A throttled-then-retried
-	//       name must match exactly after success: no leftover partial.
+	//   (b) THE RECOVERED WRITE LANDS BYTE-IDENTICAL (eventual success) — every
+	//       name is asserted by byte-identity broker-side, so a throttled-then-
+	//       retried write must match exactly once it succeeds. (This proves the
+	//       recovered object is whole; it does NOT by itself prove atomicity of a
+	//       mid-throttle partial — a partial stage would be overwritten by the
+	//       clean retry and still hash-match. The atomic-no-partial-stage property
+	//       is the broker's, asserted broker-side, not by this guest read.)
 	//   (c) RECOVERY ONCE TOKENS REFILL — the TEST ITSELF backs off and retries the
 	//       EIO'd write at the file-op level (sleep ~600ms so the 2/s bucket
 	//       refills, then retry), bounded by settleTimeout. This models a
@@ -566,31 +570,45 @@ func TestE2EExercise(t *testing.T) {
 			// Write with caller-side back-off-and-retry. A throttled op EIOs here;
 			// per SEC-46 retrying it is the CALLER's job, so the TEST sleeps for the
 			// bucket to refill and tries the SAME write again, bounded by
-			// settleTimeout. A torn object is impossible to "fix" by retry — the
-			// only success is a clean, atomic re-stage — and (b) below proves it by
-			// asserting byte-identity, never tolerating a partial.
+			// settleTimeout. (b) below asserts the recovered write is byte-identical
+			// broker-side — eventual success; the broker's no-partial-stage
+			// atomicity is its own property, not something this guest read proves.
 			failedAtLeastOnce := false
 			for {
 				err := os.WriteFile(path, data, 0o644)
 				if err == nil {
 					if failedAtLeastOnce {
-						// Failed under the burst, then succeeded after backoff: the
-						// signature of a per-session throttle clearing on refill.
+						// Failed under the burst with EIO, then succeeded after
+						// backoff: the signature of a per-session throttle clearing on
+						// refill (see the errno discrimination below).
 						recoveredAfterThrottle = true
 					}
 					break
 				}
+				// Discriminate the refusal by errno. The per-session ops/s ceiling
+				// surfaces at the FUSE syscall boundary as EIO (the broker's
+				// resource_exhausted text stays in its stderr slog and never crosses
+				// the kernel). Any OTHER errno — EROFS, ENOSPC, EACCES — is NOT a
+				// throttle and fails the test immediately, so a real data-path
+				// regression can never masquerade as "throttle observed". Only EIO
+				// is eligible for the back-off-and-retry recovery path.
+				if !errors.Is(err, syscall.EIO) {
+					t.Fatalf("throttle burst write %d (%q) failed with a non-EIO error, "+
+						"which is not the per-session throttle signal (a throttle surfaces as "+
+						"EIO at the FUSE boundary); this is a real fault, not backpressure: %v",
+						i, name, err)
+				}
 				failedAtLeastOnce = true
 				if time.Now().After(deadline) {
 					t.Fatalf("throttle burst write %d (%q) never recovered within %s: "+
-						"the caller retried on backoff but the write kept failing, so this "+
-						"is not a transient throttle but a real fault: %v",
+						"the caller retried on backoff but the write kept failing with EIO, so "+
+						"this is not a transient throttle but a stuck fault: %v",
 						i, name, settleTimeout, err)
 				}
 				// Back off so the token bucket refills, then retry the same write.
 				// Recovery is the caller's responsibility under SEC-46, not the
 				// guest pacer's: metadata ops are not retried by the pacer.
-				t.Logf("throttle burst write %d (%q) refused (expected under the "+
+				t.Logf("throttle burst write %d (%q) refused with EIO (expected under the "+
 					"per-op ceiling); backing off %s and retrying: %v",
 					i, name, throttleBackoff, err)
 				time.Sleep(throttleBackoff)
@@ -611,12 +629,14 @@ func TestE2EExercise(t *testing.T) {
 				"step proved nothing", burstWrites)
 		}
 
-		// (b) NO TORN OBJECT + recovery landed cleanly: every write that recovered
-		// to success is byte-identical broker-side. Asserting ONLY byte-identity is
-		// what proves no-torn — a partial object left by a throttled upload would
-		// mismatch the sha256 here. Fail-closed like the rw workspace.
+		// (b) RECOVERY LANDED BYTE-IDENTICAL (eventual success): every write that
+		// recovered to success is byte-identical broker-side. This proves the
+		// recovered object is whole; it does not by itself prove mid-throttle
+		// atomicity (a partial stage would be overwritten by the clean retry and
+		// still hash-match — that no-partial-stage property is the broker's).
+		// Fail-closed like the rw workspace.
 		for i, f := range written {
-			t.Logf("asserting throttle burst write %d/%d landed atomic, byte-identical: %s",
+			t.Logf("asserting throttle burst write %d/%d recovered byte-identical: %s",
 				i+1, burstWrites, f.scopeRelPath)
 			assertBrokerThrottlePersisted(t, env, f.scopeRelPath, f.data)
 		}
