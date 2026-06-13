@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+name: Bug report
+description: Report a defect in the guest-side mount binary.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+
+        **Do not report security issues here.** If this is a
+        security-sensitive issue (anything that could expose credentials,
+        cross a trust boundary, or be exploited), do **not** open a public
+        issue. Follow the private reporting process in
+        [SECURITY.md](https://github.com/Wide-Moat/ocu-rclone-filestore/blob/main/SECURITY.md)
+        — use GitHub's private vulnerability reporting
+        (**Security → Report a vulnerability**).
+
+        Please search existing issues before opening a new one, and remember
+        to **redact every secret, token, and id** from anything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: Affected version / commit / image digest
+      description: >-
+        The released version, the git commit SHA, or the container image
+        digest where you saw the problem.
+      placeholder: "v0.3.1, commit a1b2c3d, or sha256:…"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the actual behaviour you observed.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: Describe what you expected to happen instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: >-
+        Minimal steps to reproduce. Include the shape of your mount config
+        (per-mount destination, scope, read-only vs write, VFS cache knobs)
+        and how the broker was set up (transport, which file operations were
+        exercised). **Redact all secrets, tokens, and ids** — replace them
+        with placeholders.
+      placeholder: |
+        1. Mount config (redacted):
+           - destination: <mount path>
+           - scope: filesystem_id <REDACTED>
+           - read-only: true
+           - vfs cache: ...
+        2. Broker setup: ...
+        3. Run the mount: ...
+        4. Observe: ...
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface is affected?
+      description: The component you believe the bug lives in.
+      options:
+        - Mount config loader
+        - Broker RPC client
+        - ocufs backend
+        - Multimount orchestration
+        - Build + release
+        - Docs
+    validations:
+      required: true
+  - type: textarea
+    id: logs-env
+    attributes:
+      label: Logs and environment
+      description: >-
+        Relevant logs (redacted) plus your environment: host OS, kernel
+        version, whether the mount ran under Lima, and the rclone version the
+        binary was built against.
+      placeholder: |
+        OS: ...
+        Kernel: ...
+        Run under Lima: yes/no
+        rclone version: ...
+        Logs (redacted):
+      render: shell
+    validations:
+      required: false

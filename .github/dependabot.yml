@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+version: 2
+
+updates:
+  # Go module dependencies.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "build"
+      include: "scope"
+    groups:
+      gomod-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # rclone is a pinned, zero-diff dependency: this binary is a thin wrapper
+      # over a single rclone version, and the wrapper stays auditable only if
+      # that version moves on purpose. A major bump can change backend, VFS, or
+      # mount behaviour and must be reviewed and pinned deliberately, never
+      # merged by an automated PR. Minor and patch bumps remain in scope above.
+      - dependency-name: "github.com/rclone/rclone"
+        update-types:
+          - "version-update:semver-major"
+
+  # GitHub Actions used by CI and release workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    groups:
+      github-actions:
+        update-types:
+          - "minor"
+          - "patch"

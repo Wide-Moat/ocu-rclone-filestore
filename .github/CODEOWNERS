@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+
+# CODEOWNERS for ocu-rclone-filestore
+#
+# Global owner: every path defaults to the maintainers team unless a later,
+# more specific rule overrides it. The last matching pattern wins.
+
+* @Wide-Moat/ocu-rclone-filestore-maintainers
+
+# Broker RPC client — the south face to the storage broker.
+/internal/brokerrpc/ @Wide-Moat/ocu-rclone-filestore-maintainers
+
+# rclone backend package.
+/backend/ocufs/ @Wide-Moat/ocu-rclone-filestore-maintainers
+
+# FUSE mount frontend.
+/internal/mounter/ @Wide-Moat/ocu-rclone-filestore-maintainers
+
+# CI workflows and repository automation.
+/.github/ @Wide-Moat/ocu-rclone-filestore-maintainers
+
+# Wire contracts and security policy.
+/contracts/ @Wide-Moat/ocu-rclone-filestore-maintainers
+SECURITY.md @Wide-Moat/ocu-rclone-filestore-maintainers

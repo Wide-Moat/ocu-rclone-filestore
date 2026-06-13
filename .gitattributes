@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+
+# Normalize line endings to LF across the tree.
+* text=auto eol=lf
+
+# Source authored in this repository.
+*.go      text eol=lf
+*.sh      text eol=lf
+*.md      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.json    text eol=lf
+*.toml    text eol=lf
+
+# Go module checksum file is machine-maintained.
+go.sum    linguist-generated=true
+
+# Known binary content; never normalize or diff as text.
+*.bin     binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.gz      binary
+*.zip     binary

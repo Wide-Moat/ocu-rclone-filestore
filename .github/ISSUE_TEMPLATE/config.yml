@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/Wide-Moat/ocu-rclone-filestore/security/advisories/new
+    about: >-
+      Report vulnerabilities privately through GitHub security advisories per
+      SECURITY.md. Never open a public issue for a security report.
+  - name: Architecture and specification questions
+    url: https://github.com/Wide-Moat/open-computer-use
+    about: >-
+      Architecture, ADRs, and the frozen wire contracts live upstream. Ask
+      design and specification questions there.
+  - name: General questions and discussion
+    url: https://github.com/Wide-Moat/ocu-rclone-filestore/discussions
+    about: >-
+      Have a usage question or idea? Start a thread in GitHub Discussions
+      instead of opening an issue.

@@ -1,0 +1,74 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+name: Feature request
+description: Suggest an enhancement to the guest-side mount binary
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to propose an enhancement.
+
+        Before you file, please note where the decision actually belongs:
+
+        - **Architecture and protocol decisions are made upstream** in
+          [Wide-Moat/open-computer-use](https://github.com/Wide-Moat/open-computer-use).
+          This repository implements the guest-side rclone-based FUSE mount; it
+          does not own the mount-config contract, the file-operation RPC, or the
+          security model. If your request changes any of those, it likely needs
+          to land upstream first (as a specification or ADR change) before it can
+          be implemented here.
+        - Requests that fit this repository are things like mount behaviour,
+          VFS cache handling, the rclone backend package, CLI ergonomics,
+          packaging, and observability — all within the boundaries fixed
+          upstream.
+
+        If you are unsure where your idea belongs, open it here and we will help
+        route it.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: >-
+        What are you trying to do, and what makes it hard or impossible today?
+        Focus on the underlying need rather than a specific implementation.
+      placeholder: |
+        I'm trying to ... but currently ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: >-
+        Describe the change you would like to see. If it touches the
+        mount-config contract, the file-operation RPC, or the security model,
+        note whether you have already raised it upstream in
+        Wide-Moat/open-computer-use.
+      placeholder: |
+        I would like the mount to ...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: >-
+        What other approaches did you weigh, and why did you set them aside?
+        Workarounds you currently rely on are useful here too.
+    validations:
+      required: false
+  - type: checkboxes
+    id: security-boundary
+    attributes:
+      label: Security boundary
+      description: >-
+        The guest-side mount holds no backend credential and never bypasses the
+        broker — every backend operation goes through the broker RPC. Proposals
+        must preserve this boundary.
+      options:
+        - label: >-
+            My proposal respects the security boundary: the guest holds no
+            credential, opens no direct path to any backend, and never bypasses
+            the broker.
+          required: true
