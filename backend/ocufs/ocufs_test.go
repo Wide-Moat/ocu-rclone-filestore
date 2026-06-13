@@ -1061,6 +1061,53 @@ func TestAbsPathHelper(t *testing.T) {
 	}
 }
 
+// TestAbsPathCanonicalizes pins that every outbound wire path is canonical:
+// "..", ".", repeated and trailing slashes are resolved before the path leaves
+// the guest. This is a load-bearing guest-side invariant, guarded here so a
+// future refactor cannot silently regress it.
+//
+//   - Defense-in-depth: the guest never relies on the broker to clean a path.
+//     A backend authorizes against the path it is told and resolves the object
+//     from that same path; sending a pre-resolved (canonical) path keeps the
+//     authorized path and the read path identical by construction, so the guest
+//     cannot become the source of a "checked one path, read another" confusion.
+//   - Forward-compatible: a broker that fails closed on a non-canonical path
+//     (rejecting "..", ".", "//" at the dispatch boundary) must never see one
+//     from this guest, so a well-behaved file operation is never spuriously
+//     refused.
+//
+// "rel" is the rclone-relative remote; absPath joins it under the Fs root and
+// canonicalizes. A ".." that would climb above the root is resolved (clamped at
+// "/") rather than preserved — the guest emits no parent-escape sequence on the
+// wire regardless of what the VFS layer hands it.
+func TestAbsPathCanonicalizes(t *testing.T) {
+	mk := func(root string) *Fs {
+		return &Fs{name: "ocufs", root: root, client: &fakeClient{}, enc: defaultEncoding}
+	}
+	cases := []struct {
+		root, rel, want string
+	}{
+		{"/pub", "../private/key.bin", "/private/key.bin"},      // a "../" escape is resolved, not forwarded raw
+		{"/pub", "ok/../../private", "/private"},                // resolves below and back above the join point
+		{"/", "a/../b", "/b"},                                   // "../" mid-path collapses
+		{"/root", "sub/./file", "/root/sub/file"},               // "." segment is dropped
+		{"/root", "a//b///c", "/root/a/b/c"},                    // repeated slashes collapse
+		{"/root", "trailing/", "/root/trailing"},                // trailing slash stripped
+		{"/e2e", "../../../etc/passwd", "/etc/passwd"},          // deep escape resolves; no raw ".." on the wire
+		{"/root", ".", "/root"},                                 // a lone "." is the dir itself
+	}
+	for _, c := range cases {
+		if got := mk(c.root).absPath(c.rel); got != c.want {
+			t.Errorf("absPath(root=%q, %q) = %q, want %q (path must be canonical on the wire)",
+				c.root, c.rel, got, c.want)
+		}
+		if strings.Contains(mk(c.root).absPath(c.rel), "..") {
+			t.Errorf("absPath(root=%q, %q) still contains \"..\": the guest must never emit a parent-escape sequence on the wire",
+				c.root, c.rel)
+		}
+	}
+}
+
 // TestPathEncodingRoundTrip verifies that the backend encoder maps an
 // rclone-standard path with bytes that are unsafe on the wire (a control char,
 // a trailing space) to an encoded outbound broker path, and decodes a matching
