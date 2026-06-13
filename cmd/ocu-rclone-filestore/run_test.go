@@ -111,6 +111,32 @@ func TestRun(t *testing.T) {
 	}
 }
 
+// TestRunVersionFlag asserts that --version prints the build-stamped version
+// and exits cleanly WITHOUT requiring --config and WITHOUT reaching the mount
+// seam: a version query must not need a config or a broker socket.
+func TestRunVersionFlag(t *testing.T) {
+	var out strings.Builder
+	reached := false
+	recorder := func(*mountcfg.Config, mounter.ReadinessConfig, string, string, <-chan os.Signal) error {
+		reached = true
+		return nil
+	}
+
+	if err := runWith([]string{"--version"}, &out, recorder); err != nil {
+		t.Fatalf("runWith(--version) = %v; want nil (clean exit)", err)
+	}
+	if reached {
+		t.Fatal("--version reached the mount seam; it must short-circuit before mounting")
+	}
+	got := out.String()
+	if !strings.Contains(got, "ocu-rclone-filestore") {
+		t.Errorf("--version output %q missing the program name", got)
+	}
+	if !strings.Contains(got, version) {
+		t.Errorf("--version output %q missing the version %q", got, version)
+	}
+}
+
 // TestRunResolvesReadyFileAndBrokerSocket asserts that --ready-file,
 // --broker-socket and --broker-socket-dir parse, that the OCU_READY_FILE /
 // OCU_BROKER_SOCKET / OCU_BROKER_SOCKET_DIR env fallbacks resolve when the flag

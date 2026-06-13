@@ -47,11 +47,21 @@ func runWith(args []string, stderr io.Writer, mount mountFunc) error {
 	fs := flag.NewFlagSet("ocu-rclone-filestore", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", "path to the guest mount config file")
+	showVersion := fs.Bool("version", false, "print the version and exit")
 	readyFile := fs.String("ready-file", "", "optional path to create once all mounts are ready (env: OCU_READY_FILE)")
 	brokerSocket := fs.String("broker-socket", "", "per-session broker socket path supplied at provision (env: OCU_BROKER_SOCKET)")
 	brokerSocketDir := fs.String("broker-socket-dir", "", "per-session broker socket directory; each mount dials <dir>/<filesystem_id>.sock (env: OCU_BROKER_SOCKET_DIR; mutually exclusive with --broker-socket)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
+	}
+
+	// --version prints the build-stamped version and exits cleanly, BEFORE the
+	// --config requirement: a version query must not need a config. It writes to
+	// stderr (the FlagSet's output) so the one-line stdout/stderr contract stays
+	// simple and the value is the same linker-stamped symbol the build sets.
+	if *showVersion {
+		fmt.Fprintf(stderr, "ocu-rclone-filestore %s\n", version)
+		return nil
 	}
 
 	if *configPath == "" {
