@@ -15,7 +15,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -538,10 +537,19 @@ func TestE2EExercise(t *testing.T) {
 			data         []byte
 		}
 		written := make([]throttledFile, 0, burstWrites)
-		// throttleObserved records whether the broker ever refused an op with the
-		// throttle class during the burst. If it stays false the bucket was too
-		// loose and SC2 proved nothing, so the test must fail at the end.
-		throttleObserved := false
+		// recoveredAfterThrottle records whether at least one write FAILED under
+		// the burst and then SUCCEEDED after the caller backed off. That
+		// fail-then-recover-on-backoff pattern is the throttle discriminator: the
+		// per-session ops/s ceiling refuses an over-budget op (surfacing an opaque
+		// EIO at the FUSE syscall boundary — the broker's resource_exhausted text
+		// stays in its stderr slog and does not cross the kernel, and this ceiling
+		// denies before the audit stage so it is not in the audit sink either), but
+		// the op SUCCEEDS once a token refills. A genuine, unrelated fault would NOT
+		// be cured by waiting — it would keep failing to settleTimeout and fatal
+		// below — so recovery-after-backoff cannot be a non-throttle EIO in
+		// disguise. If NO write ever has to recover, the bucket was too loose and
+		// SC2 proved nothing, so the test fails at the end.
+		recoveredAfterThrottle := false
 		deadline := time.Now().Add(settleTimeout)
 		for i := 0; i < burstWrites; i++ {
 			nonce := make([]byte, 16)
@@ -561,17 +569,22 @@ func TestE2EExercise(t *testing.T) {
 			// settleTimeout. A torn object is impossible to "fix" by retry — the
 			// only success is a clean, atomic re-stage — and (b) below proves it by
 			// asserting byte-identity, never tolerating a partial.
+			failedAtLeastOnce := false
 			for {
 				err := os.WriteFile(path, data, 0o644)
 				if err == nil {
+					if failedAtLeastOnce {
+						// Failed under the burst, then succeeded after backoff: the
+						// signature of a per-session throttle clearing on refill.
+						recoveredAfterThrottle = true
+					}
 					break
 				}
-				if isThrottleError(err) {
-					throttleObserved = true
-				}
+				failedAtLeastOnce = true
 				if time.Now().After(deadline) {
 					t.Fatalf("throttle burst write %d (%q) never recovered within %s: "+
-						"the caller retried on throttle but the write kept failing: %v",
+						"the caller retried on backoff but the write kept failing, so this "+
+						"is not a transient throttle but a real fault: %v",
 						i, name, settleTimeout, err)
 				}
 				// Back off so the token bucket refills, then retry the same write.
@@ -585,14 +598,17 @@ func TestE2EExercise(t *testing.T) {
 			written = append(written, throttledFile{scopeRelPath: scopeRel(name), data: data})
 		}
 
-		// (a) The throttle MUST have fired. If the burst never tripped the ceiling
-		// the bucket was too loose and this step did not exercise SC2 at all — fail
-		// rather than pass a test that proved nothing.
-		if !throttleObserved {
-			t.Fatalf("the broker never refused an op with the throttle/resource-exhausted "+
-				"class across %d back-to-back writes against the throttled scope: the "+
-				"per-session ceiling (ops-per-second 2 / burst 2) was too loose to exercise "+
-				"SC2 — the throttle never fired, so this step proved nothing", burstWrites)
+		// (a) The throttle MUST have fired AND been recovered from. At least one
+		// write had to be refused under the burst and then succeed after the
+		// caller backed off. If nothing ever had to recover, the bucket was too
+		// loose and this step did not exercise SC2 at all — fail rather than pass a
+		// test that proved nothing. (A persistent non-throttle fault cannot reach
+		// here: it would have fatalled in the retry loop above on settleTimeout.)
+		if !recoveredAfterThrottle {
+			t.Fatalf("no write was refused-then-recovered across %d back-to-back writes "+
+				"against the throttled scope: the per-session ceiling (ops-per-second 2 / "+
+				"burst 2) was too loose to exercise SC2 — the throttle never fired, so this "+
+				"step proved nothing", burstWrites)
 		}
 
 		// (b) NO TORN OBJECT + recovery landed cleanly: every write that recovered
@@ -688,30 +704,6 @@ func assertBrokerPersisted(t *testing.T, env liveEnv, relPath string, want []byt
 // "the gate fails closed". It is fail-closed under the live gate on the same
 // terms — a missing workspace env fatals unless a partial run was explicitly
 // opted into. relPath maps 1:1 to the path under the throttle workspace root.
-// isThrottleError reports whether err looks like the broker refusing an op
-// under the SEC-46 per-op ceiling. The guest formats a throttled op as
-// "brokerrpc: resource exhausted: ..." (deny_class throttle, the broker's
-// "operation rate ceiling exceeded"); the VFS may wrap it before it reaches a
-// file-op error, so we prefer a substring match on the throttle text and fall
-// back to treating any non-nil error during the saturating burst as a throttle
-// signal. A throttled metadata op surfacing EIO is the expected guest-side
-// signal, not a bug (SEC-46).
-func isThrottleError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "resource exhausted") ||
-		strings.Contains(msg, "resource_exhausted") ||
-		strings.Contains(msg, "rate ceiling") {
-		return true
-	}
-	// Fallback: under the saturating burst the only errors a write surfaces are
-	// the broker refusing the op (a throttled metadata op EIO'ing through the
-	// VFS), so a non-nil error here counts as the throttle signal.
-	return true
-}
-
 func assertBrokerThrottlePersisted(t *testing.T, env liveEnv, relPath string, want []byte) {
 	t.Helper()
 	if env.brokerThrottleWorkspace == "" {
