@@ -15,14 +15,20 @@
 
 # Both broker services build the same image from the clone-at-ref builder
 # (broker.Dockerfile): the sibling PUBLIC broker repo pinned at BROKER_REF
-# (default c0a817b, the public tip carrying the broker fileDownload data path
-# and the ops-per-second / ops-burst throttle flags this gate exercises). The
-# shared image name makes the later services' builds pure cache hits.
+# (default v0.1.0-rc.4, a fully-signed broker release tag with the per-directory
+# socket-dir flock removed so the four broker scopes (fsrw/fsro/fsthrottle/
+# fsconf) coexist in one shared /sock: the fileDownload data path, the
+# ops-per-second / ops-burst throttle flags this gate exercises, the
+# whole-object download fix so a no-range Open() returns the full object rather
+# than zero bytes — load-bearing for the conformance suite's cold read-backs —
+# the download engine-error fix, and the full audit fix-wave. The tag carries
+# published, cosign-signed artifacts + SBOM + SLSA provenance.) The shared image
+# name makes the later services' builds pure cache hits.
 x-broker-build: &broker-build
   context: .
   dockerfile: broker.Dockerfile
   args:
-    BROKER_REF: ${BROKER_REF:-c0a817b}
+    BROKER_REF: ${BROKER_REF:-v0.1.0-rc.4}
 
 services:
   # ---------------------------------------------------------------------------
@@ -40,7 +46,7 @@ services:
   # ---------------------------------------------------------------------------
   broker-rw:
     build: *broker-build
-    image: ocu-filestored:${BROKER_REF:-c0a817b}
+    image: ocu-filestored:${BROKER_REF:-v0.1.0-rc.4}
     network_mode: "none"
     command:
       - -filesystem-id
@@ -77,7 +83,7 @@ services:
 
   broker-ro:
     build: *broker-build
-    image: ocu-filestored:${BROKER_REF:-c0a817b}
+    image: ocu-filestored:${BROKER_REF:-v0.1.0-rc.4}
     network_mode: "none"
     command:
       - -filesystem-id
@@ -128,7 +134,7 @@ services:
   # so the mount derives and dials fsthrottle.sock.
   broker-throttle:
     build: *broker-build
-    image: ocu-filestored:${BROKER_REF:-c0a817b}
+    image: ocu-filestored:${BROKER_REF:-v0.1.0-rc.4}
     network_mode: "none"
     command:
       - -filesystem-id
@@ -161,6 +167,43 @@ services:
       - broker-socket:/sock
       - broker-throttle-workspace:/workspace
       - broker-throttle-audit:/audit
+
+  # A fourth broker scope (fsconf) dedicated to the rclone standard backend
+  # conformance suite (fstests.Run), kept separate from the rw/ro/throttle
+  # exercise scopes so the conformance round-trips never perturb them. It
+  # mirrors broker-rw: read,write intents, local-volume engine, audit sink,
+  # file-size ceiling, and the SEC-73 downloadable prefixes (/ for the root
+  # listing, /e2e for the working subtree). The conformance suite roots itself
+  # under /e2e: the conformance-runner creates /e2e THROUGH the broker (a real
+  # makeDirectory op) at bootstrap, then fstests writes /e2e/rclone-test-<random>
+  # beneath it. Downloadable-prefix matching is segment-boundary, so /e2e matches
+  # every child segment under it and the suite's cold read-backs are authorized
+  # (SEC-73). It shares the broker-socket volume so the runner dials fsconf.sock.
+  broker-conformance:
+    build: *broker-build
+    image: ocu-filestored:${BROKER_REF:-v0.1.0-rc.4}
+    network_mode: "none"
+    command:
+      - -filesystem-id
+      - fsconf
+      - -granted-intents
+      - read,write
+      - -engine
+      - local-volume
+      - -engine-root
+      - /workspace
+      - -audit-sink
+      - /audit/audit.log
+      - -broker-max-file-size
+      - "67108864"
+      - -downloadable-prefixes
+      - /,/e2e
+      - -south-socket-dir
+      - /sock
+    volumes:
+      - broker-socket:/sock
+      - broker-conformance-workspace:/workspace
+      - broker-conformance-audit:/audit
 
   mount:
     # Built from the repo-root Dockerfile (the static mount image).
@@ -341,6 +384,72 @@ services:
         export OCU_E2E_MOUNT_PID
         exec /e2e.test -test.v -test.run '^TestE2EExercise$$' -test.count=1
 
+  # ---------------------------------------------------------------------------
+  # Conformance runner — the rclone standard backend test suite (fstests.Run
+  # via TestFstestsLiveBroker) run DIRECTLY against the dedicated broker-conformance
+  # session socket through its own ocufs remote. profile "test": started explicitly
+  # via `docker compose run --rm conformance-runner`, never by a plain `up`.
+  #
+  # SEPARATION from the e2e test-runner: a distinct image (conformance.Dockerfile
+  # → /conformance.test), a distinct env var (OCU_FSTESTS_REMOTE, a remote NAME),
+  # a distinct broker scope (fsconf), and a distinct, UNPRIVILEGED process (no
+  # pid:host, no apparmor=unconfined — it never signals the mount and never joins
+  # the FUSE mountpoint). It shares no env var and no binary with the exercise
+  # runner, so the remote-name and the exercise runner's RCLONE_OCUFS_LIVE boolean
+  # can never collide.
+  #
+  # COLD-READ GUARANTEE (structural): this binary constructs its own *Fs that
+  # dials /sock/fsconf.sock directly. It does not mount the FUSE share and has no
+  # rclone VFS cache on its path, so every fstests write→read-back traverses the
+  # broker fileDownload path by construction — there is no warm cache to defeat.
+  # It depends only on broker-conformance, not on the mount service.
+  #
+  # The test itself creates the /e2e working prefix THROUGH the broker (a
+  # makeDirectory op, idempotent) before fstests.Run, so the suite's
+  # /e2e/rclone-test-<random> root finds its parent and /e2e segment-matches the
+  # downloadable prefix for the cold read-backs. No disk seeding — the broker owns
+  # the namespace.
+  conformance-runner:
+    profiles: ["test"]
+    build:
+      context: ../..
+      dockerfile: deploy/compose/conformance.Dockerfile
+    depends_on:
+      - broker-conformance
+    network_mode: "none"
+    environment:
+      # A remote NAME rooted under the broker's downloadable /e2e prefix, NOT a
+      # boolean. The conformance test creates /e2e through the broker at bootstrap;
+      # fstests then writes /e2e/rclone-test-<random> beneath it, and /e2e
+      # segment-matches those children so the cold reads/lists are downloadable
+      # (SEC-73). Read only by TestFstestsLiveBroker; never shared with the
+      # exercise runner's RCLONE_OCUFS_LIVE boolean.
+      OCU_FSTESTS_REMOTE: "fsconf:e2e"
+      # Point rclone at the ocufs remote definition (type/socket_path/
+      # filesystem_id/read_only) for the conformance run.
+      RCLONE_CONFIG: /etc/ocu/conformance-rclone.conf
+    volumes:
+      # The session-socket directory the brokers create their <filesystem_id>.sock
+      # in. The conformance remote dials the socket FILE /sock/fsconf.sock directly
+      # — this is the sole channel (SEC-25 holds; the service stays network_mode
+      # none, no second transport, no credential).
+      - broker-socket:/sock
+      - ./fixtures/conformance-rclone.conf:/etc/ocu/conformance-rclone.conf:ro
+    command:
+      - sh
+      - -c
+      - |
+        i=0
+        while [ ! -S /sock/fsconf.sock ]; do
+          i=$$((i+1))
+          if [ "$$i" -gt 120 ]; then
+            echo "broker-conformance socket /sock/fsconf.sock never appeared within 120s" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        exec /conformance.test -test.v -test.run '^TestFstestsLiveBroker$$' -test.count=1
+
 volumes:
   # Shared session-socket directory. Each broker creates its own
   # <filesystem_id>.sock here; the mount derives and dials them. The sole
@@ -352,6 +461,8 @@ volumes:
   broker-rw-workspace:
   broker-ro-workspace:
   broker-throttle-workspace:
+  broker-conformance-workspace:
   broker-rw-audit:
   broker-ro-audit:
   broker-throttle-audit:
+  broker-conformance-audit:

@@ -33,9 +33,9 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, dstRemote string) (fs.Obje
 	} else {
 		// src is not an *Object from this backend; derive the path from
 		// the source's remote string relative to the same root.
-		srcPath = absPath(f.root, src.Remote())
+		srcPath = f.absPath(src.Remote())
 	}
-	dstPath := absPath(f.root, dstRemote)
+	dstPath := f.absPath(dstRemote)
 
 	if _, err := f.client.CopyFile(ctx, srcPath, dstPath); err != nil {
 		return nil, fmt.Errorf("ocufs: Copy %q → %q: %w", srcPath, dstPath, err)
@@ -66,9 +66,9 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, dstRemote string) (fs.Obje
 	if srcObj, ok := src.(*Object); ok {
 		srcPath = srcObj.path
 	} else {
-		srcPath = absPath(f.root, src.Remote())
+		srcPath = f.absPath(src.Remote())
 	}
-	dstPath := absPath(f.root, dstRemote)
+	dstPath := f.absPath(dstRemote)
 
 	if _, err := f.client.MoveFile(ctx, srcPath, dstPath); err != nil {
 		return nil, fmt.Errorf("ocufs: Move %q → %q: %w", srcPath, dstPath, err)
@@ -108,8 +108,8 @@ func (f *Fs) DirMove(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
 		return fs.ErrorCantDirMove
 	}
 
-	srcPath := absPath(f.root, srcRemote)
-	dstPath := absPath(f.root, dstRemote)
+	srcPath := f.absPath(srcRemote)
+	dstPath := f.absPath(dstRemote)
 
 	if _, err := f.client.MoveDirectory(ctx, srcPath, dstPath); err != nil {
 		return fmt.Errorf("ocufs: DirMove %q → %q: %w", srcPath, dstPath, err)

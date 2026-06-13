@@ -65,9 +65,11 @@ jobs:
       - name: Prepare the workspace bind
         run: mkdir -p /tmp/ocu-e2e-workspace/out /tmp/ocu-e2e-workspace/in /tmp/ocu-e2e-workspace/out2 /tmp/ocu-e2e-workspace/throttle
       - name: Bring up the harness (real brokers + mount)
-        run: docker compose -f deploy/compose/docker-compose.yml up --build -d broker-rw broker-ro broker-throttle mount
+        run: docker compose -f deploy/compose/docker-compose.yml up --build -d broker-rw broker-ro broker-throttle broker-conformance mount
       - name: Run the live exercise (test-runner service)
         run: docker compose -f deploy/compose/docker-compose.yml run --rm --build test-runner
+      - name: Run the backend conformance round-trip (conformance-runner service)
+        run: docker compose -f deploy/compose/docker-compose.yml run --rm --build conformance-runner
       - name: Harness logs on failure
         if: failure()
         run: docker compose -f deploy/compose/docker-compose.yml logs
