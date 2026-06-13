@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -802,6 +803,45 @@ func TestWritablePathMkdirInvokesMakeDirectory(t *testing.T) {
 	}
 	if c.lastMakeDirectoryPath != "/newdir" {
 		t.Errorf("MakeDirectory path = %q, want %q", c.lastMakeDirectoryPath, "/newdir")
+	}
+}
+
+// TestMkdirOnExistingDirIsNoError verifies that Fs.Mkdir is idempotent: when
+// the broker reports the path already exists, Mkdir returns nil (success), per
+// rclone's Mkdir contract (creating an existing directory is a no-op, not an
+// error). The broker's already_exists is surfaced by brokerrpc as
+// ErrAlreadyExists; the backend must swallow it.
+func TestMkdirOnExistingDirIsNoError(t *testing.T) {
+	c := &fakeClient{
+		makeDirectoryResult: func(ctx context.Context, path string) (*brokerrpc.AckResponse, error) {
+			return nil, fmt.Errorf("ocufs test: %w: path present", brokerrpc.ErrAlreadyExists)
+		},
+	}
+	f := newTestFs(t, c, false)
+	f.root = "/"
+
+	if err := f.Mkdir(context.Background(), "existing"); err != nil {
+		t.Fatalf("Mkdir of an existing directory must be a no-op success, got: %v", err)
+	}
+	if c.makeDirectoryCount != 1 {
+		t.Errorf("MakeDirectory called %d times, want 1", c.makeDirectoryCount)
+	}
+}
+
+// TestMkdirPropagatesNonAlreadyExistsError verifies that Mkdir still surfaces a
+// genuine failure (anything other than already_exists) as an error, so the
+// idempotency swallow does not mask real broker faults.
+func TestMkdirPropagatesNonAlreadyExistsError(t *testing.T) {
+	c := &fakeClient{
+		makeDirectoryResult: func(ctx context.Context, path string) (*brokerrpc.AckResponse, error) {
+			return nil, fmt.Errorf("ocufs test: %w", brokerrpc.ErrPermissionDenied)
+		},
+	}
+	f := newTestFs(t, c, false)
+	f.root = "/"
+
+	if err := f.Mkdir(context.Background(), "denied"); err == nil {
+		t.Fatal("Mkdir must surface a non-already-exists broker error, got nil")
 	}
 }
 
