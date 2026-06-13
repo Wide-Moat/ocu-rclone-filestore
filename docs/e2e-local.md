@@ -52,18 +52,18 @@ volume cannot propagate mounts created after container start). Create the
 directories on the Docker host (the Lima VM) before bringing the harness up:
 
 ```sh
-limactl shell <vm> mkdir -p /tmp/ocu-e2e-workspace/out /tmp/ocu-e2e-workspace/in
+limactl shell <vm> mkdir -p /tmp/ocu-e2e-workspace/out /tmp/ocu-e2e-workspace/in /tmp/ocu-e2e-workspace/out2 /tmp/ocu-e2e-workspace/throttle
 ```
 
 ## 3. Bring up the harness
 
 From the repository root, build and start the brokers and the mount. The broker
 image is built by a clone-at-ref builder pinned by `BROKER_REF` (default
-`b31673f`); override it with `BROKER_REF=<ref>` in the environment if the pin
+`c0a817b`); override it with `BROKER_REF=<ref>` in the environment if the pin
 moves:
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml up --build -d broker-rw broker-ro mount
+docker compose -f deploy/compose/docker-compose.yml up --build -d broker-rw broker-ro broker-throttle mount
 ```
 
 The mount entrypoint creates the ready-file at `/run/ocu/mount-ready` on the

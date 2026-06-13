@@ -32,11 +32,13 @@ jobs:
   # NO continue-on-error and NO manual bypass anywhere in this job: a red e2e
   # must block publish (SC3 / WARNING-A).
   #
-  # Fail-closed by design: OCU_E2E_THROTTLE_FILE / OCU_E2E_ALLOW_PARTIAL are
-  # deliberately NOT set here. Until the broker's throttle affordance is
-  # available and wired, the SC2 throttle step FAILS this job and therefore
-  # blocks the release — a release must never publish with that assertion
-  # silently skipped.
+  # Fail-closed by design: OCU_E2E_ALLOW_PARTIAL is deliberately NOT set here,
+  # so every data-path proof — broker-side persistence, the cold read through a
+  # second fresh mount, and the SC2 throttle retry-no-loss — must run and pass.
+  # The broker drives the SC2 throttle itself via the broker-throttle service's
+  # -ops-per-second/-ops-burst flags (no guest simulation); a missing or skipped
+  # assertion fails this job, so a release can never publish with a data-path
+  # proof silently skipped.
   e2e:
     name: e2e gate
     runs-on: ubuntu-latest
@@ -56,12 +58,14 @@ jobs:
           fi
           echo "/dev/fuse present"
       # The mount destinations are a host bind with rshared propagation (see
-      # deploy/compose/docker-compose.yml); the subdirectories must exist
-      # before the harness starts.
+      # deploy/compose/docker-compose.yml); every destination subdirectory must
+      # exist before the harness starts (the mount binary does not create them).
+      # out = rw scope, in = ro scope, out2 = the cold-read second mount of the
+      # rw scope, throttle = the SC2 throttle scope.
       - name: Prepare the workspace bind
-        run: mkdir -p /tmp/ocu-e2e-workspace/out /tmp/ocu-e2e-workspace/in
+        run: mkdir -p /tmp/ocu-e2e-workspace/out /tmp/ocu-e2e-workspace/in /tmp/ocu-e2e-workspace/out2 /tmp/ocu-e2e-workspace/throttle
       - name: Bring up the harness (real brokers + mount)
-        run: docker compose -f deploy/compose/docker-compose.yml up --build -d broker-rw broker-ro mount
+        run: docker compose -f deploy/compose/docker-compose.yml up --build -d broker-rw broker-ro broker-throttle mount
       - name: Run the live exercise (test-runner service)
         run: docker compose -f deploy/compose/docker-compose.yml run --rm --build test-runner
       - name: Harness logs on failure
