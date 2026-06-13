@@ -237,7 +237,17 @@ func TestE2EExercise(t *testing.T) {
 		const srcFileName, dstFileName = "rename-src.txt", "rename-dst.txt"
 		srcFile := rel(srcFileName)
 		dstFile := rel(dstFileName)
+		// Nonce the payload per run (mirror the large.bin rand.Read pattern): the
+		// broker-side byte assertion on the renamed file would otherwise false-pass
+		// against a stale byte-identical leftover from a prior run on a dirty
+		// workspace. Random bytes make any leftover mismatch, so the assertion
+		// proves THIS run's moveFile landed, not that some same-named file exists.
 		payload := []byte("rename payload\n")
+		nonce := make([]byte, 16)
+		if _, err := rand.Read(nonce); err != nil {
+			t.Fatalf("generate rename payload nonce: %v", err)
+		}
+		payload = append(payload, nonce...)
 		if err := os.WriteFile(srcFile, payload, 0o644); err != nil {
 			t.Fatalf("write rename source: %v", err)
 		}
