@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# CodeQL static analysis. Runs on every pull request, on push to main, and on
+# a weekly schedule, then uploads SARIF results to the repository's code
+# scanning dashboard (Security tab). A matrix over the analyzed languages keeps
+# the Go module and the workflow definitions on independent, parallel jobs.
+# This workflow is additive to sast.yml (semgrep) and is fully separate from
+# the build, release, and live e2e paths.
+
+name: codeql
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly run so the code scanning baseline stays current independent of PR
+    # traffic (Mondays 07:13 UTC; off-the-hour to avoid scheduler contention).
+    - cron: "13 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      # Required to upload the SARIF results to the code scanning dashboard.
+      security-events: write
+      # Required by the CodeQL action to read the workflow run context.
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Pure-Go module: it cross-compiles with CGO_ENABLED=0, so autobuild
+          # (a plain `go build`) is the simplest build-mode that produces the
+          # database CodeQL needs. No manual build steps are required.
+          - language: go
+            build-mode: autobuild
+          # The repository carries many GitHub Actions workflows; the actions
+          # language analyzes those workflow definitions themselves. It needs no
+          # compilation, so it runs in build-mode none.
+          - language: actions
+            build-mode: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Autobuild
+        if: matrix.build-mode == 'autobuild'
+        uses: github/codeql-action/autobuild@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        with:
+          category: "/language:${{ matrix.language }}"
