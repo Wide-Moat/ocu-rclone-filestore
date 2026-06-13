@@ -3,6 +3,8 @@
 
 # ocu-rclone-filestore
 
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/Wide-Moat/ocu-rclone-filestore/badge)](https://scorecard.dev/viewer/?uri=github.com/Wide-Moat/ocu-rclone-filestore)
+
 The guest-side mount binary of Open Computer Use: it mounts the per-session
 filestore into the guest filesystem tree and translates file operations into
 the broker's file-operation RPC. Built on [rclone](https://github.com/rclone/rclone)
@@ -42,6 +44,33 @@ ecosystem by the buy-over-build rule.
 
 - [`ocu-filestore`](https://github.com/Wide-Moat/ocu-filestore) — the broker this binary talks to
 - [`ocu-sandbox`](https://github.com/Wide-Moat/ocu-sandbox) — sandbox executor + control plane
+
+## Verifying a release
+
+Every release archive is signed keyless with Sigstore (no long-lived key) and
+carries a SLSA build-provenance attestation tied to this repository and the
+release workflow. Verify provenance with the GitHub CLI, and the signature with
+cosign:
+
+```sh
+# 1. SLSA build provenance (binds the artifact to this repo + workflow):
+gh attestation verify ocu-rclone-filestore_<ver>_linux_amd64.tar.gz \
+  --owner Wide-Moat
+
+# 2. Keyless signature of the checksums file (the workflow's OIDC identity is
+#    the trust anchor; --certificate-identity-regexp pins the release workflow
+#    on a tag ref):
+cosign verify-blob \
+  --certificate checksums.txt.pem \
+  --signature  checksums.txt.sig \
+  --certificate-identity-regexp \
+    '^https://github.com/Wide-Moat/ocu-rclone-filestore/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+
+# 3. Check the archive(s) you downloaded against the now-trusted checksums:
+sha256sum --ignore-missing -c checksums.txt
+```
 
 ## License
 

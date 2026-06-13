@@ -5,7 +5,11 @@
 # job runs only when the gate is green (needs: [e2e]) — a red or absent e2e
 # structurally blocks the release (SC3). goreleaser runs via its official image
 # pinned by digest, the same tool-image pattern the CI scanners use, and emits
-# the SBOM through its built-in syft integration inside that image.
+# the SBOM through its built-in syft integration inside that image. Keyless
+# Sigstore signing and SLSA build provenance run as native runner steps AFTER
+# goreleaser exits: goreleaser runs inside a docker-run container with no OIDC
+# environment, so Fulcio-bound steps must execute on the runner where GitHub
+# injects the OIDC token (granted by id-token: write on the publish job only).
 
 name: release
 
@@ -14,8 +18,9 @@ on:
     tags:
       - 'v*'
 
+# Least-privilege default for every job. The publish job raises its own scopes.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # The e2e gate — LIVE since wave 05-02: the compose harness brings up the
@@ -35,6 +40,8 @@ jobs:
   e2e:
     name: e2e gate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -42,6 +49,7 @@ jobs:
       # live gate, and the gate must never be green without having run.
       - name: Require /dev/fuse on this runner
         run: |
+          set -euo pipefail
           if [ ! -e /dev/fuse ]; then
             echo "::error::/dev/fuse is absent on this runner. The live e2e gate must run on a host that provides it (self-hosted runner or Lima — see docs/ci-fuse-decision.md). This job fails hard by design; there is no bypass on the release path."
             exit 1
@@ -68,6 +76,18 @@ jobs:
     name: publish release
     needs: [e2e]
     runs-on: ubuntu-latest
+    # Minimal scopes, granted to THIS job only and only because it runs after
+    # the gate:
+    #   contents: write     — goreleaser creates the Release + uploads assets;
+    #                         the native step attaches .sig/.pem sidecars.
+    #   id-token: write     — mints the workflow OIDC token used by keyless
+    #                         cosign (Fulcio/Rekor) and attest-build-provenance.
+    #   attestations: write — lets attest-build-provenance write the SLSA
+    #                         provenance to the repo attestation store.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -75,7 +95,13 @@ jobs:
           fetch-depth: 0
       # goreleaser via its official image pinned by digest (goreleaser:v2.16.0,
       # bundles Go 1.26 and syft). The release token is passed through so the
-      # GitHub Release is created on the tag.
+      # GitHub Release is created on the tag. The -v bind mount makes the dist/
+      # artifacts visible on the runner workspace after the container exits, so
+      # the native signing/provenance steps below operate on them directly.
+      # UNCHANGED from the gated build: no OIDC env enters this container.
+      # The release is created as a DRAFT (.goreleaser.yaml release.draft: true):
+      # assets are uploaded but the release is not public until the final step
+      # flips it, after signing + provenance succeed (fail-closed).
       - name: goreleaser release
         run: |
           docker run --rm \
@@ -83,3 +109,75 @@ jobs:
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             goreleaser/goreleaser@sha256:f5ce92e9a38fb9406ccd638b95e43402cd3f4c567cb677eb06af9fd161278c12 \
             release --clean
+
+      # Native runner step: install cosign. Pinned by SHA; the installer
+      # verifies its own pinned cosign release download. No long-lived key.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.1'
+
+      # Native runner step: keyless-sign every released file. cosign reads the
+      # ambient ACTIONS_ID_TOKEN_REQUEST_URL/_TOKEN (present because id-token:
+      # write is on this job), exchanges the GitHub OIDC token at Fulcio for a
+      # short-lived cert bound to this workflow identity, and records the
+      # signature in the Rekor transparency log. Emits a .sig + .pem per file.
+      # sign-blob (not sign) is correct: these are blobs, not OCI images.
+      - name: Sign release artifacts (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=( dist/*.tar.gz dist/*.sbom.json dist/checksums.txt )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no release artifacts found in dist/ to sign"
+            exit 1
+          fi
+          for f in "${files[@]}"; do
+            cosign sign-blob --yes \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" \
+              "${f}"
+          done
+
+      # Native runner step: SLSA build provenance over the released set. Uses
+      # the SAME job OIDC to sign a provenance predicate via Fulcio/Rekor and
+      # stores it as a first-party attestation bound to this repo + workflow.
+      # subject-checksums points at goreleaser's sha256 checksums.txt, so every
+      # listed file is attested in one statement; the subject digests then match
+      # exactly what a consumer downloads. Consumer verify: gh attestation
+      # verify <file> --owner Wide-Moat.
+      - name: Attest build provenance (SLSA)
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-checksums: dist/checksums.txt
+
+      # Native runner step: attach the cosign sidecars to the Release that
+      # goreleaser created on this tag. goreleaser uploads only its own
+      # artifacts; the .sig/.pem are produced after it runs.
+      - name: Attach signatures to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sidecars=( dist/*.sig dist/*.pem )
+          if [ ${#sidecars[@]} -eq 0 ]; then
+            echo "::error::no signature sidecars to upload"
+            exit 1
+          fi
+          gh release upload "${GITHUB_REF_NAME}" "${sidecars[@]}" --clobber
+
+      # FINAL STEP — fail-closed publish. goreleaser created the release as a
+      # draft; it becomes public ONLY here, after signing, provenance, and the
+      # sidecar upload have all succeeded. set -euo pipefail plus this step's
+      # position means any earlier signing/attestation failure aborts the job
+      # before the release is ever made public: a release is never published
+      # unsigned or unattested.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit "${GITHUB_REF_NAME}" --draft=false

@@ -49,7 +49,12 @@ release:
   github:
     owner: Wide-Moat
     name: ocu-rclone-filestore
-  draft: false
+  # Create the release as a DRAFT: goreleaser uploads the archives, checksums,
+  # and SBOMs but does not make the release public. The release workflow flips
+  # it to published only after keyless signing and SLSA provenance succeed, so
+  # a signing/attestation failure leaves the release unpublished rather than
+  # public-and-unsigned (fail-closed supply-chain guarantee).
+  draft: true
   prerelease: auto
 
 snapshot:
