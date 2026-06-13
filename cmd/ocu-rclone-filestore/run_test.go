@@ -70,6 +70,11 @@ func TestRun(t *testing.T) {
 		// reaches the seam without /dev/fuse — it replaces the wave-1
 		// ErrNotImplemented case.
 		wantBrokerSocketError bool
+		// wantParseError asserts the flag layer rejected the args BEFORE any
+		// config load: the returned error wraps the parse failure ("parse
+		// flags:") and the run never touches the --config requirement, the
+		// loader, or the mount seam.
+		wantParseError bool
 	}{
 		{
 			name: "no --config flag returns a non-nil error",
@@ -92,6 +97,16 @@ func TestRun(t *testing.T) {
 			args:                  []string{"--config", validPath},
 			wantBrokerSocketError: true,
 		},
+		{
+			name:           "unknown flag is rejected by the parse layer",
+			args:           []string{"--config", validPath, "--no-such-flag"},
+			wantParseError: true,
+		},
+		{
+			name:           "flag missing its required argument is rejected by the parse layer",
+			args:           []string{"--config"},
+			wantParseError: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -99,6 +114,13 @@ func TestRun(t *testing.T) {
 			err := run(tc.args, io.Discard)
 			if err == nil {
 				t.Fatalf("run(%v) = nil; want non-nil error (every path here is an error path)", tc.args)
+			}
+			gotParseErr := strings.Contains(err.Error(), "parse flags:")
+			if tc.wantParseError && !gotParseErr {
+				t.Fatalf("run(%v) error = %v; want the wrapped parse-flags error", tc.args, err)
+			}
+			if !tc.wantParseError && gotParseErr {
+				t.Fatalf("run(%v) returned a parse-flags error; want a later flag/load/seam error", tc.args)
 			}
 			gotSocketErr := strings.Contains(err.Error(), "broker socket path not provided")
 			if tc.wantBrokerSocketError && !gotSocketErr {
