@@ -3,6 +3,19 @@
 
 # CI /dev/fuse availability — decision record
 
+## Outcome (confirmed)
+
+The hosted `ubuntu-latest` runner **does** expose `/dev/fuse` and permits the
+`--device /dev/fuse --cap-add SYS_ADMIN` (AppArmor unconfined) mount pattern in
+a container: a real run of the full live exercise — real brokers, a real FUSE
+mount, the complete data path including the cold read through a second fresh
+mount and the SC2 throttle — passed on the hosted runner. So the live e2e gate
+now also runs **on every pull request** as the required `live e2e (data path)`
+check in `ci.yml` (gated on the probe below so it skips cleanly on any future
+host that cannot mount FUSE, never deadlocking a PR for a capability reason).
+The release-path `e2e` job in `release.yml` remains the hard, non-skippable gate
+that fail-closes a publish. No self-hosted runner is required at present.
+
 ## Probe wiring (05-02)
 
 Whether the standard GitHub-hosted `ubuntu-latest` runner exposes `/dev/fuse`
