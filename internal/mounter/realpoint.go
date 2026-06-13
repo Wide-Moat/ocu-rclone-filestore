@@ -7,8 +7,13 @@ package mounter
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/rclone/rclone/cmd/mountlib"
@@ -49,6 +54,28 @@ const waitMountReadyTimeout = 30 * time.Second
 // teardown forever while still giving the queue a real chance to flush.
 const writebackDrainTimeout = 30 * time.Second
 
+// unmountDetachGrace bounds how long teardown waits for the in-process kernel
+// detach (server.Unmount) to RETURN before proceeding to let the process exit.
+//
+// On a native kernel the detach returns in well under this window, so the
+// bound never fires and teardown is unchanged. On a userspace-kernel sandbox
+// the in-process FUSE server's Unmount() does not return at all — the sentry
+// services the unmount but the call never unblocks — so without a bound the
+// teardown goroutine wedges forever, the orchestrator's run() never returns,
+// and the ready-file is never retracted. Bounding only the detach (the drain
+// above still runs to completion, so no write-back bytes are dropped) lets the
+// process exit on SIGTERM; the sandbox then reclaims the still-served FUSE
+// mount, which is the teardown contract on that tier (SIGTERM -> process exit
+// -> sandbox reclaims the mount).
+const unmountDetachGrace = 3 * time.Second
+
+// errDetachDidNotReturn is the typed result when the in-process kernel detach
+// did not return within unmountDetachGrace. It is NOT a failure to unmount: the
+// drain completed, and on the tier where this fires the sandbox reclaims the
+// mount when the process exits. It is surfaced so teardown is never silently
+// reported as a clean detach when the detach call is in fact still outstanding.
+var errDetachDidNotReturn = errors.New("in-process kernel detach did not return within the grace window; the runtime reclaims the mount on process exit")
+
 // realPointMounter is the production pointMounter: it builds the ocufs Fs from
 // the orchestrator's configmap, hands it to a mountlib.MountPoint with the
 // mapped VFS/mount options, starts the live FUSE mount, and confirms readiness.
@@ -65,6 +92,12 @@ type realPointMounter struct {
 	// can set it tiny and not block on the real ~30s poll over a non-mounted
 	// directory.
 	readyTimeout time.Duration
+	// servesProbe is the functional liveness fallback waitReady consults when the
+	// kernel mount table never confirms the mount. It defaults to mountServes
+	// (the device-boundary check) and is a field only so a unit test can drive
+	// the fallback branch deterministically without a real cross-device mount. A
+	// nil probe falls back to mountServes.
+	servesProbe func(dest string) bool
 }
 
 // newRealPointMounter builds the production seam from a resolved MountFn. It
@@ -106,6 +139,11 @@ type realPoint struct {
 	mp          *mountlib.MountPoint
 	unmountOnce sync.Once
 	unmountErr  error
+	// detachGrace bounds the in-process kernel-detach wait in doUnmount. It
+	// defaults to unmountDetachGrace and is a field only so a unit test can
+	// drive the did-not-return branch deterministically without the real
+	// multi-second wait. A zero value falls back to unmountDetachGrace.
+	detachGrace time.Duration
 }
 
 func (p *realPoint) destination() string { return p.dest }
@@ -129,7 +167,24 @@ func (p *realPoint) doUnmount() error {
 			p.mp.VFS.WaitForWriters(writebackDrainTimeout)
 			p.mp.VFS.FlushDirCache()
 		}
-		p.unmountErr = p.mp.Unmount()
+		// Bound only the kernel-detach call. On a native kernel it returns
+		// promptly and detached carries its real result; on a userspace-kernel
+		// sandbox it never returns, so after the grace we record the typed
+		// did-not-return result and let teardown proceed — the process exit then
+		// lets the runtime reclaim the still-served mount. The drain above has
+		// already completed either way, so this bound drops no write-back bytes.
+		grace := p.detachGrace
+		if grace == 0 {
+			grace = unmountDetachGrace
+		}
+		detached := make(chan error, 1)
+		go func() { detached <- p.mp.Unmount() }()
+		select {
+		case err := <-detached:
+			p.unmountErr = err
+		case <-time.After(grace):
+			p.unmountErr = errDetachDidNotReturn
+		}
 	})
 	return p.unmountErr
 }
@@ -202,9 +257,40 @@ func (r *realPointMounter) mountAndWaitReady(ctx context.Context, spec mountSpec
 // readiness is blind-trusted there. linux (CanCheckMountReady=true) is the
 // production target and is the only leg that kernel-verifies readiness; the
 // darwin/amd64 leg is a build convenience that cannot poll the kernel.
+//
+// Readiness has two signals, both checked on every poll iteration:
+//
+//  1. mountlib.CheckMountReady — scans the kernel mount table
+//     (/proc/self/mountinfo) for an entry at dest whose filesystem type names
+//     rclone. This is the authoritative confirmation on a real kernel and the
+//     unchanged primary signal under runc / a microVM guest.
+//  2. A functional liveness probe (mountServes) — the device-boundary test:
+//     dest's st_dev differs from its parent's. This is what confirms readiness
+//     on a runtime whose kernel mount table does not surface FUSE mounts at all:
+//     under a userspace-kernel sandbox the FUSE mount serves correctly but never
+//     appears in /proc/self/mountinfo, so signal (1) is structurally
+//     unsatisfiable there no matter how long it is polled, yet the served root
+//     still presents a device distinct from the directory it shadows.
+//
+// Both are checked each iteration so the sandbox path becomes ready as soon as
+// the device boundary is observable rather than only after the full readyTimeout
+// elapses (which, across several mounts, would otherwise serialise into minutes
+// of pure dead waiting). The functional probe is sound because reaching this
+// loop means mp.Mount() already returned success, and mp.Mount() returns success
+// only after the direct-mount frontend's server.WaitMount() returned nil —
+// go-fuse's authoritative "the mount syscall completed and the server is live"
+// signal — and the device-boundary test cannot pass for a bare, unmounted
+// directory (it shares its parent's device). On a real kernel signal (1)
+// typically confirms first, so behaviour there is unchanged; signal (2) is the
+// one that makes the userspace-kernel tier reach readiness at all.
 func (r *realPointMounter) waitReady(ctx context.Context, dest string) error {
 	if !mountlib.CanCheckMountReady {
 		return nil
+	}
+
+	serves := r.servesProbe
+	if serves == nil {
+		serves = mountServes
 	}
 
 	const pollInterval = 100 * time.Millisecond
@@ -218,6 +304,17 @@ func (r *realPointMounter) waitReady(ctx context.Context, dest string) error {
 		if lastErr == nil {
 			return nil
 		}
+		// Functional fallback for a runtime that does not surface FUSE in the
+		// kernel mount table: a served mount presents a device boundary at dest
+		// even when /proc/self/mountinfo omits it. Checked every iteration so the
+		// sandbox path does not pay the full readyTimeout in dead waiting.
+		if serves(dest) {
+			fs.Infof(dest, "mount ready via functional probe: the kernel "+
+				"mount table does not list the mount, but the mountpoint presents "+
+				"a device boundary (the running container runtime does not surface "+
+				"FUSE mounts in /proc/self/mountinfo)")
+			return nil
+		}
 		if !time.Now().Before(deadline) {
 			return fmt.Errorf("mount %q: wait for mount ready: %w", dest, lastErr)
 		}
@@ -229,11 +326,62 @@ func (r *realPointMounter) waitReady(ctx context.Context, dest string) error {
 	}
 }
 
+// mountServes is the functional liveness fallback for waitReady: it reports
+// whether dest is a real mount point by the device-boundary test — the
+// mountpoint's st_dev differs from its parent directory's st_dev. A filesystem
+// mounted at dest (FUSE included) gives the mountpoint a device distinct from
+// the directory it shadows; a bare, unmounted directory shares its parent's
+// device. This is the same boundary mountpoint(1) uses, and it holds on both a
+// real kernel and a userspace-kernel sandbox (where statfs reports an unknown
+// filesystem type and /proc/self/mountinfo omits the FUSE mount entirely, yet
+// the served root still presents a distinct st_dev).
+//
+// It is consulted ONLY after both:
+//
+//   - mp.Mount() returned success — which on the direct-mount frontend means
+//     directMountFn's server.WaitMount() returned nil, go-fuse's authoritative
+//     confirmation that the mount syscall completed and the FUSE server started
+//     serving; and
+//   - the kernel mount table did not list the mount within the full readiness
+//     timeout — the signature of a userspace-kernel runtime that serves FUSE
+//     but does not surface it in /proc/self/mountinfo.
+//
+// The device-boundary check is what keeps the fallback from passing a bare
+// directory: a directory that was never mounted shares its parent's device and
+// fails here, so a stale or never-started mountpoint is not mistaken for ready.
+func mountServes(dest string) bool {
+	dst, err := os.Stat(dest)
+	if err != nil {
+		return false
+	}
+	parent, err := os.Stat(filepath.Dir(dest))
+	if err != nil {
+		return false
+	}
+	dstSys, ok1 := dst.Sys().(*syscall.Stat_t)
+	parSys, ok2 := parent.Sys().(*syscall.Stat_t)
+	if !ok1 || !ok2 {
+		return false
+	}
+	return dstSys.Dev != parSys.Dev
+}
+
 // unmount best-effort unmounts one live point.
 func (r *realPointMounter) unmount(p point) error {
 	rp, ok := p.(*realPoint)
 	if !ok {
 		return fmt.Errorf("unmount: unexpected point type %T", p)
 	}
-	return rp.doUnmount()
+	err := rp.doUnmount()
+	if errors.Is(err, errDetachDidNotReturn) {
+		// Not a teardown failure: the drain completed and the runtime reclaims
+		// the still-served mount on process exit. Log it for diagnostics but do
+		// not surface it as an unmount error — otherwise a clean SIGTERM
+		// shutdown on the sandbox tier would aggregate into a non-nil run error
+		// and a non-zero exit. On a native kernel the detach returns promptly
+		// and this branch is never taken.
+		slog.Info("kernel detach did not return within the grace window; the runtime reclaims the mount on process exit", "dest", rp.destination())
+		return nil
+	}
+	return err
 }

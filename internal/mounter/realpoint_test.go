@@ -244,6 +244,59 @@ func TestRealPointDoUnmountOnce(t *testing.T) {
 	}
 }
 
+// blockingUnmountMountFn returns a MountFn whose UnmountFn never returns until
+// stop is closed, modelling the in-process kernel detach that does not return
+// on a userspace-kernel sandbox. The error channel and mountpoint are benign.
+func blockingUnmountMountFn(stop <-chan struct{}) mountlib.MountFn {
+	return func(_ *vfs.VFS, mountpoint string, _ *mountlib.Options) (<-chan error, func() error, string, error) {
+		errChan := make(chan error, 1)
+		unmount := func() error { <-stop; return nil }
+		return errChan, unmount, mountpoint, nil
+	}
+}
+
+// TestDoUnmountBoundsTheDetach pins the sandbox-tier teardown contract: when the
+// in-process kernel detach does not return within the grace window, doUnmount
+// stops waiting and reports the typed errDetachDidNotReturn (the drain already
+// ran, and the runtime reclaims the still-served mount on process exit), and the
+// seam-level unmount SWALLOWS that sentinel and returns nil — so a clean SIGTERM
+// shutdown on that tier never aggregates into a non-nil run error. On a native
+// kernel the detach returns promptly and this branch is never taken (covered by
+// TestRealPointDoUnmountOnce).
+func TestDoUnmountBoundsTheDetach(t *testing.T) {
+	stop := make(chan struct{})
+	defer close(stop) // release the blocked UnmountFn goroutine at test end
+
+	mountFn := blockingUnmountMountFn(stop)
+	r := &realPointMounter{mountFn: mountFn, readyTimeout: 10 * time.Millisecond}
+
+	info, err := fs.Find("ocufs")
+	if err != nil {
+		t.Fatalf("ocufs backend not registered: %v", err)
+	}
+	cm := configmap.Simple{}
+	cm.Set("socket_path", "/tmp/ocufs-unit-not-dialed.sock")
+	cm.Set("filesystem_id", "session_unit_fs")
+	cm.Set("read_only", "false")
+	fsObj, err := info.NewFs(context.Background(), "ocufs-detach", "", cm)
+	if err != nil {
+		t.Fatalf("build ocufs Fs: %v", err)
+	}
+	mp := mountlib.NewMountPoint(mountFn, t.TempDir(), fsObj, &mountlib.Options{}, &vfscommon.Options{})
+	if _, err := mp.Mount(); err != nil {
+		t.Fatalf("mp.Mount(): %v", err)
+	}
+	// A tiny grace so the did-not-return branch fires without the real wait.
+	p := &realPoint{dest: mp.MountPoint, mp: mp, detachGrace: 20 * time.Millisecond}
+
+	if err := p.doUnmount(); !errors.Is(err, errDetachDidNotReturn) {
+		t.Fatalf("doUnmount err = %v; want errDetachDidNotReturn when the detach does not return within the grace", err)
+	}
+	if err := r.unmount(p); err != nil {
+		t.Fatalf("seam unmount err = %v; want nil (the did-not-return sentinel must not surface as a teardown failure)", err)
+	}
+}
+
 // TestRealPointMounterUnmountTypeGuard asserts unmount rejects a foreign point
 // type rather than panicking.
 func TestRealPointMounterUnmountTypeGuard(t *testing.T) {
@@ -394,5 +447,77 @@ func TestWaitReadyContextCanceled(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("waitReady error = %v; want it to wrap context.Canceled", err)
+	}
+}
+
+// TestMountServesDeviceBoundary pins the functional fallback's discriminator:
+// a directory that was never mounted shares its parent's st_dev and is NOT a
+// mount point, and a path that does not resolve is not one either. This is what
+// keeps the fallback from passing a bare directory as "ready" — the property
+// that makes TestWaitReadyDeadlineTimeout (a plain temp dir) still time out
+// rather than be rescued by the fallback. The positive case (a real
+// cross-device mount returns true) is exercised by the live e2e harness, which
+// runs a real FUSE mount; here the negatives are the soundness-critical ones.
+func TestMountServesDeviceBoundary(t *testing.T) {
+	if !mountlib.CanCheckMountReady {
+		t.Skip("device-boundary probe is only consulted on the polling leg")
+	}
+	// A freshly created subdirectory under the test temp dir: same filesystem,
+	// so same st_dev as its parent — not a mount point.
+	dir := t.TempDir()
+	if mountServes(dir) {
+		t.Fatalf("mountServes(%q) = true for an unmounted directory; the "+
+			"device-boundary check must reject a bare dir or the fallback would "+
+			"pass any existing path as ready", dir)
+	}
+	// A path that does not exist is not a mount point.
+	if mountServes(dir + "/does-not-exist") {
+		t.Fatal("mountServes on a nonexistent path = true; want false")
+	}
+}
+
+// TestWaitReadyFunctionalFallback proves waitReady accepts readiness via the
+// functional probe when the kernel mount table never confirms — the runsc /
+// userspace-kernel path, where the FUSE mount serves but is absent from
+// /proc/self/mountinfo so CheckMountReady can never succeed. The probe is
+// injected to return true (standing in for a served mount on a runtime that
+// hides it from the mount table); waitReady must then return nil after the
+// CheckMountReady poll exhausts its deadline.
+func TestWaitReadyFunctionalFallback(t *testing.T) {
+	if !mountlib.CanCheckMountReady {
+		t.Skip("the functional fallback only runs on the polling leg")
+	}
+	r := &realPointMounter{
+		readyTimeout: 5 * time.Millisecond,
+		servesProbe:  func(string) bool { return true },
+	}
+	dest := t.TempDir() // bare dir: CheckMountReady will never confirm it
+
+	if err := r.waitReady(context.Background(), dest); err != nil {
+		t.Fatalf("waitReady with a serving functional probe = %v; want nil "+
+			"(the mount serves but the kernel mount table does not list it)", err)
+	}
+}
+
+// TestWaitReadyFallbackRejectsBareDir proves the fallback does not rescue a
+// directory that is not actually serving: with the probe reporting false (the
+// honest result for a bare dir) waitReady must still surface the readiness
+// timeout error rather than declaring the mount ready.
+func TestWaitReadyFallbackRejectsBareDir(t *testing.T) {
+	if !mountlib.CanCheckMountReady {
+		t.Skip("the functional fallback only runs on the polling leg")
+	}
+	r := &realPointMounter{
+		readyTimeout: 5 * time.Millisecond,
+		servesProbe:  func(string) bool { return false },
+	}
+	dest := t.TempDir()
+
+	err := r.waitReady(context.Background(), dest)
+	if err == nil {
+		t.Fatal("waitReady over a non-serving dir = nil; want the readiness-timeout error")
+	}
+	if got := err.Error(); !strings.Contains(got, "wait for mount ready") {
+		t.Fatalf("waitReady error = %q; want the wrapped readiness-timeout error", got)
 	}
 }
