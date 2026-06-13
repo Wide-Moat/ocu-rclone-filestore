@@ -86,17 +86,28 @@ docker compose -f deploy/compose/docker-compose.yml run --rm test-runner
 
 Two SC2 caveats:
 
-- **Throttle (step 9).** SEC-46 throttling is broker-side and the guest never
-  simulates it. Until the broker's ops-per-second affordance is present in the
-  pinned ref and wired here, step 9 FAILS the run (fail-closed). To run the
-  rest of the exercise anyway, opt into a partial run explicitly:
+- **Throttle (step 12).** SEC-46 throttling is broker-side and the guest never
+  simulates it. The `broker-throttle` service runs with a tight per-session
+  token bucket (`-ops-per-second 2 -ops-burst 2`); a burst of writes against it
+  drives the broker over budget so it refuses the over-budget ops with the
+  throttle class. That ceiling is a uniform per-op fail-closed gate (it counts
+  every op the same and denies before decoding the body), so a throttled op
+  surfaces a clean EIO at the FUSE boundary — correct SEC-46 behaviour, matching
+  how plain rclone behaves (the pacer rides out transfer-path throttle but does
+  not retry VFS metadata ops). Step 12 proves the throttle fires and that a
+  caller backing off and retrying recovers the write byte-identical broker-side.
+  It needs `OCU_E2E_THROTTLE_MOUNT` and `OCU_E2E_BROKER_THROTTLE_WORKSPACE` set
+  (the harness exports both); missing either is a fail-closed hard error. To run
+  the rest of the exercise without the throttle scope, opt into a partial run:
 
   ```sh
   OCU_E2E_ALLOW_PARTIAL=1 docker compose -f deploy/compose/docker-compose.yml run --rm test-runner
   ```
 
   A partial run is for local iteration only — the release gate never sets it,
-  so a release cannot publish until step 9 actually runs green.
+  so a release cannot publish until step 12 actually runs green. (Step 9 is a
+  thin alias that skips to step 12, kept so a localized failure still reads in
+  step order.)
 
 - **Teardown (step 10).** The runner SIGTERMs the mount process as its last
   step, so after a full (non-partial) run the mount service is down by design.
