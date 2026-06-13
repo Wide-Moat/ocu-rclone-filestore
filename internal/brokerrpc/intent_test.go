@@ -136,3 +136,67 @@ func TestStampHelperIntentMatchesTable(t *testing.T) {
 		}
 	}
 }
+
+// goldenOpIntent pins the exact intent string the mount stamps for every op,
+// by literal op name, in one place. This is the regression guard for a
+// load-bearing invariant: the broker derives each op's REQUIRED intent from
+// the route it was dispatched on, treats the stamped intent as an untrusted
+// hint, and REFUSES the request when the two disagree. So the stamped intent
+// is not free-form — for every op it must equal the intent the broker's route
+// table requires (read for the read-class ops, write for the mutate-class
+// ops). An edit that flips an entry here (e.g. stamping "write" on a
+// listDirectory) would not merely be cosmetically wrong: it would make the
+// broker refuse the op. The class-membership tests above prove the table is
+// internally consistent; this golden pins the exact wire value per op so a
+// future edit cannot silently drift a single op into a refused state.
+var goldenOpIntent = map[brokerrpc.Op]string{
+	brokerrpc.OpListDirectory:     "read",
+	brokerrpc.OpReadFile:          "read",
+	brokerrpc.OpReadMetadata:      "read",
+	brokerrpc.OpGetFileMetadata:   "read",
+	brokerrpc.OpListFiles:         "read",
+	brokerrpc.OpFileDownload:      "read",
+	brokerrpc.OpMakeDirectory:     "write",
+	brokerrpc.OpMoveDirectory:     "write",
+	brokerrpc.OpRemoveDirectory:   "write",
+	brokerrpc.OpCreateFile:        "write",
+	brokerrpc.OpCopyFile:          "write",
+	brokerrpc.OpMoveFile:          "write",
+	brokerrpc.OpRemoveFile:        "write",
+	brokerrpc.OpFileUpload:        "write",
+	brokerrpc.OpImportFiles:       "write",
+	brokerrpc.OpImportZip:         "write",
+	brokerrpc.OpMigrateFilesystem: "write",
+	brokerrpc.OpRemoveFilesystem:  "write",
+}
+
+// TestStampedIntentMatchesGoldenPerOp pins, by literal op name, the exact
+// intent the mount stamps. See goldenOpIntent for why this is load-bearing
+// rather than redundant with the class tests: a drift here corresponds to a
+// broker refusal, not just a style nit.
+func TestStampedIntentMatchesGoldenPerOp(t *testing.T) {
+	if len(goldenOpIntent) != 18 {
+		t.Fatalf("goldenOpIntent has %d entries; want 18 (one per op)", len(goldenOpIntent))
+	}
+
+	for op, want := range goldenOpIntent {
+		am, err := brokerrpc.StampAuthMeta(op)
+		if err != nil {
+			t.Errorf("StampAuthMeta(%v): %v", op, err)
+			continue
+		}
+		if am.Intent != want {
+			t.Errorf("stamped intent for %q = %q; want %q "+
+				"(a mismatch with the broker's route-derived required intent is refused)",
+				op, am.Intent, want)
+		}
+	}
+
+	// Cross-check: every op the table knows about must be pinned here, so a
+	// newly added op cannot escape the golden without failing this test.
+	for _, op := range allOps {
+		if _, ok := goldenOpIntent[op]; !ok {
+			t.Errorf("op %q is in the intent table but not pinned in goldenOpIntent", op)
+		}
+	}
+}
