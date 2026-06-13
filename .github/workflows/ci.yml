@@ -62,6 +62,37 @@ jobs:
           COVERAGE_PROFILE: cover.out
         run: go test ./internal/coverage/ -run TestCoverageRatchet -count=1
 
+  fuzz-smoke:
+    name: fuzz smoke (defensive parsers)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Go
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Bounded fuzz of the two untrusted-byte trust surfaces: the host-supplied
+      # mount config (mountcfg) and the broker wire frames/headers (brokerrpc).
+      # Each target runs the committed seed corpus PLUS a short fuzztime so a
+      # newly-reachable crash fails the PR rather than only the seeds. Go fuzzing
+      # runs one FuzzXxx target per package invocation, so each is listed
+      # explicitly. -fuzztime is fixed for determinism; any crash exits non-zero.
+      - name: Fuzz broker-wire parsers (brokerrpc)
+        run: |
+          set -euo pipefail
+          for target in FuzzReadFrame FuzzReadFrameRoundTrip \
+                        FuzzReassembleDownloadStream FuzzMapConnectError; do
+            echo "::group::brokerrpc ${target}"
+            go test ./internal/brokerrpc/ -run='^$' -fuzz="^${target}$" -fuzztime=30s
+            echo "::endgroup::"
+          done
+      - name: Fuzz host-config loader (mountcfg)
+        run: |
+          set -euo pipefail
+          go test ./internal/mountcfg/ -run='^$' -fuzz='^FuzzLoad$' -fuzztime=30s
+
   denylist:
     name: build-graph denylist
     runs-on: ubuntu-latest
