@@ -54,6 +54,11 @@ The binary is one participant in a larger system. The diagram below is the
 context view, scoped to the storage path; the full system context lives in the
 canon (`docs/architecture/03-c4-context.md`).
 
+![Rendered big-picture view: the guest sandbox reaches this binary, which reaches only the broker over one unix socket; the broker holds the credential and reaches backend storage.](./diagrams/01-big-picture.svg)
+
+The Mermaid source below is the maintainable version of the same view; the
+rendered SVG above is generated from [`diagrams/01-big-picture.d2`](./diagrams/01-big-picture.d2).
+
 ```mermaid
 flowchart TB
     subgraph guest["Guest sandbox (compute plane — untrusted)"]
@@ -213,6 +218,11 @@ The diagram below traces a guest `read()` of a file, from syscall to bytes,
 naming every hop. A `write()` is the mirror image (the broker signs a `PutObject`
 instead of a `GetObject`, and the upload is chunked client-streaming).
 
+![Rendered file-path view: a read walks the VFS cache, falls through to the ocufs backend and brokerrpc on a miss, and the broker signs and streams the bytes back; a write lands in the cache and uploads in the background.](./diagrams/02-file-path.svg)
+
+The rendered SVG above is generated from [`diagrams/02-file-path.d2`](./diagrams/02-file-path.d2);
+the Mermaid sequence below is the maintainable source.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -333,6 +343,11 @@ flowchart TB
 Every package below is authored in this repository (FSL-1.1-Apache-2.0). The
 "discharges" column names the architecture promise the package is responsible
 for upholding.
+
+![Rendered package map: the entrypoint loads config and drives the mounter, which builds the ocufs backend per mount, which reaches the broker only through brokerrpc and its single socket; the build-graph and coverage guards run at test time only.](./diagrams/03-package-map.svg)
+
+The rendered SVG above is generated from [`diagrams/03-package-map.d2`](./diagrams/03-package-map.d2);
+the Mermaid graph below is the maintainable source.
 
 ```mermaid
 flowchart LR

@@ -26,11 +26,15 @@ the host-side credential seam, the end-to-end data path of a file operation,
 and what each package in this repo is responsible for — see
 [`docs/architecture.md`](./docs/architecture.md).
 
+![The big picture: the guest sandbox talks to this binary, which talks only to the broker over one unix socket; the broker holds the credential and reaches the backend storage.](./docs/diagrams/01-big-picture.svg)
+
 ## Quickstart
 
 You need **Go 1.26+** (see `go.mod`) and a running broker that exposes a
 per-session AF_UNIX socket. An actual mount needs Linux with `/dev/fuse`; on
 macOS, run it inside the Lima harness (see [`docs/e2e-local.md`](./docs/e2e-local.md)).
+
+![The four steps: have the prerequisites, build the binary, write a mount config, run it against the broker socket.](./docs/diagrams/04-setup.svg)
 
 **Build:**
 
@@ -120,6 +124,8 @@ you need:
 - **Build and run it** → the [Quickstart](#quickstart) above.
 - **The system picture** (trust boundaries, the credential seam, the data path) →
   [`docs/architecture.md`](./docs/architecture.md).
+- **See it, not read it** → [`docs/diagrams/`](./docs/diagrams/) — rendered SVGs
+  of the big picture, a file's read/write path, the package map, and the setup flow.
 - **Per-package detail** → [`docs/components/`](./docs/components/README.md).
 - **Run it locally with real brokers** → [`docs/e2e-local.md`](./docs/e2e-local.md).
 - **Why a wrapper, not a fork** → [`docs/fork-shape.md`](./docs/fork-shape.md).
