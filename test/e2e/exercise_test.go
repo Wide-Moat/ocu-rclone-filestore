@@ -201,30 +201,42 @@ func TestE2EExercise(t *testing.T) {
 		names := listEventually(t, rwBase, smallName, subDir)
 		assertContains(t, names, smallName)
 		assertContains(t, names, subDir)
+		// De-vacuum the listing: the union the mount reports must reflect
+		// broker-side reality (the makeDirectory landed, the earlier upload
+		// landed), not just the local dir cache. The file's bytes were already
+		// proven in step 2; here assert both names exist in the broker workspace.
+		assertBrokerPresent(t, env, scopeRel(subDir))
+		assertBrokerPresent(t, env, scopeRel(smallName))
 	})
 
 	// Step 4 — mkdir then rmdir (makeDirectory/removeDirectory): create, assert
 	// present, remove, assert absent.
 	t.Run("04_mkdir_rmdir", func(t *testing.T) {
-		dir := rel("transient-dir")
+		const dirName = "transient-dir"
+		dir := rel(dirName)
 		if err := os.Mkdir(dir, 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
 		if _, err := os.Stat(dir); err != nil {
 			t.Fatalf("created dir not present: %v", err)
 		}
+		// De-vacuum: the makeDirectory must reach the broker, not just the cache.
+		assertBrokerPresent(t, env, scopeRel(dirName))
 		if err := os.Remove(dir); err != nil {
 			t.Fatalf("rmdir: %v", err)
 		}
 		waitGone(t, dir)
+		// De-vacuum: the removeDirectory must take effect broker-side.
+		assertBrokerAbsent(t, env, scopeRel(dirName))
 	})
 
 	// Step 5 — rename a file and a dir (moveFile/moveDirectory): old path gone,
 	// new path present.
 	t.Run("05_rename_file_and_dir", func(t *testing.T) {
 		// File rename.
-		srcFile := rel("rename-src.txt")
-		dstFile := rel("rename-dst.txt")
+		const srcFileName, dstFileName = "rename-src.txt", "rename-dst.txt"
+		srcFile := rel(srcFileName)
+		dstFile := rel(dstFileName)
 		payload := []byte("rename payload\n")
 		if err := os.WriteFile(srcFile, payload, 0o644); err != nil {
 			t.Fatalf("write rename source: %v", err)
@@ -237,10 +249,16 @@ func TestE2EExercise(t *testing.T) {
 		if !bytes.Equal(got, payload) {
 			t.Fatalf("renamed file content mismatch")
 		}
+		// De-vacuum the moveFile: the object's BYTES must survive the move at the
+		// broker (hash at the new workspace path), and the old path must be gone
+		// broker-side — a FUSE read-back of the destination can be cache-served.
+		assertBrokerPersisted(t, env, scopeRel(dstFileName), payload)
+		assertBrokerAbsent(t, env, scopeRel(srcFileName))
 
 		// Dir rename.
-		srcDir := rel("rename-src-dir")
-		dstDir := rel("rename-dst-dir")
+		const srcDirName, dstDirName = "rename-src-dir", "rename-dst-dir"
+		srcDir := rel(srcDirName)
+		dstDir := rel(dstDirName)
 		if err := os.Mkdir(srcDir, 0o755); err != nil {
 			t.Fatalf("mkdir rename source dir: %v", err)
 		}
@@ -251,6 +269,9 @@ func TestE2EExercise(t *testing.T) {
 		if _, err := os.Stat(dstDir); err != nil {
 			t.Fatalf("renamed dir not present: %v", err)
 		}
+		// De-vacuum the moveDirectory: namespace change must reach the broker.
+		assertBrokerPresent(t, env, scopeRel(dstDirName))
+		assertBrokerAbsent(t, env, scopeRel(srcDirName))
 	})
 
 	// Step 6 — large file over the RPC ceiling: write, read back byte-identical,
@@ -437,6 +458,90 @@ func assertBrokerPersisted(t *testing.T, env liveEnv, relPath string, want []byt
 				"(last read %d bytes, want %d, err %v) — the bytes written through the "+
 				"mount did not reach the broker workspace byte-identical",
 				relPath, brokerPath, lastLen, len(want), lastErr)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// assertBrokerPresent proves that a namespace mutation (mkdir, or the
+// destination of a rename) actually reached the broker's engine-root workspace,
+// stat-ing the path as it sits in that workspace volume rather than through the
+// FUSE mount — a FUSE stat can be served from the local dir cache without the
+// makeDirectory/moveDirectory RPC ever succeeding, the same vacuum class the
+// write steps already close by hashing broker-side. relPath is the path under
+// the rw mount; it maps 1:1 to the path under the workspace root.
+//
+// Fail-closed under the live gate via the SAME partial hatch as
+// assertBrokerPersisted: with the workspace env unset it fatals unless the
+// operator explicitly opted into a partial run. The poll tolerates the
+// asynchronous delay before the entry appears.
+func assertBrokerPresent(t *testing.T, env liveEnv, relPath string) {
+	t.Helper()
+	if env.brokerRWWorkspace == "" {
+		if allowPartial() {
+			t.Logf("%s unset and partial mode explicitly opted into via %s — "+
+				"skipping the broker-side presence assertion for %q (the FUSE view "+
+				"alone does not prove the mutation reached the broker)",
+				envBrokerRWWorkspace, envAllowPartial, relPath)
+			return
+		}
+		t.Fatalf("%s is required under the live gate (%s): the mutating steps assert "+
+			"the namespace change reached the broker, not just the local dir cache; "+
+			"set %s=1 only to opt into a partial run on purpose",
+			envBrokerRWWorkspace, envGate, envAllowPartial)
+	}
+
+	brokerPath := filepath.Join(env.brokerRWWorkspace, filepath.FromSlash(relPath))
+	deadline := time.Now().Add(settleTimeout)
+	var lastErr error
+	for {
+		if _, err := os.Stat(brokerPath); err == nil {
+			return // the mutation landed in the broker workspace.
+		} else {
+			lastErr = err
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("broker-side presence of %q never appeared: broker path %q (err %v) "+
+				"— the mutation made through the mount did not reach the broker workspace",
+				relPath, brokerPath, lastErr)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// assertBrokerAbsent proves that a removal (rmdir, or the source of a rename)
+// actually took effect in the broker's engine-root workspace, polling until the
+// path is gone from that workspace volume — a FUSE stat can report a removed
+// entry as gone from the dir cache without the removeDirectory/moveFile RPC ever
+// reaching the broker. Same fail-closed partial hatch as the present/persisted
+// assertions.
+func assertBrokerAbsent(t *testing.T, env liveEnv, relPath string) {
+	t.Helper()
+	if env.brokerRWWorkspace == "" {
+		if allowPartial() {
+			t.Logf("%s unset and partial mode explicitly opted into via %s — "+
+				"skipping the broker-side absence assertion for %q",
+				envBrokerRWWorkspace, envAllowPartial, relPath)
+			return
+		}
+		t.Fatalf("%s is required under the live gate (%s): the removal steps assert the "+
+			"namespace change reached the broker, not just the local dir cache; set %s=1 "+
+			"only to opt into a partial run on purpose",
+			envBrokerRWWorkspace, envGate, envAllowPartial)
+	}
+
+	brokerPath := filepath.Join(env.brokerRWWorkspace, filepath.FromSlash(relPath))
+	deadline := time.Now().Add(settleTimeout)
+	for {
+		_, err := os.Stat(brokerPath)
+		if errors.Is(err, fs.ErrNotExist) {
+			return // the removal took effect broker-side.
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("broker-side absence of %q never took effect: broker path %q still "+
+				"present (err %v) — the removal made through the mount did not reach the "+
+				"broker workspace",
+				relPath, brokerPath, err)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
