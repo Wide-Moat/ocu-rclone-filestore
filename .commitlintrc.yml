@@ -31,6 +31,14 @@ rules:
     - 2
     - never
     - "."
+  # Do not constrain subject case. config-conventional defaults to forbidding a
+  # sentence/start/pascal/upper-case subject, which rejects bot-authored commits
+  # like "ci(deps): Bump actions/checkout ..." (Dependabot capitalizes the
+  # verb). The type/scope/structure rules above are what matter; the leading
+  # letter's case is cosmetic, so disable that check rather than rewrite every
+  # automated commit.
+  subject-case:
+    - 0
   # Keep the header readable.
   header-max-length:
     - 2
