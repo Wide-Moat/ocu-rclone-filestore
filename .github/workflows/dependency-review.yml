@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Dependency review. Inspects the dependency changes a pull request introduces
+# and fails when one pulls in a vulnerable package or a disallowed license.
+# This complements sca.yml: trivy scans the dependencies already in the tree,
+# while this gate stops a vulnerable or wrongly-licensed dependency from
+# entering through a PR in the first place. It is pull-request only — there is
+# no base/head diff to review on a direct push.
+
+name: dependency-review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: dependency review (PR diff)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required to post the dependency-change summary as a PR comment.
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # Block the merge on any newly introduced advisory at high severity
+          # or above, matching the CRITICAL-blocks posture of the other gates
+          # while also catching highs at the point of entry.
+          fail-on-severity: high
+          # Surface the findings as a comment on the pull request so the diff is
+          # visible without opening the job log.
+          comment-summary-in-pr: on-failure

@@ -132,10 +132,10 @@ you need:
 
 ## Verifying a release
 
-Every release archive is signed keyless with Sigstore (no long-lived key) and
+Every release archive is signed keyless with Sigstore (no long-lived key),
 carries a SLSA build-provenance attestation tied to this repository and the
-release workflow. Verify provenance with the GitHub CLI, and the signature with
-cosign:
+release workflow, and ships a signed CycloneDX SBOM. Verify provenance with the
+GitHub CLI, and the signatures (checksums and SBOM) with cosign:
 
 ```sh
 # 1. SLSA build provenance (binds the artifact to this repo + workflow):
@@ -155,6 +155,16 @@ cosign verify-blob \
 
 # 3. Check the archive(s) you downloaded against the now-trusted checksums:
 sha256sum --ignore-missing -c checksums.txt
+
+# 4. (Optional) Verify the SBOM for an archive. Each archive ships a CycloneDX
+#    SBOM (<archive>.sbom.json) signed with the same keyless identity and
+#    carried in its own .cosign.bundle:
+cosign verify-blob \
+  --bundle ocu-rclone-filestore_<ver>_linux_amd64.tar.gz.sbom.json.cosign.bundle \
+  --certificate-identity-regexp \
+    '^https://github.com/Wide-Moat/ocu-rclone-filestore/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ocu-rclone-filestore_<ver>_linux_amd64.tar.gz.sbom.json
 ```
 
 ## License
