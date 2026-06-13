@@ -102,6 +102,26 @@ const largeFileSize = 9 << 20 // 9 MiB
 // reflect a mutation (the VFS is eventually consistent through the cache).
 const settleTimeout = 30 * time.Second
 
+// throttleSettleTimeout is the broker-landing budget for the SC2 throttle step
+// ALONE. A write under vfs_cache_mode:writes returns from the syscall once the
+// bytes are durably in the local cache; the real fileUpload runs asynchronously
+// in rclone's VFS writeback queue (vfs_write_back default 5s). When that upload
+// is refused by the per-session throttle, rclone's writeback retries it with a
+// coarse exponential backoff (5s, then doubling 10/20/40s, capped at the rclone
+// maxUploadDelay of 5m), with no jitter and no Retry-After consumption, while up
+// to Transfers (default 4) uploads race the 2-ops/s, burst-2 bucket. The bytes
+// always land — rclone's writeback re-queues a dirty item indefinitely and only
+// drops it on success — but the last of a 6-write burst can sit on a 20–40s
+// backoff rung, well past the 30s settleTimeout the unthrottled steps use. 120s
+// amply bounds that worst case for six small single-op uploads while still
+// failing closed: it widens ONLY the wait, never the byte-identity check or the
+// throttle-must-fire guard, so genuine data loss still fatals the step.
+//
+// A follow-up could shrink this worst case by exposing vfs_write_back as a
+// per-mount config knob so the throttle mount fires its first upload promptly;
+// that is out of scope here and not required for the gate to be correct.
+const throttleSettleTimeout = 120 * time.Second
+
 // liveEnv carries the resolved harness contract for a single run.
 type liveEnv struct {
 	rwMount                 string
@@ -714,7 +734,7 @@ func assertBrokerPersisted(t *testing.T, env liveEnv, relPath string, want []byt
 			"set %s=1 only to opt into a partial run on purpose",
 			envBrokerRWWorkspace, envGate, envAllowPartial)
 	}
-	assertWorkspaceHasBytes(t, env.brokerRWWorkspace, relPath, want)
+	assertWorkspaceHasBytes(t, env.brokerRWWorkspace, relPath, want, settleTimeout)
 }
 
 // assertBrokerThrottlePersisted is the throttle-scope analogue of
@@ -740,21 +760,32 @@ func assertBrokerThrottlePersisted(t *testing.T, env liveEnv, relPath string, wa
 			"side, not just in the local VFS cache; set %s=1 only to opt into a partial "+
 			"run on purpose", envBrokerThrottleWorkspace, envGate, envAllowPartial)
 	}
-	assertWorkspaceHasBytes(t, env.brokerThrottleWorkspace, relPath, want)
+	// The throttle step gets the wider landing budget: a throttled upload's
+	// writeback backoff (5/10/20/40s) can outlast the 30s the unthrottled steps
+	// use. The byte-identity check below is unchanged, so the SC2 proof (the
+	// throttled, retried write landed byte-identical broker-side) is preserved —
+	// only the wait is widened, never what is asserted.
+	assertWorkspaceHasBytes(t, env.brokerThrottleWorkspace, relPath, want, throttleSettleTimeout)
 }
 
 // assertWorkspaceHasBytes polls the file at relPath under a broker engine-root
 // workspace (mounted read-only into the runner) until its content hashes
-// byte-identical to want or the settle timeout elapses. Reading the workspace
+// byte-identical to want or the given budget elapses. Reading the workspace
 // volume directly — never the FUSE mount — is what makes the assertion prove
 // the broker data path: a FUSE read-back can be served from the local VFS
 // write-back cache without any upload ever reaching the broker. The poll
 // tolerates the asynchronous write-back delay before the bytes appear.
-func assertWorkspaceHasBytes(t *testing.T, workspace, relPath string, want []byte) {
+//
+// within is the landing budget: the unthrottled write steps pass settleTimeout
+// (30s); the SC2 throttle step passes throttleSettleTimeout (120s) because a
+// throttled upload's writeback backoff can outlast the 30s window. The
+// byte-identity (sha256) check is the same regardless of budget, so widening
+// the wait never weakens what the assertion proves.
+func assertWorkspaceHasBytes(t *testing.T, workspace, relPath string, want []byte, within time.Duration) {
 	t.Helper()
 	wantSum := sha256.Sum256(want)
 	brokerPath := filepath.Join(workspace, filepath.FromSlash(relPath))
-	deadline := time.Now().Add(settleTimeout)
+	deadline := time.Now().Add(within)
 	var lastErr error
 	var lastLen int
 	for {
