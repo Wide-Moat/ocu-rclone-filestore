@@ -44,5 +44,10 @@ Nothing has been tagged yet. Until the first release, all changes live under
   SBOM, gated on a passing live end-to-end run.
 - Community-health documentation: `CONTRIBUTING.md`, `SECURITY.md`, and a
   referenced code of conduct.
+- System-architecture document (`docs/architecture.md`) with diagrams: the
+  system-context and container views, the trust boundaries and host-side
+  credential seam, the end-to-end data path of a file operation, the broker
+  south face, a per-package component decomposition, and a requirement-to-code
+  discharge map.
 
 [Unreleased]: https://github.com/Wide-Moat/ocu-rclone-filestore/commits/main
