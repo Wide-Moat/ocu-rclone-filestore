@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io/fs"
 	"os"
@@ -28,27 +29,44 @@ const (
 	// envRWMount is the read-write mountpoint the harness mounts the rw
 	// filesystem at.
 	envRWMount = "OCU_E2E_RW_MOUNT"
+	// envRWMount2 is a SECOND read-write mountpoint of the SAME rw filesystem
+	// scope, mounted at a distinct destination. Each mount entry gets its own
+	// independent VFS cache, so this mount never holds the object written
+	// through envRWMount: a read here can only be served by traversing the
+	// broker fileDownload path, which is exactly the cold-read proof of the read
+	// data path (step 11).
+	envRWMount2 = "OCU_E2E_RW_MOUNT2"
 	// envROMount is the read-only mountpoint the harness mounts the ro
 	// filesystem at.
 	envROMount = "OCU_E2E_RO_MOUNT"
+	// envThrottleMount is a read-write mountpoint of a separate filesystem scope
+	// whose broker runs with a small per-second token bucket (ops-per-second 2,
+	// burst 2). A burst of separate write operations against it drives the broker
+	// over budget so it refuses the over-budget ops with the throttle class
+	// (resource_exhausted, deny_class throttle). Under SEC-46 that refusal is a
+	// uniform per-op fail-closed ceiling: a throttled metadata op surfaces EIO to
+	// the caller, which is correct, not a bug. Step 12 (SC2) proves (a) the
+	// throttle fires (a write is refused under the burst), and (b) a caller that
+	// backs off and retries recovers the write byte-identical broker-side
+	// (eventual success). It does NOT claim the pacer transparently completes
+	// every op, nor does it itself prove broker-side atomicity (the
+	// no-partial-stage property is the broker's, asserted broker-side). The guest
+	// never simulates the throttle (SEC-46 is broker-side).
+	envThrottleMount = "OCU_E2E_THROTTLE_MOUNT"
 	// envReadyFile is the ready-file path the mount process creates once all
 	// mounts are up and removes on teardown.
 	envReadyFile = "OCU_E2E_READY_FILE"
 	// envMountPID is the PID of the running mount process the SIGTERM step
 	// signals. The harness writes it once the process is up.
 	envMountPID = "OCU_E2E_MOUNT_PID"
-	// envThrottleFile, when the broker test-mode is enabled by the peer in
-	// 05-02, names a path whose write the broker throttles once
-	// (resource_exhausted) before succeeding. The guest never simulates the
-	// throttle (SEC-46 is broker-side); it only drives the write and asserts no
-	// data loss.
-	envThrottleFile = "OCU_E2E_THROTTLE_FILE"
 	// envAllowPartial is the explicit escape hatch for a partial live run: with
-	// the gate set, missing OCU_E2E_THROTTLE_FILE / OCU_E2E_MOUNT_PID /
-	// OCU_E2E_BROKER_RW_WORKSPACE is a hard failure (fail-closed — a release must
-	// never publish with the SC2 throttle, teardown, or broker-persistence
-	// assertions silently skipped) UNLESS this is set to a truthy value (e.g.
-	// 1/true), which opts into skipping those steps on purpose.
+	// the gate set, a missing live input — OCU_E2E_RW_MOUNT2,
+	// OCU_E2E_THROTTLE_MOUNT, OCU_E2E_BROKER_THROTTLE_WORKSPACE,
+	// OCU_E2E_MOUNT_PID, or OCU_E2E_BROKER_RW_WORKSPACE — is a hard failure
+	// (fail-closed — a release must never publish with the cold-read, SC2
+	// throttle, teardown, or broker-persistence assertions silently skipped)
+	// UNLESS this is set to a truthy value (e.g. 1/true), which opts into
+	// skipping those steps on purpose.
 	envAllowPartial = "OCU_E2E_ALLOW_PARTIAL"
 	// envBrokerRWWorkspace is the broker-rw engine-root workspace, mounted
 	// READ-ONLY into the runner. Asserting against the bytes the broker actually
@@ -58,6 +76,14 @@ const (
 	// than the cache. The relative path under the rw mount maps 1:1 to the path
 	// under this workspace root (both are filesystem-relative to the same scope).
 	envBrokerRWWorkspace = "OCU_E2E_BROKER_RW_WORKSPACE"
+	// envBrokerThrottleWorkspace is the throttle broker's engine-root workspace,
+	// mounted READ-ONLY into the runner. The SC2 throttle step hashes the bytes
+	// the throttled broker actually persisted here after the pacer's retries —
+	// not the FUSE read-back, which the local cache can serve — so the proof is
+	// "a throttled write still lands byte-identical broker-side", not merely "the
+	// gate fails closed". The relative path under the throttle mount maps 1:1 to
+	// the path under this workspace root (same scope).
+	envBrokerThrottleWorkspace = "OCU_E2E_BROKER_THROTTLE_WORKSPACE"
 )
 
 // allowPartial reports whether the operator explicitly opted into a partial
@@ -78,12 +104,14 @@ const settleTimeout = 30 * time.Second
 
 // liveEnv carries the resolved harness contract for a single run.
 type liveEnv struct {
-	rwMount           string
-	roMount           string
-	readyFile         string
-	mountPID          int
-	throttleFile      string
-	brokerRWWorkspace string
+	rwMount                 string
+	rwMount2                string
+	roMount                 string
+	throttleMount           string
+	readyFile               string
+	mountPID                int
+	brokerRWWorkspace       string
+	brokerThrottleWorkspace string
 }
 
 // requireLive resolves the env contract or skips the whole exercise. With the
@@ -115,12 +143,14 @@ func requireLive(t *testing.T) liveEnv {
 	}
 
 	return liveEnv{
-		rwMount:           rw,
-		roMount:           ro,
-		readyFile:         os.Getenv(envReadyFile),
-		mountPID:          pid,
-		throttleFile:      os.Getenv(envThrottleFile),
-		brokerRWWorkspace: os.Getenv(envBrokerRWWorkspace),
+		rwMount:                 rw,
+		rwMount2:                os.Getenv(envRWMount2),
+		roMount:                 ro,
+		throttleMount:           os.Getenv(envThrottleMount),
+		readyFile:               os.Getenv(envReadyFile),
+		mountPID:                pid,
+		brokerRWWorkspace:       os.Getenv(envBrokerRWWorkspace),
+		brokerThrottleWorkspace: os.Getenv(envBrokerThrottleWorkspace),
 	}
 }
 
@@ -345,41 +375,278 @@ func TestE2EExercise(t *testing.T) {
 		}
 	})
 
-	// Step 9 — throttle: a write completes without data loss when the broker
-	// injects resource_exhausted once and then succeeds. The injection is a
-	// broker test-mode the peer coordinates in 05-02; the guest never simulates
-	// it. This assertion runs only when the harness names the throttle file.
+	// Step 9 — throttle (thin alias): the real SC2 throttle proof moved to step 12,
+	// which drives a genuine over-budget burst against a broker-throttled scope and
+	// proves the SEC-46 invariants — the throttle fires, and a caller that backs
+	// off and retries recovers the write byte-identical (eventual success).
+	// The earlier path-named broker test-mode is retired (the broker drives
+	// throttling from daemon flags, needing no coordination file). This step is
+	// kept as a stable, named pointer so a localized failure still reads in step
+	// order; it carries no assertion of its own.
 	t.Run("09_throttle_no_data_loss", func(t *testing.T) {
-		// 05-02: the broker test-mode (a peer-coordinated env/flag) makes the
-		// first write of this path return resource_exhausted, then succeed. The
-		// retryable closed-code is handled with backoff by the backend and the
-		// VFS cache holds the data, so the write completes without loss.
-		if env.throttleFile == "" {
+		t.Skip("SC2 throttle is proven in step 12 (12_throttle_retry_no_loss): a " +
+			"flag-driven broker throttle drives an over-budget burst; the test asserts " +
+			"the throttle fires and that a caller backing off and retrying recovers " +
+			"byte-identical bytes broker-side (eventual success). The throttle is a " +
+			"uniform per-op fail-closed ceiling — a throttled metadata op EIO'ing is " +
+			"expected, not the pacer transparently completing every op (SEC-46).")
+	})
+
+	// Step 11 — cold read across a SECOND mount of the same scope: write a
+	// nonce'd payload through mount A (the primary rw mount), confirm it
+	// persisted broker-side, then read the SAME scope-relative path through
+	// mount B (a distinct mount of the same filesystem_id at another
+	// destination). Each mount entry has its own VFS cache, so mount B never
+	// holds these bytes in cache — a successful read there can only come from
+	// the broker's fileDownload path. This is the load-bearing proof of the read
+	// data path: the bytes traverse the broker, not a warm write-back cache.
+	// Both paths stay under the /e2e downloadable prefix (SEC-73, broker-resolved).
+	//
+	// Steps 11 and 12 are declared before step 10 because step 10 SIGTERMs the
+	// mount process and asserts every mountpoint unmounts; subtests run in source
+	// order, so the data-path proofs must execute while the mounts are still live.
+	// The names carry the logical step numbers (the teardown is logically last).
+	t.Run("11_cold_read_second_mount", func(t *testing.T) {
+		if env.rwMount2 == "" {
 			if allowPartial() {
 				t.Skipf("%s unset and partial mode explicitly opted into via %s — "+
-					"skipping the SC2 throttle-no-data-loss assertion; the broker "+
-					"throttle test-mode is coordinated with the peer (the guest never "+
-					"simulates throttling, SEC-46)", envThrottleFile, envAllowPartial)
+					"skipping the cold-read proof; without a second mount of the same "+
+					"scope a read cannot be shown to traverse the broker fileDownload "+
+					"path rather than a warm cache", envRWMount2, envAllowPartial)
 			}
-			t.Fatalf("%s is required under the live gate (%s): it names the path the "+
-				"broker test-mode throttles so the SC2 throttle-no-data-loss "+
-				"assertion actually runs; set %s=1 only to opt into a partial run "+
-				"on purpose", envThrottleFile, envGate, envAllowPartial)
+			t.Fatalf("%s is required under the live gate (%s): it names a second mount "+
+				"of the same scope whose independent VFS cache is cold, so a read there "+
+				"proves the broker fileDownload data path; set %s=1 only to opt into a "+
+				"partial run on purpose", envRWMount2, envGate, envAllowPartial)
 		}
-		path := rel(env.throttleFile)
-		payload := []byte("throttled write must survive the retry without loss\n")
-		if err := os.WriteFile(path, payload, 0o644); err != nil {
-			t.Fatalf("throttled write failed: %v", err)
+
+		// A fresh nonce'd name and payload so neither mount could have cached it
+		// from an earlier step.
+		nonce := make([]byte, 16)
+		if _, err := rand.Read(nonce); err != nil {
+			t.Fatalf("generate cold-read nonce: %v", err)
 		}
-		got := readBackEventually(t, path, len(payload))
-		if !bytes.Equal(got, payload) {
-			t.Fatalf("throttled write lost data: got %d bytes, want %d", len(got), len(payload))
+		coldName := "cold-" + hex.EncodeToString(nonce) + ".bin"
+		coldData := make([]byte, 64<<10) // 64 KiB, distinct random content
+		if _, err := rand.Read(coldData); err != nil {
+			t.Fatalf("generate cold-read payload: %v", err)
+		}
+
+		// Write through mount A under the downloadable working prefix.
+		if err := os.WriteFile(rel(coldName), coldData, 0o644); err != nil {
+			t.Fatalf("write cold-read payload through mount A: %v", err)
+		}
+		// Prove it reached the broker so the cross-mount read has something to
+		// download (not merely something cached in mount A's write-back cache).
+		assertBrokerPersisted(t, env, scopeRel(coldName), coldData)
+
+		// Read the SAME scope-relative path through mount B. Mount B never wrote
+		// this object and has its own cold VFS cache, so the bytes can only come
+		// from the broker fileDownload path. Poll for eventual consistency.
+		mountBPath := filepath.Join(env.rwMount2, e2eDirName, coldName)
+		got := readBackEventually(t, mountBPath, len(coldData))
+		if !bytes.Equal(got, coldData) {
+			t.Fatalf("cold read through second mount %q mismatched: got %d bytes, want %d "+
+				"(the bytes must have traversed the broker fileDownload path, not a cache)",
+				mountBPath, len(got), len(coldData))
+		}
+	})
+
+	// Step 12 — throttle fires, caller-retry recovers byte-identical (SC2).
+	//
+	// SEC-46 framing (the only canon-true invariant this step may prove). The
+	// broker throttle is a fail-closed DoS-containment ceiling and it is UNIFORM
+	// PER-OP: nothing trusts the request body before dispatch, so the broker
+	// cannot throttle "uploads only" — every dispatched op (List, Stat, Mkdir,
+	// fileUpload) costs exactly one token, charged at stage 0 before the body is
+	// decoded. The rclone pacer retries only the DATA-TRANSFER path; it does NOT
+	// retry VFS METADATA ops (List / Dir.Stat / Mkdir / open-create). A throttled
+	// metadata op therefore surfaces resource_exhausted straight to EIO at the
+	// caller — and under SEC-46 that EIO is CORRECT, spec-compliant behaviour, not
+	// a bug. There is NO "an op always completes under throttle" guarantee. The
+	// guarantee that DOES hold is ATOMICITY: a throttled or refused fileUpload
+	// never partially stages, so no torn or corrupt object is left behind.
+	//
+	// This step proves exactly three things and nothing that contradicts SEC-46:
+	//   (a) THE THROTTLE FIRES — an over-budget burst makes the broker refuse
+	//       excess ops with the throttle / resource_exhausted class. Observed from
+	//       the guest side: at least one os.WriteFile in the saturating burst
+	//       returns an error (a throttled metadata op surfacing EIO is the expected
+	//       signal). If no throttle is ever observed the bucket was too loose and
+	//       the test FAILS — it did not actually exercise the ceiling.
+	//   (b) THE RECOVERED WRITE LANDS BYTE-IDENTICAL (eventual success) — every
+	//       name is asserted by byte-identity broker-side, so a throttled-then-
+	//       retried write must match exactly once it succeeds. (This proves the
+	//       recovered object is whole; it does NOT by itself prove atomicity of a
+	//       mid-throttle partial — a partial stage would be overwritten by the
+	//       clean retry and still hash-match. The atomic-no-partial-stage property
+	//       is the broker's, asserted broker-side, not by this guest read.)
+	//   (c) RECOVERY ONCE TOKENS REFILL — the TEST ITSELF backs off and retries the
+	//       EIO'd write at the file-op level (sleep ~600ms so the 2/s bucket
+	//       refills, then retry), bounded by settleTimeout. This models a
+	//       well-behaved client backing off; it is the CALLER's responsibility per
+	//       SEC-46, NOT a guest-pacer guarantee. After recovery the bytes are
+	//       asserted byte-identical broker-side.
+	//
+	// What this step deliberately does NOT claim: that the pacer transparently
+	// completes every op under throttle. It does not — metadata-EIO is expected.
+	//
+	// Each separate file write is ONE client-streaming fileUpload = ONE throttled
+	// op at dispatch stage 0 (a chunked upload is a SINGLE op, not one op per
+	// chunk frame — so a large file would NOT generate the burst). The pressure
+	// comes from issuing N=6 SEPARATE small writes as fast as possible: that, plus
+	// the per-write VFS dir-stat the open-create path issues, blows past the 2/2
+	// bucket and forces resource_exhausted on the over-budget ops. The setup mkdir
+	// (plus its parent-dir list) must fit the burst budget and succeed first.
+	t.Run("12_throttle_retry_no_loss", func(t *testing.T) {
+		if env.throttleMount == "" {
+			if allowPartial() {
+				t.Skipf("%s unset and partial mode explicitly opted into via %s — "+
+					"skipping the SC2 throttle-no-data-loss assertion; the throttle is "+
+					"broker-driven via daemon flags and the guest never simulates it "+
+					"(SEC-46)", envThrottleMount, envAllowPartial)
+			}
+			t.Fatalf("%s is required under the live gate (%s): it names a mount of the "+
+				"broker-throttled scope so the SC2 throttle-no-data-loss assertion drives "+
+				"a real over-budget burst; set %s=1 only to opt into a partial run on "+
+				"purpose", envThrottleMount, envGate, envAllowPartial)
+		}
+
+		// Setup: the working subtree must exist under the downloadable prefix on
+		// the throttled scope before the burst writes into it. This single mkdir
+		// (and its parent-dir list) must fit inside the broker's burst budget and
+		// succeed — it is NOT part of the throttle proof. VFS Mkdir is not retried
+		// by the pacer, so if setup were throttled it would surface EIO here.
+		throttleBase := filepath.Join(env.throttleMount, e2eDirName)
+		if err := os.Mkdir(throttleBase, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			t.Fatalf("create throttle working directory %q: %v", throttleBase, err)
+		}
+
+		// Fire a burst of N separate small writes as fast as possible. Each
+		// os.WriteFile is its own single-op fileUpload (the 4 KiB payload stays
+		// well under the ~4 MiB RPC ceiling so it is exactly one op, keeping the op
+		// accounting clean). Issued back-to-back in well under a second, the burst
+		// blows past the 2/2 bucket: the broker refuses the over-budget ops with
+		// the throttle / resource_exhausted class. A refused metadata op (the
+		// dir-stat the open-create path issues) surfaces EIO straight to the
+		// WriteFile here — that is the EXPECTED throttle signal, not a bug.
+		const burstWrites = 6
+		const throttlePayloadSize = 4 << 10 // 4 KiB: small, single-op, fast.
+		// throttleBackoff lets the 2/s token bucket refill before a caller retry;
+		// at 2 ops/s a single token returns in ~500ms, so 600ms clears it with a
+		// margin. This is the CALLER backing off (SEC-46), not a pacer guarantee.
+		const throttleBackoff = 600 * time.Millisecond
+		type throttledFile struct {
+			scopeRelPath string
+			data         []byte
+		}
+		written := make([]throttledFile, 0, burstWrites)
+		// recoveredAfterThrottle records whether at least one write FAILED under
+		// the burst and then SUCCEEDED after the caller backed off. That
+		// fail-then-recover-on-backoff pattern is the throttle discriminator: the
+		// per-session ops/s ceiling refuses an over-budget op (surfacing an opaque
+		// EIO at the FUSE syscall boundary — the broker's resource_exhausted text
+		// stays in its stderr slog and does not cross the kernel, and this ceiling
+		// denies before the audit stage so it is not in the audit sink either), but
+		// the op SUCCEEDS once a token refills. A genuine, unrelated fault would NOT
+		// be cured by waiting — it would keep failing to settleTimeout and fatal
+		// below — so recovery-after-backoff cannot be a non-throttle EIO in
+		// disguise. If NO write ever has to recover, the bucket was too loose and
+		// SC2 proved nothing, so the test fails at the end.
+		recoveredAfterThrottle := false
+		deadline := time.Now().Add(settleTimeout)
+		for i := 0; i < burstWrites; i++ {
+			nonce := make([]byte, 16)
+			if _, err := rand.Read(nonce); err != nil {
+				t.Fatalf("generate throttle burst nonce %d: %v", i, err)
+			}
+			name := "throttled-" + hex.EncodeToString(nonce) + ".bin"
+			data := make([]byte, throttlePayloadSize)
+			if _, err := rand.Read(data); err != nil {
+				t.Fatalf("generate throttle burst payload %d: %v", i, err)
+			}
+			path := filepath.Join(throttleBase, name)
+
+			// Write with caller-side back-off-and-retry. A throttled op EIOs here;
+			// per SEC-46 retrying it is the CALLER's job, so the TEST sleeps for the
+			// bucket to refill and tries the SAME write again, bounded by
+			// settleTimeout. (b) below asserts the recovered write is byte-identical
+			// broker-side — eventual success; the broker's no-partial-stage
+			// atomicity is its own property, not something this guest read proves.
+			failedAtLeastOnce := false
+			for {
+				err := os.WriteFile(path, data, 0o644)
+				if err == nil {
+					if failedAtLeastOnce {
+						// Failed under the burst with EIO, then succeeded after
+						// backoff: the signature of a per-session throttle clearing on
+						// refill (see the errno discrimination below).
+						recoveredAfterThrottle = true
+					}
+					break
+				}
+				// Discriminate the refusal by errno. The per-session ops/s ceiling
+				// surfaces at the FUSE syscall boundary as EIO (the broker's
+				// resource_exhausted text stays in its stderr slog and never crosses
+				// the kernel). Any OTHER errno — EROFS, ENOSPC, EACCES — is NOT a
+				// throttle and fails the test immediately, so a real data-path
+				// regression can never masquerade as "throttle observed". Only EIO
+				// is eligible for the back-off-and-retry recovery path.
+				if !errors.Is(err, syscall.EIO) {
+					t.Fatalf("throttle burst write %d (%q) failed with a non-EIO error, "+
+						"which is not the per-session throttle signal (a throttle surfaces as "+
+						"EIO at the FUSE boundary); this is a real fault, not backpressure: %v",
+						i, name, err)
+				}
+				failedAtLeastOnce = true
+				if time.Now().After(deadline) {
+					t.Fatalf("throttle burst write %d (%q) never recovered within %s: "+
+						"the caller retried on backoff but the write kept failing with EIO, so "+
+						"this is not a transient throttle but a stuck fault: %v",
+						i, name, settleTimeout, err)
+				}
+				// Back off so the token bucket refills, then retry the same write.
+				// Recovery is the caller's responsibility under SEC-46, not the
+				// guest pacer's: metadata ops are not retried by the pacer.
+				t.Logf("throttle burst write %d (%q) refused with EIO (expected under the "+
+					"per-op ceiling); backing off %s and retrying: %v",
+					i, name, throttleBackoff, err)
+				time.Sleep(throttleBackoff)
+			}
+			written = append(written, throttledFile{scopeRelPath: scopeRel(name), data: data})
+		}
+
+		// (a) The throttle MUST have fired AND been recovered from. At least one
+		// write had to be refused under the burst and then succeed after the
+		// caller backed off. If nothing ever had to recover, the bucket was too
+		// loose and this step did not exercise SC2 at all — fail rather than pass a
+		// test that proved nothing. (A persistent non-throttle fault cannot reach
+		// here: it would have fatalled in the retry loop above on settleTimeout.)
+		if !recoveredAfterThrottle {
+			t.Fatalf("no write was refused-then-recovered across %d back-to-back writes "+
+				"against the throttled scope: the per-session ceiling (ops-per-second 2 / "+
+				"burst 2) was too loose to exercise SC2 — the throttle never fired, so this "+
+				"step proved nothing", burstWrites)
+		}
+
+		// (b) RECOVERY LANDED BYTE-IDENTICAL (eventual success): every write that
+		// recovered to success is byte-identical broker-side. This proves the
+		// recovered object is whole; it does not by itself prove mid-throttle
+		// atomicity (a partial stage would be overwritten by the clean retry and
+		// still hash-match — that no-partial-stage property is the broker's).
+		// Fail-closed like the rw workspace.
+		for i, f := range written {
+			t.Logf("asserting throttle burst write %d/%d recovered byte-identical: %s",
+				i+1, burstWrites, f.scopeRelPath)
+			assertBrokerThrottlePersisted(t, env, f.scopeRelPath, f.data)
 		}
 	})
 
 	// Step 10 — graceful teardown: SIGTERM the running mount process; every
 	// mountpoint unmounts and the ready-file is gone afterward. This step targets
 	// the process the harness runs; the PID and ready-file come from the harness.
+	// It is declared last so the data-path proofs (steps 11 and 12) run while the
+	// mounts are live; the teardown then verifies the process exits cleanly.
 	t.Run("10_sigterm_teardown", func(t *testing.T) {
 		// 05-02: the harness exports the mount process PID and the ready-file
 		// path; on the live host this signals the process and asserts teardown.
@@ -447,9 +714,46 @@ func assertBrokerPersisted(t *testing.T, env liveEnv, relPath string, want []byt
 			"set %s=1 only to opt into a partial run on purpose",
 			envBrokerRWWorkspace, envGate, envAllowPartial)
 	}
+	assertWorkspaceHasBytes(t, env.brokerRWWorkspace, relPath, want)
+}
 
+// assertBrokerThrottlePersisted is the throttle-scope analogue of
+// assertBrokerPersisted: it proves the throttled write reached the throttle
+// broker's engine-root workspace byte-identical AFTER the pacer's retries, so
+// the SC2 proof is "a throttled write still lands without loss" rather than
+// "the gate fails closed". It is fail-closed under the live gate on the same
+// terms — a missing workspace env fatals unless a partial run was explicitly
+// opted into. relPath maps 1:1 to the path under the throttle workspace root.
+func assertBrokerThrottlePersisted(t *testing.T, env liveEnv, relPath string, want []byte) {
+	t.Helper()
+	if env.brokerThrottleWorkspace == "" {
+		if allowPartial() {
+			t.Logf("%s unset and partial mode explicitly opted into via %s — "+
+				"skipping the throttle-scope persistence assertion for %q (the FUSE "+
+				"read-back alone does not prove the throttled upload reached the broker)",
+				envBrokerThrottleWorkspace, envAllowPartial, relPath)
+			return
+		}
+		t.Fatalf("%s is required under the live gate (%s): it names the throttle "+
+			"broker's engine-root workspace (mounted read-only into the runner) so the "+
+			"SC2 step asserts the throttled, retried write landed byte-identical broker-"+
+			"side, not just in the local VFS cache; set %s=1 only to opt into a partial "+
+			"run on purpose", envBrokerThrottleWorkspace, envGate, envAllowPartial)
+	}
+	assertWorkspaceHasBytes(t, env.brokerThrottleWorkspace, relPath, want)
+}
+
+// assertWorkspaceHasBytes polls the file at relPath under a broker engine-root
+// workspace (mounted read-only into the runner) until its content hashes
+// byte-identical to want or the settle timeout elapses. Reading the workspace
+// volume directly — never the FUSE mount — is what makes the assertion prove
+// the broker data path: a FUSE read-back can be served from the local VFS
+// write-back cache without any upload ever reaching the broker. The poll
+// tolerates the asynchronous write-back delay before the bytes appear.
+func assertWorkspaceHasBytes(t *testing.T, workspace, relPath string, want []byte) {
+	t.Helper()
 	wantSum := sha256.Sum256(want)
-	brokerPath := filepath.Join(env.brokerRWWorkspace, filepath.FromSlash(relPath))
+	brokerPath := filepath.Join(workspace, filepath.FromSlash(relPath))
 	deadline := time.Now().Add(settleTimeout)
 	var lastErr error
 	var lastLen int

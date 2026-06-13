@@ -13,7 +13,7 @@ file operations through the FUSE mount path.
   the sibling public repo
   [github.com/Wide-Moat/ocu-filestore](https://github.com/Wide-Moat/ocu-filestore),
   built by `broker.Dockerfile` via a clone-at-ref builder pinned by the
-  `BROKER_REF` build-arg (default `b31673f`). The broker binds exactly one
+  `BROKER_REF` build-arg (default `c0a817b`). The broker binds exactly one
   session socket per filesystem scope, named `<filesystem_id>.sock` under its
   session socket directory, so the harness runs one instance per filesystem:
   `broker-rw` serves `fsrw` with `read,write` intents; `broker-ro` serves

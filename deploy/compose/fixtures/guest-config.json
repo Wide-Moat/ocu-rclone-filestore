@@ -11,6 +11,26 @@
       "vfs_cache_max_size": "1G",
       "dir_perms": "0755",
       "file_perms": "0644"
+    },
+    {
+      "destination": "/workspace/out2",
+      "filesystem_id": "fsrw",
+      "writes": true,
+      "vfs_cache_mode": "writes",
+      "cache_duration_s": 3600,
+      "vfs_cache_max_size": "1G",
+      "dir_perms": "0755",
+      "file_perms": "0644"
+    },
+    {
+      "destination": "/workspace/throttle",
+      "filesystem_id": "fsthrottle",
+      "writes": true,
+      "vfs_cache_mode": "writes",
+      "cache_duration_s": 3600,
+      "vfs_cache_max_size": "1G",
+      "dir_perms": "0755",
+      "file_perms": "0644"
     }
   ],
   "readonly_mounts": [
