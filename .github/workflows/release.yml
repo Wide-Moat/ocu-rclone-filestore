@@ -139,8 +139,13 @@ jobs:
       # ambient ACTIONS_ID_TOKEN_REQUEST_URL/_TOKEN (present because id-token:
       # write is on this job), exchanges the GitHub OIDC token at Fulcio for a
       # short-lived cert bound to this workflow identity, and records the
-      # signature in the Rekor transparency log. Emits a .sig + .pem per file.
-      # sign-blob (not sign) is correct: these are blobs, not OCI images.
+      # signature in the Rekor transparency log. cosign v3 defaults sign-blob to
+      # the new bundle format, which requires --bundle (the legacy split
+      # --output-signature/--output-certificate is rejected under that default).
+      # Emit one self-contained .cosign.bundle per file (signature + cert +
+      # inclusion proof in one verifiable artifact) — the same convention the
+      # broker release publishes. sign-blob (not sign) is correct: these are
+      # blobs, not OCI images.
       - name: Sign release artifacts (keyless)
         env:
           COSIGN_YES: "true"
@@ -166,8 +171,7 @@ jobs:
           files=( "${archives[@]}" "${sboms[@]}" dist/checksums.txt )
           for f in "${files[@]}"; do
             cosign sign-blob --yes \
-              --output-signature "${f}.sig" \
-              --output-certificate "${f}.pem" \
+              --bundle "${f}.cosign.bundle" \
               "${f}"
           done
 
@@ -183,21 +187,22 @@ jobs:
         with:
           subject-checksums: dist/checksums.txt
 
-      # Native runner step: attach the cosign sidecars to the Release that
+      # Native runner step: attach the cosign bundles to the Release that
       # goreleaser created on this tag. goreleaser uploads only its own
-      # artifacts; the .sig/.pem are produced after it runs.
+      # artifacts; the .cosign.bundle files are produced after it runs. One
+      # bundle per signed file (archives, SBOMs, checksums.txt).
       - name: Attach signatures to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           shopt -s nullglob
-          sidecars=( dist/*.sig dist/*.pem )
-          if [ ${#sidecars[@]} -eq 0 ]; then
-            echo "::error::no signature sidecars to upload"
+          bundles=( dist/*.cosign.bundle )
+          if [ ${#bundles[@]} -eq 0 ]; then
+            echo "::error::no cosign bundles to upload"
             exit 1
           fi
-          gh release upload "${GITHUB_REF_NAME}" "${sidecars[@]}" --clobber
+          gh release upload "${GITHUB_REF_NAME}" "${bundles[@]}" --clobber
 
       # FINAL STEP — fail-closed publish. goreleaser created the release as a
       # draft; it becomes public ONLY here, after signing, provenance, and the
