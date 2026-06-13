@@ -39,6 +39,14 @@ rules:
   # automated commit.
   subject-case:
     - 0
+  # Do not constrain body line length. config-conventional defaults to 100
+  # chars, which rejects bot-authored commits whose body is auto-generated
+  # release notes — Dependabot embeds long changelog URLs and bullet lines that
+  # exceed 100 and cannot be reflowed. The HEADER length is still capped below;
+  # the body is informational, so disable the body line cap rather than reject
+  # every dependency-update commit.
+  body-max-line-length:
+    - 0
   # Keep the header readable.
   header-max-length:
     - 2
