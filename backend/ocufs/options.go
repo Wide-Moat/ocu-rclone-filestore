@@ -3,7 +3,25 @@
 
 package ocufs
 
-import "github.com/rclone/rclone/fs"
+import (
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/lib/encoder"
+)
+
+// defaultEncoding is the path encoding the backend applies on the wire. The
+// broker addresses objects by an absolute "/"-separated path and uses "/" as
+// the only separator, so paths must round-trip every other byte unchanged.
+// We encode the bytes that are unsafe or ambiguous in a path component —
+// control characters, an invalid-UTF-8 byte sequence, and the trailing
+// space/dot that some path consumers strip — so a file whose name contains
+// them is stored and retrieved losslessly. "/" itself is NOT encoded: it is
+// the structural separator and the broker expects it literally.
+const defaultEncoding = encoder.EncodeCtl |
+	encoder.EncodeInvalidUtf8 |
+	encoder.EncodeBackSlash |
+	encoder.EncodeDoubleQuote |
+	encoder.EncodeRightSpace |
+	encoder.EncodeRightPeriod
 
 // Options carries the per-mount configuration for the ocufs backend. Fields
 // are populated by configstruct.Set from the configmap supplied to NewFs.
@@ -30,6 +48,12 @@ type Options struct {
 	// scope carried on every broker request; the guest never derives scope
 	// from a uuid (D7). Required.
 	FilesystemID string `config:"filesystem_id"`
+
+	// Enc is the path encoding applied on the wire so file names containing
+	// control characters, invalid UTF-8, or trailing space/period round-trip
+	// losslessly through the broker (defaultEncoding). Standard rclone backend
+	// option; rarely overridden.
+	Enc encoder.MultiEncoder `config:"encoding"`
 }
 
 // fsOptions is the fs.Options slice declared in the RegInfo. configstruct.Set
@@ -52,5 +76,11 @@ var fsOptions = fs.Options{
 		Help:     "Session-scoped filesystem identifier carried on every broker request.",
 		Default:  "",
 		Required: true,
+	},
+	{
+		Name:     "encoding",
+		Help:     "The encoding for the backend. Encodes path bytes that are unsafe or ambiguous (control chars, invalid UTF-8, trailing space/period) so file names round-trip losslessly through the broker.",
+		Default:  defaultEncoding,
+		Advanced: true,
 	},
 }

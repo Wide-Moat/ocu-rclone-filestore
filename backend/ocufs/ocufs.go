@@ -30,6 +30,7 @@ import (
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/lib/encoder"
 )
 
 // regInfo is the package-level RegInfo registered with rclone's registry.
@@ -51,6 +52,7 @@ type Fs struct {
 	root     string
 	client   brokerClient
 	readOnly bool
+	enc      encoder.MultiEncoder
 }
 
 // NewFs constructs an Fs from the provided config. It validates that the
@@ -83,6 +85,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		root:     root,
 		client:   newBrokerClientAdapter(c),
 		readOnly: opts.ReadOnly,
+		enc:      opts.Enc,
 	}, nil
 }
 
@@ -149,16 +152,24 @@ func (f *Fs) Features() *fs.Features {
 //     from the FilesystemFile (uuid+size+mime+mtime). No ReadMetadata needed.
 //   - directory arm (entry.Directory != nil): fs.NewDir(remote, mtime).
 func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
-	absPath := absPath(f.root, dir)
+	dirPath := f.absPath(dir)
 
-	all, err := f.client.ListDirectoryAll(ctx, absPath)
+	all, err := f.client.ListDirectoryAll(ctx, dirPath)
 	if err != nil {
-		return nil, fmt.Errorf("ocufs: List %q: %w", absPath, err)
+		// rclone's List contract: listing a directory that does not exist must
+		// return fs.ErrorDirNotFound, so the VFS can distinguish a missing
+		// directory from a transport failure. The broker reports a missing path
+		// with not_found; map it to the typed sentinel (mirrors NewObject's
+		// not_found → fs.ErrorObjectNotFound mapping).
+		if errors.Is(err, brokerrpc.ErrNotFound) {
+			return nil, fs.ErrorDirNotFound
+		}
+		return nil, fmt.Errorf("ocufs: List %q: %w", dirPath, err)
 	}
 
 	var entries fs.DirEntries
 	for _, entry := range all {
-		remote, ok := immediateChildRemote(f.root, dir, entry)
+		remote, ok := f.immediateChildRemote(dir, entry)
 		if !ok {
 			continue // deeper descendant — filtered per design decision 6
 		}
@@ -187,7 +198,7 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 //   - fs.ErrorObjectNotFound when neither arm is populated or when the broker
 //     returns not_found.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
-	p := absPath(f.root, remote)
+	p := f.absPath(remote)
 	resp, err := f.client.ReadMetadata(ctx, p)
 	if err != nil {
 		if errors.Is(err, brokerrpc.ErrNotFound) {
@@ -233,7 +244,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	if f.readOnly {
 		return nil, fs.ErrorPermissionDenied
 	}
-	dstPath := absPath(f.root, src.Remote())
+	dstPath := f.absPath(src.Remote())
 	// overwrite=false: Put is the create-new write path, so a colliding
 	// destination is a conflict rather than a silent in-place replacement.
 	if err := f.client.Upload(ctx, dstPath, in, src.Size(), false); err != nil {
@@ -257,7 +268,7 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 	if f.readOnly {
 		return fs.ErrorPermissionDenied
 	}
-	p := absPath(f.root, dir)
+	p := f.absPath(dir)
 	_, err := f.client.MakeDirectory(ctx, p)
 	if err != nil {
 		// rclone's Mkdir contract is idempotent: creating a directory that
@@ -279,7 +290,7 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 	if f.readOnly {
 		return fs.ErrorPermissionDenied
 	}
-	p := absPath(f.root, dir)
+	p := f.absPath(dir)
 	_, err := f.client.RemoveDirectory(ctx, p)
 	if err != nil {
 		return fmt.Errorf("ocufs: Rmdir %q: %w", p, err)
@@ -291,13 +302,17 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 // Path helpers
 // ---------------------------------------------------------------------------
 
-// absPath joins the Fs root with a relative path, returning a clean absolute
-// broker path. An empty rel is the root itself.
-func absPath(root, rel string) string {
-	if rel == "" {
-		return cleanPath(root)
+// absPath joins the Fs root with an rclone-relative path and returns the clean
+// absolute path the broker addresses. The rclone-side path is in standard
+// encoding; FromStandardPath maps it to the on-wire encoding so a name with
+// control characters, invalid UTF-8, or trailing space/period round-trips
+// losslessly (the "/" separator is preserved). An empty rel is the root.
+func (f *Fs) absPath(rel string) string {
+	std := f.root
+	if rel != "" {
+		std = path.Join(f.root, rel)
 	}
-	return cleanPath(path.Join(root, rel))
+	return cleanPath(f.enc.FromStandardPath(std))
 }
 
 // cleanPath ensures the path begins with "/" and has no trailing slash
@@ -308,10 +323,12 @@ func cleanPath(p string) string {
 }
 
 // immediateChildRemote returns the rclone remote string for an entry if the
-// entry is an immediate child of dir under root, and false otherwise. This
-// is the depth-1 filter implementing design decision 6: List must return
-// only entries that are exactly one path segment below dir.
-func immediateChildRemote(root, dir string, entry brokerrpc.ListDirEntry) (string, bool) {
+// entry is an immediate child of dir under the Fs root, and false otherwise.
+// This is the depth-1 filter implementing design decision 6: List must return
+// only entries that are exactly one path segment below dir. The broker entry
+// path is on-wire encoded; the returned remote is decoded back to standard
+// encoding (ToStandardPath) so rclone sees the original file name.
+func (f *Fs) immediateChildRemote(dir string, entry brokerrpc.ListDirEntry) (string, bool) {
 	var entryPath string
 	switch {
 	case entry.File != nil:
@@ -322,7 +339,7 @@ func immediateChildRemote(root, dir string, entry brokerrpc.ListDirEntry) (strin
 		return "", false
 	}
 	entryPath = cleanPath(entryPath)
-	parentPath := absPath(root, dir)
+	parentPath := f.absPath(dir)
 
 	// The entry must sit directly below parentPath.
 	if !strings.HasPrefix(entryPath, parentPath+"/") {
@@ -340,6 +357,9 @@ func immediateChildRemote(root, dir string, entry brokerrpc.ListDirEntry) (strin
 	if strings.Contains(rel, "/") {
 		return "", false
 	}
+
+	// Decode the on-wire segment back to standard encoding for the rclone remote.
+	rel = f.enc.ToStandardPath(rel)
 
 	// Build the rclone remote: dir/name (or just name at the root).
 	if dir == "" {

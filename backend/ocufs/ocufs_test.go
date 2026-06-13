@@ -204,6 +204,7 @@ func newTestFs(t *testing.T, c *fakeClient, readOnly bool) *Fs {
 		root:     "/",
 		client:   c,
 		readOnly: readOnly,
+		enc:      defaultEncoding,
 	}
 }
 
@@ -1005,13 +1006,13 @@ func TestParseMtimeFallbacks(t *testing.T) {
 // TestImmediateChildRemoteRootPath verifies that entries at the root level
 // (parentPath = "/") are accepted as immediate children.
 func TestImmediateChildRemoteRootPath(t *testing.T) {
-	root := "/"
+	f := newTestFs(t, &fakeClient{}, false) // root "/"
 	dir := ""
 
 	fileEntry := brokerrpc.ListDirEntry{
 		File: &brokerrpc.FilesystemFile{Path: "/file.txt"},
 	}
-	remote, ok := immediateChildRemote(root, dir, fileEntry)
+	remote, ok := f.immediateChildRemote(dir, fileEntry)
 	if !ok {
 		t.Fatal("immediateChildRemote for root-level file returned false, want true")
 	}
@@ -1023,7 +1024,7 @@ func TestImmediateChildRemoteRootPath(t *testing.T) {
 	deepEntry := brokerrpc.ListDirEntry{
 		File: &brokerrpc.FilesystemFile{Path: "/a/b/file.txt"},
 	}
-	_, ok = immediateChildRemote(root, dir, deepEntry)
+	_, ok = f.immediateChildRemote(dir, deepEntry)
 	if ok {
 		t.Error("immediateChildRemote for deeply nested path returned true, want false")
 	}
@@ -1044,16 +1045,58 @@ func TestListPathErrorPropagated(t *testing.T) {
 	}
 }
 
-// TestAbsPathHelper exercises absPath with edge cases.
+// TestAbsPathHelper exercises (*Fs).absPath with edge cases.
 func TestAbsPathHelper(t *testing.T) {
-	if got := absPath("/root", "sub"); got != "/root/sub" {
-		t.Errorf("absPath(\"/root\", \"sub\") = %q, want %q", got, "/root/sub")
+	mk := func(root string) *Fs {
+		return &Fs{name: "ocufs", root: root, client: &fakeClient{}, enc: defaultEncoding}
 	}
-	if got := absPath("/root", ""); got != "/root" {
-		t.Errorf("absPath(\"/root\", \"\") = %q, want %q", got, "/root")
+	if got := mk("/root").absPath("sub"); got != "/root/sub" {
+		t.Errorf("absPath(root=/root, \"sub\") = %q, want %q", got, "/root/sub")
 	}
-	if got := absPath("/", ""); got != "/" {
-		t.Errorf("absPath(\"/\", \"\") = %q, want %q", got, "/")
+	if got := mk("/root").absPath(""); got != "/root" {
+		t.Errorf("absPath(root=/root, \"\") = %q, want %q", got, "/root")
+	}
+	if got := mk("/").absPath(""); got != "/" {
+		t.Errorf("absPath(root=/, \"\") = %q, want %q", got, "/")
+	}
+}
+
+// TestPathEncodingRoundTrip verifies that the backend encoder maps an
+// rclone-standard path with bytes that are unsafe on the wire (a control char,
+// a trailing space) to an encoded outbound broker path, and decodes a matching
+// broker listing entry back to the original rclone remote — so such names
+// round-trip losslessly (conformance finding #3). The "/" separator is never
+// encoded.
+func TestPathEncodingRoundTrip(t *testing.T) {
+	f := newTestFs(t, &fakeClient{}, false) // root "/", enc=defaultEncoding
+
+	// A leaf name with a trailing space (EncodeRightSpace) under a normal dir.
+	const dir = "d"
+	const leaf = "name " // trailing space
+	std := dir + "/" + leaf
+
+	// Outbound: the standard path encodes to a broker path that does NOT carry
+	// the raw trailing space, and the "/" separator is preserved.
+	enc := f.absPath(std)
+	if !strings.HasPrefix(enc, "/d/") {
+		t.Fatalf("absPath(%q) = %q; separator/dir not preserved", std, enc)
+	}
+	if strings.HasSuffix(enc, " ") {
+		t.Errorf("absPath(%q) = %q; raw trailing space not encoded", std, enc)
+	}
+
+	// Inbound: a listing entry at that encoded broker path decodes back to the
+	// original leaf as the rclone remote.
+	encLeaf := strings.TrimPrefix(enc, "/d/")
+	entry := brokerrpc.ListDirEntry{
+		File: &brokerrpc.FilesystemFile{Path: "/d/" + encLeaf},
+	}
+	remote, ok := f.immediateChildRemote(dir, entry)
+	if !ok {
+		t.Fatalf("immediateChildRemote did not accept the encoded child %q", encLeaf)
+	}
+	if want := dir + "/" + leaf; remote != want {
+		t.Errorf("decoded remote = %q, want %q (lossless round-trip)", remote, want)
 	}
 }
 
