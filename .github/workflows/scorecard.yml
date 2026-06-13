@@ -37,6 +37,13 @@ jobs:
           results_file: results.sarif
           results_format: sarif
           publish_results: true   # required for the public badge
+          # The default GITHUB_TOKEN cannot read branch-protection rules, so the
+          # Branch-Protection check errors out (scores -1) even though protection
+          # is configured. A fine-grained PAT with administration:read, stored as
+          # the SCORECARD_TOKEN secret, lets the check read the rules. The
+          # fallback to github.token keeps the scan working when the secret is
+          # absent (Branch-Protection simply stays unread until the PAT is set).
+          repo_token: ${{ secrets.SCORECARD_TOKEN || github.token }}
 
       - name: Upload SARIF to the Security tab
         uses: github/codeql-action/upload-sarif@181d5eefc20863364f96762470ba6f862bdef56b # v3.29.2
