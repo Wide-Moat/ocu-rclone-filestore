@@ -85,6 +85,15 @@ jobs:
       - name: Check FSL headers
         run: bash scripts/check-fsl-headers.sh
 
+  doc-contacts:
+    name: documentation contact-address gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Check documentation contact address
+        run: bash scripts/check-doc-contacts.sh
+
   # WR-03: probe whether the hosted runner grants /dev/fuse to a container
   # running with the same device/capability pattern the e2e harness uses.
   # This job is INFORMATIONAL — it records the placement evidence in the job
