@@ -73,10 +73,10 @@ gh attestation verify ocu-rclone-filestore_<ver>_linux_amd64.tar.gz \
 
 # 2. Keyless signature of the checksums file (the workflow's OIDC identity is
 #    the trust anchor; --certificate-identity-regexp pins the release workflow
-#    on a tag ref):
+#    on a tag ref). The signature, certificate, and inclusion proof are carried
+#    in one self-contained .cosign.bundle per file:
 cosign verify-blob \
-  --certificate checksums.txt.pem \
-  --signature  checksums.txt.sig \
+  --bundle checksums.txt.cosign.bundle \
   --certificate-identity-regexp \
     '^https://github.com/Wide-Moat/ocu-rclone-filestore/\.github/workflows/release\.yml@refs/tags/v.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
