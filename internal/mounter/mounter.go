@@ -130,3 +130,21 @@ func New(opts ...Option) Mounter {
 	}
 	return m
 }
+
+// AppliedSockets applies the given functional options to a fresh mounter and
+// reports the resolved broker socket inputs: the single per-session socket
+// (WithBrokerSocket) and the per-session socket directory (WithBrokerSocketDir).
+//
+// It exists so the entrypoint's option-assembly adapter is assertable across the
+// package boundary — that the resolved single-socket value reaches the socket
+// field and the directory value reaches the directory field, neither dropped nor
+// transposed — without constructing a live mount. It applies the options exactly
+// as New does and reads back only the two socket fields; it has no production
+// caller.
+func AppliedSockets(opts ...Option) (brokerSocket, brokerSocketDir string) {
+	var m orchestratorMounter
+	for _, opt := range opts {
+		opt(&m)
+	}
+	return m.brokerSocketPath, m.brokerSocketDirPath
+}

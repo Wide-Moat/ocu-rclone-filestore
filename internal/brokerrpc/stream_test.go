@@ -84,26 +84,53 @@ func TestReadFrameRejectsOversizedLength(t *testing.T) {
 	}
 }
 
-// TestReadFrameAcceptsLengthAtCap verifies the boundary: a length exactly at
-// maxInboundFrame is allowed (the guard rejects strictly greater).
+// TestReadFrameAcceptsLengthAtCap pins the inclusive upper boundary of the
+// inbound-frame size guard: a frame whose declared length is exactly
+// maxInboundFrame (4 MiB) must be ACCEPTED, while a declared length of
+// maxInboundFrame+1 must be REJECTED. The guard is `length > maxInboundFrame`,
+// so the cap value itself passes; were it `>=` (off-by-one) the at-cap frame
+// would be wrongly rejected. The test supplies the full at-cap payload so the
+// guard is exercised against a real read, not a short body that would mask a
+// `>=` regression behind an EOF.
 func TestReadFrameAcceptsLengthAtCap(t *testing.T) {
-	payload := []byte(`{"ok":1}`)
+	// Exactly at the cap: must be accepted and round-trip byte-for-byte.
+	atCap := bytes.Repeat([]byte{0xAB}, maxInboundFrame)
+	if uint32(len(atCap)) != maxInboundFrame {
+		t.Fatalf("fixture size %d != maxInboundFrame %d", len(atCap), maxInboundFrame)
+	}
 	var buf bytes.Buffer
 	header := make([]byte, frameHeaderLen)
 	header[0] = 0x00
-	// Declare a length within the cap but only supply the small payload; the
-	// guard must pass and the read should proceed (and then hit EOF on the
-	// short body, which is a read error, not the size guard).
-	binary.BigEndian.PutUint32(header[1:5], uint32(len(payload)))
+	binary.BigEndian.PutUint32(header[1:5], maxInboundFrame)
 	buf.Write(header)
-	buf.Write(payload)
+	buf.Write(atCap)
 
 	flag, got, err := readFrame(&buf)
 	if err != nil {
-		t.Fatalf("readFrame at sane length: %v", err)
+		t.Fatalf("frame declaring length == maxInboundFrame must be accepted, got: %v", err)
 	}
-	if flag != 0x00 || !bytes.Equal(got, payload) {
-		t.Errorf("round trip mismatch: flag %02x payload %q", flag, got)
+	if flag != 0x00 {
+		t.Errorf("flag: got %02x, want 00", flag)
+	}
+	if uint32(len(got)) != maxInboundFrame {
+		t.Fatalf("payload length: got %d, want %d", len(got), maxInboundFrame)
+	}
+	if !bytes.Equal(got, atCap) {
+		t.Error("at-cap payload did not round-trip byte-for-byte")
+	}
+
+	// One byte over the cap: must be rejected by the size guard before any
+	// payload read. This is the negative half of the boundary; together with the
+	// accept case above it pins `>` (correct) against `>=` (off-by-one).
+	var overBuf bytes.Buffer
+	overHeader := make([]byte, frameHeaderLen)
+	overHeader[0] = 0x00
+	binary.BigEndian.PutUint32(overHeader[1:5], maxInboundFrame+1)
+	overBuf.Write(overHeader)
+	// No payload bytes follow; the guard must trip before the payload read.
+
+	if _, _, err := readFrame(&overBuf); err == nil {
+		t.Fatal("frame declaring length == maxInboundFrame+1 must be rejected, got nil error")
 	}
 }
 

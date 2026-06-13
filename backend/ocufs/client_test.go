@@ -129,27 +129,79 @@ func TestAdapterUploadForwards(t *testing.T) {
 	}
 }
 
-// TestAdapterCopyFileForwards confirms CopyFile forwards and decodes the ack.
+// newCapturingAdapterOverFakeBroker constructs a production brokerClientAdapter
+// wired to a capturing fake broker, returning the adapter and the capture handle
+// so a test can assert which path reached which wire slot for the two-path ops.
+func newCapturingAdapterOverFakeBroker(t *testing.T) (brokerClient, *capturingBroker) {
+	t.Helper()
+	sock, cap := startCapturingFakeBroker(t)
+	c, err := brokerrpc.New(sock, "fs-adapter-cap-test")
+	if err != nil {
+		t.Fatalf("brokerrpc.New(%q): %v", sock, err)
+	}
+	return newBrokerClientAdapter(c), cap
+}
+
+// TestAdapterCopyFileForwards confirms CopyFile forwards, decodes the ack, AND
+// that the distinct source and destination land in their correct wire slots —
+// source in `source`, destination in `destination`, not transposed. The
+// capturing broker decodes the request body the client marshalled so a slot
+// swap in the client-to-wire mapping is caught, not silently passed.
 func TestAdapterCopyFileForwards(t *testing.T) {
-	a := newAdapterOverFakeBroker(t)
-	ack, err := a.CopyFile(context.Background(), "/src.txt", "/dst.txt")
+	a, cap := newCapturingAdapterOverFakeBroker(t)
+	const (
+		src = "/copy/source.txt"
+		dst = "/copy/destination.txt"
+	)
+	ack, err := a.CopyFile(context.Background(), src, dst)
 	if err != nil {
 		t.Fatalf("CopyFile: %v", err)
 	}
 	if ack == nil {
 		t.Fatal("CopyFile returned nil ack")
 	}
+	if n := cap.callCount("copyFile"); n != 1 {
+		t.Fatalf("copyFile reached the broker %d times, want exactly 1", n)
+	}
+	body, ok := cap.lastTwoPath("copyFile")
+	if !ok {
+		t.Fatal("copyFile never reached the broker; want one captured request")
+	}
+	if body.Source != src {
+		t.Errorf("copyFile wire source = %q, want %q (source must land in the source slot)", body.Source, src)
+	}
+	if body.Destination != dst {
+		t.Errorf("copyFile wire destination = %q, want %q (destination must land in the destination slot, not transposed with source)", body.Destination, dst)
+	}
 }
 
-// TestAdapterMoveFileForwards confirms MoveFile forwards and decodes the ack.
+// TestAdapterMoveFileForwards confirms MoveFile forwards, decodes the ack, and
+// that source and destination reach the correct wire slots without transposition.
 func TestAdapterMoveFileForwards(t *testing.T) {
-	a := newAdapterOverFakeBroker(t)
-	ack, err := a.MoveFile(context.Background(), "/src.txt", "/dst.txt")
+	a, cap := newCapturingAdapterOverFakeBroker(t)
+	const (
+		src = "/move/source.txt"
+		dst = "/move/destination.txt"
+	)
+	ack, err := a.MoveFile(context.Background(), src, dst)
 	if err != nil {
 		t.Fatalf("MoveFile: %v", err)
 	}
 	if ack == nil {
 		t.Fatal("MoveFile returned nil ack")
+	}
+	if n := cap.callCount("moveFile"); n != 1 {
+		t.Fatalf("moveFile reached the broker %d times, want exactly 1", n)
+	}
+	body, ok := cap.lastTwoPath("moveFile")
+	if !ok {
+		t.Fatal("moveFile never reached the broker; want one captured request")
+	}
+	if body.Source != src {
+		t.Errorf("moveFile wire source = %q, want %q (source must land in the source slot)", body.Source, src)
+	}
+	if body.Destination != dst {
+		t.Errorf("moveFile wire destination = %q, want %q (destination must land in the destination slot, not transposed with source)", body.Destination, dst)
 	}
 }
 
@@ -191,16 +243,34 @@ func TestAdapterRemoveDirectoryForwards(t *testing.T) {
 	}
 }
 
-// TestAdapterMoveDirectoryForwards confirms MoveDirectory forwards and decodes
-// the ack.
+// TestAdapterMoveDirectoryForwards confirms MoveDirectory forwards, decodes the
+// ack, and that the distinct source and destination directories reach the
+// correct wire slots without transposition.
 func TestAdapterMoveDirectoryForwards(t *testing.T) {
-	a := newAdapterOverFakeBroker(t)
-	ack, err := a.MoveDirectory(context.Background(), "/srcdir", "/dstdir")
+	a, cap := newCapturingAdapterOverFakeBroker(t)
+	const (
+		src = "/dirs/source"
+		dst = "/dirs/destination"
+	)
+	ack, err := a.MoveDirectory(context.Background(), src, dst)
 	if err != nil {
 		t.Fatalf("MoveDirectory: %v", err)
 	}
 	if ack == nil {
 		t.Fatal("MoveDirectory returned nil ack")
+	}
+	if n := cap.callCount("moveDirectory"); n != 1 {
+		t.Fatalf("moveDirectory reached the broker %d times, want exactly 1", n)
+	}
+	body, ok := cap.lastTwoPath("moveDirectory")
+	if !ok {
+		t.Fatal("moveDirectory never reached the broker; want one captured request")
+	}
+	if body.Source != src {
+		t.Errorf("moveDirectory wire source = %q, want %q (source must land in the source slot)", body.Source, src)
+	}
+	if body.Destination != dst {
+		t.Errorf("moveDirectory wire destination = %q, want %q (destination must land in the destination slot, not transposed with source)", body.Destination, dst)
 	}
 }
 

@@ -110,11 +110,19 @@ func resolveFlagOrEnv(flagVal, envKey string) string {
 	return os.Getenv(envKey)
 }
 
+// newMounter constructs the mounter from the functional options productionMount
+// assembles. It is a package-level seam (default: mounter.New) so a test can
+// substitute a recording constructor and assert which option lands on which
+// mounter field — that the resolved single-socket reaches WithBrokerSocket and
+// the socket directory reaches WithBrokerSocketDir, neither dropped nor
+// transposed — without driving a real kernel mount.
+var newMounter = mounter.New
+
 // productionMount wires the runtime inputs into the functional-options mounter
 // and runs it. Mount(cfg) stays unchanged; the entrypoint contract does not
 // break.
 func productionMount(cfg *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket, brokerSocketDir string, signals <-chan os.Signal) error {
-	return mounter.New(
+	return newMounter(
 		mounter.WithReadiness(rc),
 		mounter.WithBrokerSocket(brokerSocket),
 		mounter.WithBrokerSocketDir(brokerSocketDir),

@@ -565,21 +565,96 @@ func TestClassifyReadMetadataNil(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// parseMtime — RFC3339 (non-nano) fallback branch.
+// parseMtime — the RFC3339 fallback branch is provably unreachable.
 // ---------------------------------------------------------------------------
 
-// TestParseMtimeRFC3339NonNano verifies the RFC3339Nano-then-RFC3339 fallback:
-// a plain RFC3339 timestamp (no fractional seconds, with a numeric offset)
-// parses via the second branch. Both branches in parseMtime accept RFC3339, so
-// to exercise the SECOND time.Parse we use an input the first (Nano) layout
-// also accepts; the assertion is simply that a valid RFC3339 string yields a
-// non-zero, correct time.
-func TestParseMtimeRFC3339NonNano(t *testing.T) {
-	got := parseMtime("2026-06-13T15:04:05+02:00")
-	if got.IsZero() {
-		t.Fatal("parseMtime(RFC3339 with offset) returned zero time, want non-zero")
+// TestParseMtimeFirstLayoutDecodesEveryWireShape pins that parseMtime's FIRST
+// layout (time.RFC3339Nano) decodes every timestamp shape the wire can carry to
+// the exact instant: with and without a fractional-seconds component, single-
+// digit and full nanosecond fractions, and both the Z and numeric-offset zone
+// forms. This is the live branch every production decode takes.
+func TestParseMtimeFirstLayoutDecodesEveryWireShape(t *testing.T) {
+	cases := []string{
+		"2026-06-13T15:04:05Z",                // no fraction, Z
+		"2026-06-13T15:04:05+02:00",           // no fraction, numeric offset
+		"2026-06-13T15:04:05.5Z",              // single-digit fraction
+		"2026-06-13T15:04:05.123456789Z",      // full nanosecond fraction
+		"2026-06-13T15:04:05.123456789-07:30", // full fraction, numeric offset
 	}
-	if got.Year() != 2026 || got.Month() != 6 || got.Day() != 13 {
-		t.Errorf("parseMtime(RFC3339 with offset) = %v, want 2026-06-13T15:04:05+02:00", got)
+	for _, s := range cases {
+		t.Run(s, func(t *testing.T) {
+			want, err := time.Parse(time.RFC3339Nano, s)
+			if err != nil {
+				t.Fatalf("time.Parse(RFC3339Nano, %q) = %v; the case input must be valid", s, err)
+			}
+			got := parseMtime(s)
+			if !got.Equal(want) {
+				t.Errorf("parseMtime(%q) = %v; want %v (the RFC3339Nano layout must decode it exactly)", s, got, want)
+			}
+		})
+	}
+}
+
+// TestParseMtimeRFC3339FallbackIsUnreachable documents and pins, empirically,
+// that the second time.Parse (time.RFC3339) in parseMtime is dead code: it can
+// never run on any input, because the two layouts accept the IDENTICAL set of
+// strings and decode each to the IDENTICAL instant.
+//
+// Go's time.Parse permits an optional fractional-seconds component after the
+// seconds field for BOTH layouts — the only difference between RFC3339 and
+// RFC3339Nano is how they FORMAT a time, not which strings they PARSE. So the
+// first time.Parse (RFC3339Nano) succeeds for every string the second
+// (RFC3339) would succeed on; the fallback is never reached.
+//
+// The earlier test in this position claimed to exercise the fallback while
+// feeding it an input the first layout already accepts; that misleading claim
+// is removed. This test asserts the real property over a generated grid of
+// every zone form, fraction shape, and a wide span of instants: for each input,
+// the two layouts agree on parse-success and (when both succeed) on the instant.
+// A single divergence — the only thing that could ever make the fallback
+// reachable or behaviourally distinct — fails the test.
+func TestParseMtimeRFC3339FallbackIsUnreachable(t *testing.T) {
+	zones := []string{"Z", "+00:00", "+02:00", "-07:30", "+14:00", "-12:00"}
+	fractions := []string{"", ".5", ".123", ".000000001", ".999999999"}
+	// A span of instants across decades, including a leap day and year/month
+	// boundaries, to exercise the date fields alongside the fraction/zone grid.
+	bases := []string{
+		"2000-01-01T00:00:00",
+		"2024-02-29T23:59:59", // leap day
+		"2026-06-13T15:04:05",
+		"2099-12-31T12:00:00",
+	}
+
+	checked := 0
+	for _, base := range bases {
+		for _, frac := range fractions {
+			for _, zone := range zones {
+				s := base + frac + zone
+				tNano, errNano := time.Parse(time.RFC3339Nano, s)
+				t3339, err3339 := time.Parse(time.RFC3339, s)
+				checked++
+
+				// Parse-success must agree: if they ever disagreed, an input
+				// could exist that only the fallback handles.
+				if (errNano == nil) != (err3339 == nil) {
+					t.Fatalf("layouts disagree on %q: RFC3339Nano err=%v, RFC3339 err=%v; the fallback would no longer be unreachable", s, errNano, err3339)
+				}
+				// When both succeed they must yield the identical instant, so
+				// the fallback would also be behaviourally redundant.
+				if errNano == nil && !tNano.Equal(t3339) {
+					t.Fatalf("layouts disagree on the instant for %q: RFC3339Nano=%v, RFC3339=%v", s, tNano, t3339)
+				}
+				// parseMtime, which tries RFC3339Nano first, must return that
+				// same instant whenever the input is valid.
+				if errNano == nil {
+					if got := parseMtime(s); !got.Equal(tNano) {
+						t.Fatalf("parseMtime(%q) = %v; want %v", s, got, tNano)
+					}
+				}
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no inputs checked; the grid is empty")
 	}
 }

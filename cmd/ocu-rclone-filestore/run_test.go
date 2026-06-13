@@ -133,6 +133,128 @@ func TestRun(t *testing.T) {
 	}
 }
 
+// TestProductionMountWiresSocketSlots drives the REAL productionMount adapter
+// (run.go) — the layer the recorder-based tests above bypass — and asserts that
+// the resolved single broker-socket lands on WithBrokerSocket and the resolved
+// socket DIRECTORY lands on WithBrokerSocketDir, neither dropped nor transposed.
+//
+// productionMount assembles the functional options and hands them to the
+// newMounter seam. The test substitutes that seam with a recorder that captures
+// the options and replays them through mounter.AppliedSockets, which applies
+// them exactly as mounter.New does and reads back the two socket fields. The
+// recorder returns a stub Mounter whose Mount is never expected to run a kernel
+// mount, so no /dev/fuse is touched.
+//
+// Mutation guard: dropping mounter.WithBrokerSocket leaves gotSocket empty;
+// swapping the two values (passing brokerSocket to WithBrokerSocketDir and vice
+// versa) lands each value in the wrong slot. Both are caught here.
+func TestProductionMountWiresSocketSlots(t *testing.T) {
+	const (
+		wantSocket    = "/run/session/broker.sock"
+		wantSocketDir = "/run/session/sockets"
+	)
+
+	tests := []struct {
+		name          string
+		socket        string
+		socketDir     string
+		wantSocket    string
+		wantSocketDir string
+	}{
+		{
+			name:       "single socket lands on WithBrokerSocket only",
+			socket:     wantSocket,
+			wantSocket: wantSocket,
+		},
+		{
+			name:          "socket directory lands on WithBrokerSocketDir only",
+			socketDir:     wantSocketDir,
+			wantSocketDir: wantSocketDir,
+		},
+		{
+			name:          "distinct values land in their own slots without transposition",
+			socket:        wantSocket,
+			socketDir:     wantSocketDir,
+			wantSocket:    wantSocket,
+			wantSocketDir: wantSocketDir,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotSocket, gotSocketDir string
+			captured := false
+
+			orig := newMounter
+			t.Cleanup(func() { newMounter = orig })
+			newMounter = func(opts ...mounter.Option) mounter.Mounter {
+				gotSocket, gotSocketDir = mounter.AppliedSockets(opts...)
+				captured = true
+				return stubMounter{}
+			}
+
+			err := productionMount(
+				&mountcfg.Config{ServiceURL: "https://broker.example"},
+				mounter.ReadinessConfig{},
+				tc.socket,
+				tc.socketDir,
+				make(chan os.Signal, 1),
+			)
+			if err != nil {
+				t.Fatalf("productionMount = %v; want nil (stub mounter returns nil)", err)
+			}
+			if !captured {
+				t.Fatal("productionMount did not call the newMounter seam; the adapter under test never ran")
+			}
+			if gotSocket != tc.wantSocket {
+				t.Errorf("WithBrokerSocket value = %q; want %q (single socket must reach the socket slot, not the dir slot, and must not be dropped)", gotSocket, tc.wantSocket)
+			}
+			if gotSocketDir != tc.wantSocketDir {
+				t.Errorf("WithBrokerSocketDir value = %q; want %q (socket directory must reach the dir slot, not the socket slot)", gotSocketDir, tc.wantSocketDir)
+			}
+		})
+	}
+}
+
+// TestRunDrivesProductionMountAdapter proves run/runWith reach the REAL
+// productionMount (not a recorder): with the newMounter seam swapped for a
+// recorder, a valid config and a supplied broker socket thread all the way
+// through runWith -> productionMount, and the resolved socket lands on
+// WithBrokerSocket. This closes the gap where every runWith test injected a
+// recorder in place of productionMount and so never exercised the adapter.
+func TestRunDrivesProductionMountAdapter(t *testing.T) {
+	validPath := writeTemp(t, "valid.json", validConfig)
+
+	var gotSocket, gotSocketDir string
+	orig := newMounter
+	t.Cleanup(func() { newMounter = orig })
+	newMounter = func(opts ...mounter.Option) mounter.Mounter {
+		gotSocket, gotSocketDir = mounter.AppliedSockets(opts...)
+		return stubMounter{}
+	}
+
+	err := runWith(
+		[]string{"--config", validPath, "--broker-socket", "/run/real.sock"},
+		io.Discard,
+		productionMount,
+	)
+	if err != nil {
+		t.Fatalf("runWith with the real productionMount = %v; want nil", err)
+	}
+	if gotSocket != "/run/real.sock" {
+		t.Errorf("resolved single socket reached WithBrokerSocket as %q; want /run/real.sock", gotSocket)
+	}
+	if gotSocketDir != "" {
+		t.Errorf("WithBrokerSocketDir = %q; want empty (only the single socket was supplied)", gotSocketDir)
+	}
+}
+
+// stubMounter is a no-op Mounter whose Mount returns nil. It lets a test drive
+// productionMount through the newMounter seam without constructing a live mount.
+type stubMounter struct{}
+
+func (stubMounter) Mount(*mountcfg.Config) error { return nil }
+
 // TestRunVersionFlag asserts that --version prints the build-stamped version
 // and exits cleanly WITHOUT requiring --config and WITHOUT reaching the mount
 // seam: a version query must not need a config or a broker socket.

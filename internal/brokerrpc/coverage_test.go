@@ -145,6 +145,15 @@ func TestCallNonParseableEmptyCodeFallsBack(t *testing.T) {
 	if !errors.Is(err, ErrPermanentOther) {
 		t.Errorf("empty-code body must fall back to ErrPermanentOther; got %v", err)
 	}
+	// The empty-code arm must route through the raw-body fallback (which stamps
+	// the HTTP status into the message), NOT through MapConnectError. Asserting
+	// the status code 500 is present pins that routing: the code mapper produces
+	// "code=: ..." with no HTTP status, so a body wrongly sent through it would
+	// drop the 500 and fail here. Mirrors the sibling non-parseable-body test's
+	// 502 check.
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("empty-code fallback must carry the status code 500; got %q", err.Error())
+	}
 }
 
 // TestCallParseableConnectErrorMaps drives the non-2xx branch where the body IS
