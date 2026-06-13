@@ -44,6 +44,14 @@ checksum:
 sboms:
   - id: archive-sbom
     artifacts: archive
+    # Pin the SBOM output name explicitly rather than inheriting goreleaser's
+    # default template. The release workflow signs SBOMs by globbing
+    # dist/*.sbom.json; making the name a value this file owns keeps that
+    # contract from silently breaking if an upstream default ever changes the
+    # extension (which, with nullglob in the sign step, would skip SBOM signing
+    # with no error). This matches the current default, so behaviour is unchanged.
+    documents:
+      - "{{ .ArtifactName }}.sbom.json"
 
 release:
   github:

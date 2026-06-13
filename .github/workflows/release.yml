@@ -114,6 +114,18 @@ jobs:
             goreleaser/goreleaser@sha256:f5ce92e9a38fb9406ccd638b95e43402cd3f4c567cb677eb06af9fd161278c12 \
             release --clean
 
+      # The goreleaser container runs as root (uid 0), so on a hosted Linux
+      # runner the bind-mounted dist/ and every artifact it writes are owned
+      # root:root. The native signing step below runs as the (non-root) runner
+      # user and must CREATE .sig/.pem sidecars INSIDE dist/ — which fails with
+      # permission denied against a root-owned directory, aborting the release
+      # before it is ever published. Reclaim ownership for the runner user so the
+      # native steps can write. (Docker Desktop on macOS remaps bind-mount
+      # ownership, so this only surfaces on the real Linux runner.) The hosted
+      # runner user has passwordless sudo.
+      - name: Reclaim dist ownership from the goreleaser container
+        run: sudo chown -R "$(id -u):$(id -g)" dist
+
       # Native runner step: install cosign. Pinned by SHA; the installer
       # verifies its own pinned cosign release download. No long-lived key.
       - name: Install cosign
@@ -133,11 +145,23 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          files=( dist/*.tar.gz dist/*.sbom.json dist/checksums.txt )
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::no release artifacts found in dist/ to sign"
+          archives=( dist/*.tar.gz )
+          sboms=( dist/*.sbom.json )
+          # Fail LOUDLY on a coverage gap rather than nullglob-skipping it: the
+          # build emits one archive per target (linux amd64+arm64) and one SBOM
+          # per archive, so there must be a non-zero, equal count of each. If a
+          # future goreleaser/syft default ever renamed the SBOM, sboms[] would
+          # silently empty out here — this guard turns that into a hard failure
+          # instead of a release whose SBOMs are unsigned.
+          if [ ${#archives[@]} -eq 0 ]; then
+            echo "::error::no release archives found in dist/ to sign"
             exit 1
           fi
+          if [ ${#sboms[@]} -ne ${#archives[@]} ]; then
+            echo "::error::SBOM/archive count mismatch: ${#sboms[@]} SBOMs vs ${#archives[@]} archives — SBOMs would go unsigned"
+            exit 1
+          fi
+          files=( "${archives[@]}" "${sboms[@]}" dist/checksums.txt )
           for f in "${files[@]}"; do
             cosign sign-blob --yes \
               --output-signature "${f}.sig" \
