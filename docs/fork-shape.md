@@ -61,19 +61,30 @@ asserted here.
 The mounter relies on these exported rclone symbols, all reachable as library calls with
 zero upstream diff:
 
-- `cmd/mountlib.ResolveMountMethod(name)` — looks up a mount function from the registry by
-  name. A blank import of `cmd/mount2` self-registers its (unexported upstream) mount
-  function under the name `"mount2"`, so the lookup obtains it without forking upstream to
-  export a symbol. `mount2` is preferred over the `cmd/mount` path because its direct
-  kernel mount avoids spawning a fusermount helper subprocess, which matters in a minimal
-  guest where that helper may be absent.
+- A first-party direct-mount function is the mount function the mounter drives. It serves
+  the VFS over go-fuse's direct `mount(2)` path (`DirectMountStrict`), so the kernel mount
+  needs only `/dev/fuse` and `CAP_SYS_ADMIN` and never execs a fusermount helper
+  subprocess — the load-bearing property in a minimal static guest image that carries no
+  such helper. The rclone↔FUSE node tree is built from `cmd/mount2`'s exported surface
+  (`mount2.NewFS`, `(*FS).Root`), blank-imported for that surface only, so every file
+  operation maps exactly as rclone's mount2 frontend maps it and the diff to upstream
+  rclone stays zero; only the server assembly is ours. The mounter does not resolve a
+  mount function from rclone's registry: the registry-resolved `"mount2"` function leaves
+  `DirectMount` unset and so falls back to exec'ing a fusermount helper, which the guest
+  image does not provide.
 - `cmd/mountlib.NewMountPoint(fn, mountpoint, fs, mountOpt, vfsOpt)` — assembles a mount
-  from the resolved function, the ocufs Fs, and the mapped options.
+  from that mount function, the ocufs Fs, and the mapped options.
 - `(*cmd/mountlib.MountPoint).Mount()` — starts the live mount. It constructs the VFS
   itself from the Fs and the VFS options; the wrapper never constructs a VFS separately, so
   no second VFS is leaked into the package-level active cache.
-- `cmd/mountlib.WaitMountReady(mountpoint, timeout, daemon)` — confirms the kernel reports
-  the mountpoint live before the mount is treated as ready.
+- `cmd/mountlib.CanCheckMountReady` / `cmd/mountlib.CheckMountReady(mountpoint)` — the
+  nil-safe readiness primitives the mounter polls itself to confirm the kernel reports the
+  mountpoint live before the mount is treated as ready. The mounter does not call
+  `cmd/mountlib.WaitMountReady`: that helper reads the daemon process pid unconditionally
+  on every poll, and a non-daemon mount returns a nil daemon, so it would dereference nil
+  on the first not-ready poll. The self-rolled bounded poll uses the same kernel check with
+  zero upstream diff (and on a leg where `CanCheckMountReady` is false, readiness is
+  blind-trusted rather than checked).
 - `(*cmd/mountlib.MountPoint).Wait()` / `.Unmount()` — bridged into the orchestrator's
   per-point lifecycle for spontaneous-exit detection and teardown.
 
