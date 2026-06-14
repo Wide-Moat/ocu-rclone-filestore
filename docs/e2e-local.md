@@ -123,6 +123,87 @@ The `-v` removes the shared volumes (sockets, ready-file, broker workspaces and
 audit sinks) so the next run starts clean. On graceful teardown the mount
 unmounts every mount and the ready-file is removed.
 
+## 6. Run the same exercise under gVisor (runsc)
+
+The runc harness above stands in for the native-kernel guest contour (a real
+guest kernel services `/dev/fuse` and `mount(2)` directly). The lighter gVisor
+tier is different: the `runsc` sentry intercepts `/dev/fuse` and `mount(2)` and
+services FUSE with its own in-sandbox implementation. The mount runs there, but
+two boundary facts force a different harness shape, so the runsc leg uses a
+dedicated **all-in-one** image
+([`runsc-aio.Dockerfile`](../deploy/compose/runsc-aio.Dockerfile)) that runs the
+brokers, the mount, and the test runner in **one** sandbox rather than the
+separate containers the runc compose uses:
+
+- **Peer credentials.** The broker accepts a unix-socket peer only with the same
+  uid. A bind-mounted host socket dialled across two `runsc` sandboxes is gofer-
+  proxied and does not preserve the peer uid (the broker sees `(uid_t)-1` and
+  rejects the mount). An in-sentry socket — both peers in one sandbox — preserves
+  it, so the same-uid check passes exactly as under runc.
+- **Teardown signalling.** The sentry owns a private PID namespace and ignores
+  `--pid host`, so a separate runner container cannot see (let alone signal) the
+  mount process. Co-located, the mount PID is an ordinary sibling the runner
+  signals directly.
+
+This is the production gVisor session-sandbox shape (the session's broker and
+mount share one sandbox), so the runsc leg is faithful to it, not a workaround.
+
+### Prerequisites for the runsc leg
+
+- gVisor installed and registered as a Docker runtime. The `runsc` runtime needs
+  `--host-uds=all` in its `runtimeArgs` (host unix-socket passthrough). The
+  `--fuse` runsc flag is **deprecated and a no-op** on current runsc; in-sandbox
+  FUSE serving is available without it.
+
+  ```jsonc
+  // /etc/docker/daemon.json
+  {
+    "runtimes": {
+      "runsc": { "path": "/usr/bin/runsc", "runtimeArgs": ["--host-uds=all"] }
+    }
+  }
+  ```
+
+  Then `sudo systemctl restart docker` and confirm with
+  `docker info | grep -i runtimes`.
+
+### Build and run
+
+```sh
+docker build -f deploy/compose/runsc-aio.Dockerfile -t ocu-runsc-aio:dev \
+  --build-arg BROKER_REF=v0.1.0-rc.4 .
+
+# Conformance only (socket-direct, no FUSE — the safe first green):
+docker run --rm --runtime=runsc \
+  --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
+  -e OCU_RUNSC_STAGE=conformance ocu-runsc-aio:dev
+
+# The full exercise (FUSE data path + cold read + SC2 throttle + teardown):
+docker run --rm --runtime=runsc \
+  --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
+  -e OCU_RUNSC_STAGE=exercise ocu-runsc-aio:dev
+
+# Both, in order (default):
+docker run --rm --runtime=runsc \
+  --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
+  ocu-runsc-aio:dev
+```
+
+The same image runs under `--runtime=runc` (swap the flag) as a co-located
+control for the multi-container compose harness — the orchestrator and the
+binaries are identical; only the runtime changes.
+
+### Notes specific to runsc
+
+- The mount's data-path opcodes (write/read, mkdir/rmdir, rename file and dir,
+  large chunked write, ranged read, a second concurrent mount for the cold read)
+  all serve under the sentry. The one behavioural difference is that go-fuse's
+  in-process `server.Unmount()` does not return under the sentry, so teardown
+  relies on `SIGTERM` → process exit → the sandbox reclaiming the mount — which
+  is exactly what the exercise's teardown step drives. No assertion changes.
+- runsc is the **additive, advisory** tier; the runc/native-kernel leg remains
+  the hard release gate (see [`ci-runsc-decision.md`](ci-runsc-decision.md)).
+
 ## Notes
 
 - This binary builds openly on the public rclone project; the mount path uses
