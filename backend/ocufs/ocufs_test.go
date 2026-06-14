@@ -587,7 +587,7 @@ func TestDirectOpenNoResolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	got, err := io.ReadAll(rc)
 	if err != nil {
 		t.Fatalf("ReadAll: %v", err)
@@ -1087,14 +1087,14 @@ func TestAbsPathCanonicalizes(t *testing.T) {
 	cases := []struct {
 		root, rel, want string
 	}{
-		{"/pub", "../private/key.bin", "/private/key.bin"},      // a "../" escape is resolved, not forwarded raw
-		{"/pub", "ok/../../private", "/private"},                // resolves below and back above the join point
-		{"/", "a/../b", "/b"},                                   // "../" mid-path collapses
-		{"/root", "sub/./file", "/root/sub/file"},               // "." segment is dropped
-		{"/root", "a//b///c", "/root/a/b/c"},                    // repeated slashes collapse
-		{"/root", "trailing/", "/root/trailing"},                // trailing slash stripped
-		{"/e2e", "../../../etc/passwd", "/etc/passwd"},          // deep escape resolves; no raw ".." on the wire
-		{"/root", ".", "/root"},                                 // a lone "." is the dir itself
+		{"/pub", "../private/key.bin", "/private/key.bin"}, // a "../" escape is resolved, not forwarded raw
+		{"/pub", "ok/../../private", "/private"},           // resolves below and back above the join point
+		{"/", "a/../b", "/b"},                              // "../" mid-path collapses
+		{"/root", "sub/./file", "/root/sub/file"},          // "." segment is dropped
+		{"/root", "a//b///c", "/root/a/b/c"},               // repeated slashes collapse
+		{"/root", "trailing/", "/root/trailing"},           // trailing slash stripped
+		{"/e2e", "../../../etc/passwd", "/etc/passwd"},     // deep escape resolves; no raw ".." on the wire
+		{"/root", ".", "/root"},                            // a lone "." is the dir itself
 	}
 	for _, c := range cases {
 		if got := mk(c.root).absPath(c.rel); got != c.want {

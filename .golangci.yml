@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# golangci-lint configuration (schema v2). This is the structural linter for
+# the hand-written Go in this repository: it runs in CI (.github/workflows/
+# lint.yml) and is the same config a contributor runs locally with
+# `golangci-lint run`.
+#
+# Posture: a focused, correctness-first set. go vet alone (the prior gate) misses
+# unchecked errors, dead code, leaked response bodies, and a class of security
+# smells. Every linter below was enabled only after the whole tree was confirmed
+# to pass it, so the gate is green from the first commit and a new finding means
+# new code, not a pre-existing debt surfacing. Style-churn linters (whole-file
+# reformatters, opinionated naming) are deliberately omitted to keep the diff a
+# contributor must satisfy about real defects, not taste.
+
+version: "2"
+
+linters:
+  # Start from nothing and name every linter explicitly, so the set is a
+  # decision record rather than whatever the tool defaults to this release.
+  default: none
+  enable:
+    # --- the golangci-lint default set (correctness core) ---
+    - errcheck      # unchecked error returns
+    - govet         # the vet suite (already gated separately; kept for parity)
+    - ineffassign   # assignments never read
+    - staticcheck   # the staticcheck analyzers (bugs, simplifications, deprecations)
+    - unused        # unreferenced code (dead helpers, fields, funcs)
+    # --- additive, high-signal, low-noise ---
+    - bodyclose     # HTTP response bodies that are never closed (a real leak class
+                    #   for a binary whose whole job is broker RPC over HTTP/Connect)
+    - copyloopvar   # loop-variable capture bugs (Go >= 1.22 semantics)
+    - unconvert     # redundant type conversions
+    - misspell      # misspellings in comments and strings
+    - nilerr        # returning nil after checking a non-nil error
+    - errorlint     # error comparisons/wraps that break errors.Is/As
+    - gosec         # security smells (integer-overflow conversions, file perms,
+                    #   subprocess/file inclusion). Scoped to non-test code below.
+
+  settings:
+    staticcheck:
+      checks:
+        - all
+        # QF* are staticcheck's opt-in "quickfix" style refactors, not bug or
+        # correctness checks (standalone staticcheck does not run them by
+        # default). QF1008 would strip an explicit embedded-field selector that
+        # this codebase uses on purpose for readability, so it is disabled.
+        - -QF1008
+
+  exclusions:
+    rules:
+      # gosec on test code is noise: test fixtures legitimately spin up
+      # httptest servers without ReadHeaderTimeout (G112), read files and launch
+      # subprocesses from computed paths (G304/G204), and write fixtures with
+      # ordinary perms (G301/G306). None of that is production attack surface.
+      # Production-code gosec findings are addressed in the code (or carry a
+      # scoped //nolint with the reason), never blanket-suppressed here.
+      - path: _test\.go
+        linters:
+          - gosec
+
+issues:
+  # Report every occurrence; do not collapse repeats. A second instance of a
+  # finding in another file is a second thing to fix, not a duplicate.
+  max-issues-per-linter: 0
+  max-same-issues: 0

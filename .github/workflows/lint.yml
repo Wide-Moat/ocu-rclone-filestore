@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Structural lint + format gate. Two independent jobs run on every pull request
+# and push to main:
+#
+#   gofmt        - the whole tree must be gofmt-clean. `go vet` (in ci.yml) does
+#                  not enforce formatting; this does, so a drifting file fails
+#                  the PR instead of slipping in unnoticed.
+#   golangci-lint - the structural linter (.golangci.yml): unchecked errors, dead
+#                  code, leaked response bodies, security smells, and more that
+#                  vet alone does not catch. The lint version is pinned so the
+#                  gate is reproducible and never moves under a silent upgrade.
+
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  gofmt:
+    name: gofmt (tree must be formatted)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        # gofmt -l lists files whose formatting differs from canonical; a
+        # non-empty list fails the gate. Scope to git-tracked Go files (the same
+        # discipline the other gate scripts use) so the check is identical in any
+        # checkout and never reaches untracked local scratch directories. Print
+        # the offending files and the diff so the fix is obvious, then exit
+        # non-zero.
+        run: |
+          set -euo pipefail
+          mapfile -t go_files < <(git ls-files '*.go')
+          unformatted="$(gofmt -l "${go_files[@]}")"
+          if [ -n "${unformatted}" ]; then
+            echo "::error::these files are not gofmt-clean; run 'gofmt -w .':"
+            echo "${unformatted}"
+            echo "--- diff ---"
+            gofmt -d "${go_files[@]}"
+            exit 1
+          fi
+          echo "all tracked Go files are gofmt-clean"
+
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run golangci-lint
+        # The lint version is pinned (not `latest`) so the gate is reproducible:
+        # the same findings appear locally and in CI, and a new golangci-lint
+        # release cannot change the gate without a deliberate bump here. The
+        # action itself is pinned by commit SHA, matching the supply-chain
+        # posture of every other workflow in this repo.
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
+        with:
+          version: v2.5.0
+          # The default args run against ./...; the config is the committed
+          # .golangci.yml at the root. --build-tags=e2e pulls the e2e-tagged
+          # harness (test/e2e, the largest hand-written test body) into the lint
+          # set; without it that package is excluded by its build constraint and
+          # silently skipped. The runner is linux, so the //go:build linux
+          # mount-path files are already linted under the default GOOS. Tag sets
+          # covered here: default (linux) + e2e.
+          args: --build-tags=e2e --timeout=5m

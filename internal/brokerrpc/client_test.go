@@ -38,7 +38,7 @@ func unixTestServer(t *testing.T, h http.Handler) (socketPath string, cleanup fu
 
 	ln, err := net.Listen("unix", socketPath)
 	if err != nil {
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		t.Fatalf("listen unix %s: %v", socketPath, err)
 	}
 
@@ -50,7 +50,7 @@ func unixTestServer(t *testing.T, h http.Handler) (socketPath string, cleanup fu
 
 	return socketPath, func() {
 		srv.Close()
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 	}
 }
 
@@ -294,7 +294,7 @@ func TestDialerTargetsSuppliedSocketPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mkdirtemp for fake socket dir: %v", err)
 	}
-	t.Cleanup(func() { os.RemoveAll(fakeDir) })
+	t.Cleanup(func() { _ = os.RemoveAll(fakeDir) })
 	fakeSock := filepath.Join(fakeDir, "n.sock")
 
 	// Client pointed at real socket should succeed.

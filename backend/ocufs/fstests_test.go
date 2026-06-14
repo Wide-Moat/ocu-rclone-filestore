@@ -103,7 +103,9 @@ func TestFakeBrokerConstruction(t *testing.T) {
 	// Verify Features are not nil.
 	feats := f.Features()
 	if feats == nil {
-		t.Error("Features() returned nil on a fake-broker-backed Fs")
+		// Stop here: every assertion below dereferences feats, so a nil here
+		// must fail the test rather than panic on the next line.
+		t.Fatal("Features() returned nil on a fake-broker-backed Fs")
 	}
 	// Copy/Move/DirMove must be advertised.
 	if feats.Copy == nil {
@@ -192,7 +194,7 @@ func TestFakeBrokerDownloadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	// The fake broker returns fakeBrokerContentBytes for every download.
 	// We only check that the response is non-empty (the exact bytes depend on

@@ -32,7 +32,12 @@ go build ./...
 go test ./... -cover
 go vet ./...
 gofmt -l .          # must print nothing
+golangci-lint run   # structural lint; config is .golangci.yml (pinned: v2.5.0)
 ```
+
+Install the linter with `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0`
+(the version CI pins), or run it however you prefer — the gate is the committed
+`.golangci.yml`, so a local run reproduces CI exactly.
 
 The full end-to-end exercise needs a real `/dev/fuse` (a Linux kernel) and a
 running broker. On a non-Linux workstation, run it inside a Lima VM — see
@@ -51,9 +56,9 @@ running broker. On a non-Linux workstation, run it inside a Lima VM — see
   files for the per-language comment form). Files derived from upstream rclone
   keep their upstream MIT header untouched.
 - **English only** in code, comments, commit messages, and docs.
-- **All CI gates must pass**: build, vet, unit + conformance tests, the
-  coverage ratchet, secret scanning, SAST, dependency CVE scanning, and the
-  conventional-commits check.
+- **All CI gates must pass**: build, vet, `gofmt`, golangci-lint, unit +
+  conformance tests, the coverage ratchet, secret scanning, SAST, dependency
+  CVE scanning, and the conventional-commits check.
 
 ## Reporting bugs and requesting features
 

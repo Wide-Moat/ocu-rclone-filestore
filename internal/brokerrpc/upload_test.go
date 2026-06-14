@@ -27,7 +27,7 @@ func uploadTestServer(t *testing.T, handler http.HandlerFunc) string {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	sock := dir + "/b.sock"
-	t.Cleanup(func() { os.RemoveAll(dir) })
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 
 	ln, err := net.Listen("unix", sock)
 	if err != nil {

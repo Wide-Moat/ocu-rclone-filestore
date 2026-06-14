@@ -68,7 +68,10 @@ var provisionMarkers = []string{"auth_token", "ca_cert_pem"}
 // then every rule is validated. A failure returns a distinct typed error from
 // this package naming the failing field (and mount index where applicable).
 func Load(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
+	// The path is the host-supplied --config provisioning input, the trusted
+	// entry point of this binary's contract — not attacker-controlled. Reading
+	// it by variable path is the intended behaviour.
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: trusted host-provisioned config path
 	if err != nil {
 		return nil, fmt.Errorf("read config %q: %w", path, err)
 	}
@@ -100,8 +103,10 @@ func Load(path string) (*Config, error) {
 func scanProvisionMarkers(raw []byte) error {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &top); err != nil {
-		// Not an object, or malformed; the strict decoder reports the real error.
-		return nil
+		// Not an object, or malformed; this scan only looks for provision
+		// markers, so it yields to the strict decoder, which reports the real
+		// malformed-JSON error. Returning err here would mis-attribute it.
+		return nil //nolint:nilerr // deliberate: malformed JSON is the strict decoder's error to report
 	}
 	for _, marker := range provisionMarkers {
 		if _, ok := top[marker]; ok {

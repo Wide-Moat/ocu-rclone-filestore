@@ -97,7 +97,9 @@ func (c *Client) call(ctx context.Context, op Op, req, resp interface{}) error {
 	if err != nil {
 		return fmt.Errorf("brokerrpc: %s: %w", op, err)
 	}
-	defer httpResp.Body.Close()
+	// The body is fully drained by io.ReadAll below, so a Close error carries no
+	// information the caller can act on; discard it explicitly.
+	defer func() { _ = httpResp.Body.Close() }()
 
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
