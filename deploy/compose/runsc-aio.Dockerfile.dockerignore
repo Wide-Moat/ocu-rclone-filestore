@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Per-Dockerfile ignore for runsc-aio.Dockerfile (BuildKit picks this over the
+# root .dockerignore for this build). The all-in-one harness image needs the
+# gated exercise (test/e2e), the backend conformance suite (backend/ocufs), and
+# the deploy/compose fixtures + entrypoint to enter the context — so unlike the
+# root ignore it keeps test/e2e and deploy. Everything not needed for the build
+# still follows the root narrowing: version control, planning notes, local-only
+# study material, docs and markdown, and build outputs never enter the build.
+
+.git
+.github
+.planning
+# Local-only study material (a dot-prefixed, version-control-ignored
+# directory) never belongs in the build context; matched by glob so this
+# ignore file holds no studied-source token.
+.ref*
+docs
+dist
+cover.out
+**/*.md
+Dockerfile
+.dockerignore

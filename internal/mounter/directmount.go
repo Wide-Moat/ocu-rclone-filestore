@@ -176,9 +176,16 @@ func buildFuseMountOptions(fsys *mount2.FS, opt *mountlib.Options) (fuse.MountOp
 	if opt.DefaultPermissions {
 		opts = append(opts, "default_permissions")
 	}
-	if fsys.VFS.Opt.ReadOnly {
-		opts = append(opts, "ro")
-	}
+	// Read-only is expressed as the MS_RDONLY mount FLAG bit (via the
+	// platform-specific applyReadOnly), NOT as a "ro" option STRING. Under
+	// DirectMountStrict the option string is handed verbatim to the mount(2)
+	// syscall as FUSE mount DATA, and the kernel FUSE filesystem understands
+	// only a fixed set of data options ("ro" is not among them). A native
+	// kernel tolerates the unknown token, but a userspace-kernel sandbox
+	// rejects the whole mount with EINVAL, so a read-only mount would fail
+	// there while writable mounts succeed. The read-only posture belongs in the
+	// syscall flags, where both kernels honour it.
+	opts = append(opts, applyReadOnly(&mo, fsys.VFS.Opt.ReadOnly)...)
 	if runtime.GOOS == "darwin" {
 		// darwin/amd64 is a build-convenience leg, never the production guest;
 		// keep the volume options its FUSE stack expects.

@@ -86,11 +86,18 @@ func TestBuildFuseMountOptionsDirectMountStrict(t *testing.T) {
 	if mo.FsName != "ocufs-unit-dev" {
 		t.Fatalf("FsName = %q; want the mapped DeviceName", mo.FsName)
 	}
-	for _, want := range []string{"default_permissions", "ro", "max_read=131072"} {
+	for _, want := range []string{"default_permissions", "max_read=131072"} {
 		if !slices.Contains(mo.Options, want) {
 			t.Fatalf("mount option %q missing from %v", want, mo.Options)
 		}
 	}
+	// Read-only is expressed per platform: on the production linux leg it
+	// must ride the mount FLAGS (MS_RDONLY) and NOT appear as a "ro" option
+	// string, because under DirectMountStrict that token is handed to the
+	// mount(2) syscall as FUSE mount data the kernel does not parse and a
+	// userspace-kernel sandbox rejects the whole mount with EINVAL. The
+	// platform-specific helper asserts the correct expression for its leg.
+	assertReadOnlyExpressed(t, mo)
 }
 
 // TestBuildFuseMountOptionsRejectsHelperOnlyOptions pins the EINVAL guard:
