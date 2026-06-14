@@ -71,9 +71,15 @@ jobs:
         # release cannot change the gate without a deliberate bump here. The
         # action itself is pinned by commit SHA, matching the supply-chain
         # posture of every other workflow in this repo.
+        #
+        # v2.12.1's released binary is built with go1.26; an older lint release
+        # (e.g. v2.5.0) is built with go1.25 and refuses to run against a module
+        # whose go.mod targets go 1.26 ("the Go language version used to build
+        # golangci-lint is lower than the targeted Go version"). Keep this at or
+        # above the lint release whose toolchain matches go.mod's go directive.
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
         with:
-          version: v2.5.0
+          version: v2.12.1
           # The default args run against ./...; the config is the committed
           # .golangci.yml at the root. --build-tags=e2e pulls the e2e-tagged
           # harness (test/e2e, the largest hand-written test body) into the lint

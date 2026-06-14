@@ -32,12 +32,13 @@ go build ./...
 go test ./... -cover
 go vet ./...
 gofmt -l .          # must print nothing
-golangci-lint run   # structural lint; config is .golangci.yml (pinned: v2.5.0)
+golangci-lint run   # structural lint; config is .golangci.yml (pinned: v2.12.1)
 ```
 
-Install the linter with `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.5.0`
+Install the linter with `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.1`
 (the version CI pins), or run it however you prefer — the gate is the committed
-`.golangci.yml`, so a local run reproduces CI exactly.
+`.golangci.yml`, so a local run reproduces CI exactly. Build it with Go 1.26 (a
+binary built with an older Go refuses to run against this go-1.26 module).
 
 The full end-to-end exercise needs a real `/dev/fuse` (a Linux kernel) and a
 running broker. On a non-Linux workstation, run it inside a Lima VM — see
