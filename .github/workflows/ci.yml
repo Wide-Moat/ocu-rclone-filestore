@@ -125,6 +125,20 @@ jobs:
       - name: Check documentation contact address
         run: bash scripts/check-doc-contacts.sh
 
+  doc-slop:
+    name: documentation anti-slop gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Self-test the doc-slop scanner
+        # Run the scanner's own test first: it proves the gate detects each slop
+        # tell and spares the allowed forms, so a regression in the scanner
+        # fails here rather than silently passing real docs.
+        run: bash scripts/check-doc-slop_test.sh
+      - name: Check documentation for slop tells
+        run: bash scripts/check-doc-slop.sh
+
   # WR-03: probe whether the hosted runner grants /dev/fuse to a container
   # running with the same device/capability pattern the e2e harness uses.
   # This job is INFORMATIONAL — it records the placement evidence in the job

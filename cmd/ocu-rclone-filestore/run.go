@@ -60,7 +60,9 @@ func runWith(args []string, stderr io.Writer, mount mountFunc) error {
 	// stderr (the FlagSet's output) so the one-line stdout/stderr contract stays
 	// simple and the value is the same linker-stamped symbol the build sets.
 	if *showVersion {
-		fmt.Fprintf(stderr, "ocu-rclone-filestore %s\n", version)
+		if _, err := fmt.Fprintf(stderr, "ocu-rclone-filestore %s\n", version); err != nil {
+			return fmt.Errorf("write version: %w", err)
+		}
 		return nil
 	}
 

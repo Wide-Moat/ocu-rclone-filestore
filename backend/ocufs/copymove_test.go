@@ -8,10 +8,8 @@ import (
 	"errors"
 	"io"
 	"testing"
-	"time"
 
 	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/fs/hash"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/brokerrpc"
 )
@@ -30,23 +28,6 @@ func newTestFsWithRoot(t *testing.T, c *fakeClient, root string, readOnly bool) 
 		readOnly: readOnly,
 	}
 }
-
-// fakeObjectInfoAt returns a minimal fs.ObjectInfo at a given remote under the
-// given Fs. Used as the src argument to Copy/Move.
-type fakeObjectInfoAt struct {
-	parentFs fs.Info
-	remote   string
-	size     int64
-	mtime    time.Time
-}
-
-func (o *fakeObjectInfoAt) Fs() fs.Info                                            { return o.parentFs }
-func (o *fakeObjectInfoAt) String() string                                         { return o.remote }
-func (o *fakeObjectInfoAt) Remote() string                                         { return o.remote }
-func (o *fakeObjectInfoAt) ModTime(ctx context.Context) time.Time                  { return o.mtime }
-func (o *fakeObjectInfoAt) Size() int64                                            { return o.size }
-func (o *fakeObjectInfoAt) Hash(ctx context.Context, ty hash.Type) (string, error) { return "", nil }
-func (o *fakeObjectInfoAt) Storable() bool                                         { return true }
 
 // ---------------------------------------------------------------------------
 // TestCopyCallsCopyFile — Copy maps onto CopyFile with the correct src/dst paths.

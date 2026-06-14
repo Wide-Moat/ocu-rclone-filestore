@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 )
 
 // endStreamFlag is the Connect streaming end-of-stream flag value.
@@ -62,12 +63,33 @@ type EndStreamResponse struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 }
 
+// maxFramePayload is the largest payload the 4-byte big-endian length prefix
+// can express. It is typed uint64 so the comparison in payloadFitsFrame is
+// portable across 32- and 64-bit int (the untyped constant math.MaxUint32
+// would overflow a 32-bit int if compared directly).
+const maxFramePayload uint64 = math.MaxUint32
+
+// payloadFitsFrame reports whether a payload of n bytes can be carried by the
+// 4-byte big-endian length prefix. A payload at or below maxFramePayload fits;
+// a larger one cannot be framed without truncating the length and desyncing the
+// stream. This is the outbound mirror of the maxInboundFrame bound on readFrame.
+//
+// n is a slice length, so it is always >= 0; the uint64 widening is therefore
+// exact, never a wraparound.
+func payloadFitsFrame(n int) bool {
+	return uint64(n) <= maxFramePayload //nolint:gosec // G115: n is a slice length (>= 0); widening to uint64 is exact
+}
+
 // writeFrame writes a single Connect streaming frame to w. The flag byte and
 // the JSON payload are separated by a 4-byte big-endian length prefix.
 func writeFrame(w io.Writer, flag byte, payload []byte) error {
+	if !payloadFitsFrame(len(payload)) {
+		return fmt.Errorf("brokerrpc: frame payload %d bytes exceeds the 4-byte length field", len(payload))
+	}
 	header := make([]byte, frameHeaderLen)
 	header[0] = flag
-	binary.BigEndian.PutUint32(header[1:5], uint32(len(payload)))
+	// Safe: payloadFitsFrame above rejects any payload that does not fit in a uint32.
+	binary.BigEndian.PutUint32(header[1:5], uint32(len(payload))) //nolint:gosec // G115: bounded by payloadFitsFrame above
 	if _, err := w.Write(header); err != nil {
 		return fmt.Errorf("brokerrpc: write frame header: %w", err)
 	}
