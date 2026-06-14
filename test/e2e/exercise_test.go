@@ -366,7 +366,7 @@ func TestE2EExercise(t *testing.T) {
 		if err != nil {
 			t.Fatalf("open large file for ranged read: %v", err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		buf := make([]byte, n)
 		got, err := f.ReadAt(buf, off)
 		if err != nil {

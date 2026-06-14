@@ -29,10 +29,11 @@
 - [ ] `go test ./... -cover` is green and coverage did not drop (the ratchet never goes down).
 - [ ] `go vet ./...` is clean.
 - [ ] `gofmt -l .` prints nothing.
+- [ ] `golangci-lint run` is clean (config: `.golangci.yml`).
 - [ ] Every authored source file carries the FSL SPDX header; files derived from upstream rclone keep their upstream MIT header untouched.
 - [ ] English only in code, comments, commit messages, and docs.
 - [ ] No security boundary crossed: the guest holds no backend credential, no object-store client, and opens no second transport; every file operation still crosses the broker, and no authorization decision the broker should own moved into the guest.
-- [ ] All CI gates are green: build (linux amd64 + arm64), vet, unit + conformance tests, the coverage ratchet, secret scanning, SAST, dependency CVE scanning, the lexicon job, and conventional-commits.
+- [ ] All CI gates are green: build (linux amd64 + arm64), vet, gofmt, golangci-lint, unit + conformance tests, the coverage ratchet, secret scanning, SAST, dependency CVE scanning, the lexicon job, the doc-slop gate, and conventional-commits.
 
 ## Security / boundary note
 

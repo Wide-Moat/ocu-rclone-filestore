@@ -286,7 +286,11 @@ func (o *orchestrator) buildSpecs(cfg *mountcfg.Config) ([]mountSpec, error) {
 // start, ME-01).
 func (o *orchestrator) signalReady(n int) error {
 	if o.readiness.ReadyFilePath != "" {
-		f, err := os.OpenFile(o.readiness.ReadyFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		// The ready-file is a content-free presence signal the host watches to
+		// learn that every mount is live; the host process may observe it under
+		// a different uid, so it is deliberately world-readable. It carries no
+		// secret (it is created empty and truncated on every create).
+		f, err := os.OpenFile(o.readiness.ReadyFilePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644) //nolint:gosec // G302: empty host-observed readiness signal, intentionally world-readable
 		if err != nil {
 			return fmt.Errorf("create ready-file %q: %w", o.readiness.ReadyFilePath, err)
 		}
