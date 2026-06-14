@@ -175,6 +175,11 @@ func TestLoad(t *testing.T) {
 			},
 		},
 		{
+			name:    "explicit zero cache_duration_s loads (CFG-02: 0 is legal)",
+			fixture: "valid_cache_duration_zero.json",
+			wantErr: nil,
+		},
+		{
 			name:    "missing cache_duration_s rejected (CFG-02)",
 			fixture: "invalid_missing_cache_duration.json",
 			wantErr: new(*ErrCacheDuration),
@@ -224,5 +229,40 @@ func TestLoad(t *testing.T) {
 				tc.assert(t, err)
 			}
 		})
+	}
+}
+
+// TestLoadAcceptsZeroCacheDuration pins the lower bound of the cache_duration_s
+// range: an explicit 0 is legal (the schema's minimum is 0) and must load. The
+// validation guard is `*m.CacheDurationS < 0`, so 0 is accepted; were the guard
+// `<= 0` this config would be wrongly rejected. The standalone test asserts both
+// that Load succeeds AND that 0 round-trips as a present (non-nil) zero on every
+// mount, so a wrong-direction off-by-one in either the presence check or the
+// range check is caught.
+func TestLoadAcceptsZeroCacheDuration(t *testing.T) {
+	cfg, err := Load(filepath.Join("testdata", "valid_cache_duration_zero.json"))
+	if err != nil {
+		t.Fatalf("explicit cache_duration_s 0 must load, got %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected a *Config, got nil")
+	}
+
+	groups := map[string][]Mount{
+		"mounts":          cfg.Mounts,
+		"readonly_mounts": cfg.ReadonlyMounts,
+	}
+	for label, group := range groups {
+		if len(group) == 0 {
+			t.Fatalf("%s: expected at least one mount in the zero-duration fixture", label)
+		}
+		for i, m := range group {
+			if m.CacheDurationS == nil {
+				t.Fatalf("%s[%d]: cache_duration_s parsed as absent, want present 0", label, i)
+			}
+			if *m.CacheDurationS != 0 {
+				t.Fatalf("%s[%d]: cache_duration_s parsed as %d, want 0", label, i, *m.CacheDurationS)
+			}
+		}
 	}
 }

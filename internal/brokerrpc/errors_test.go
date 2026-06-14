@@ -105,6 +105,54 @@ func TestErrorMappingRetryAfterRejectsNonFinite(t *testing.T) {
 	}
 }
 
+// TestErrorMappingRetryAfterCapBoundary pins the upper bound of the accepted
+// Retry-After window (maxRetryAfterSeconds = 3600). The guard is
+// `secs < maxRetryAfterSeconds`, so the boundary is exclusive:
+//
+//	just under the cap  → retryable WITH a usable deadline
+//	exactly at the cap  → retryable WITHOUT a usable deadline
+//	over the cap        → retryable WITHOUT a usable deadline
+//
+// Were the guard `<=` (off-by-one), the at-cap value would wrongly yield a
+// deadline; the at-cap case below catches that. All three remain retryable
+// because resource_exhausted is always backpressure regardless of the hint.
+func TestErrorMappingRetryAfterCapBoundary(t *testing.T) {
+	cases := []struct {
+		name         string
+		raw          string
+		wantDeadline bool
+	}{
+		{name: "just under cap", raw: "3599", wantDeadline: true},
+		{name: "exactly at cap", raw: "3600", wantDeadline: false},
+		{name: "over cap", raw: "3601", wantDeadline: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ce := &ConnectError{Code: "resource_exhausted", Message: "throttled"}
+			mapped := MapConnectError(ce, tc.raw)
+			if mapped == nil {
+				t.Fatal("MapConnectError returned nil")
+			}
+			// Always retryable: the hint never changes the retry posture.
+			if !fserrors.IsRetryError(mapped) {
+				t.Errorf("%s: resource_exhausted must remain retryable", tc.name)
+			}
+			if got := fserrors.IsRetryAfterError(mapped); got != tc.wantDeadline {
+				t.Fatalf("%s (raw=%q): IsRetryAfterError = %t, want %t", tc.name, tc.raw, got, tc.wantDeadline)
+			}
+			if tc.wantDeadline {
+				// The just-under-cap value must produce a usable, near-cap
+				// deadline — pinning that an accepted hint actually carries
+				// through, not merely that the flag is set.
+				d := time.Until(fserrors.RetryAfterErrorTime(mapped))
+				if d < 3500*time.Second || d > 3600*time.Second {
+					t.Errorf("%s: deadline %v out of expected near-cap range", tc.name, d)
+				}
+			}
+		})
+	}
+}
+
 // TestErrorMappingUnknownCodeIsPermanent verifies that a code outside the
 // closed table maps to a permanent, non-retryable error with NO retryable
 // fallthrough. This is the explicit default branch.

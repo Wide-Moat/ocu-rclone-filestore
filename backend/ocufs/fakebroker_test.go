@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -326,4 +327,109 @@ func serveFileUpload(w http.ResponseWriter, r *http.Request) {
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Capturing fake broker — records the decoded request body for the two-path
+// ops (copyFile, moveFile, moveDirectory) so a test can assert that source and
+// destination land in the correct wire slots, not just that the call succeeded.
+// The plain serveAck used by startFakeBroker discards the body, so a slot
+// transposition on the wire would go undetected; this variant closes that gap.
+// ---------------------------------------------------------------------------
+
+// twoPathBody is the decoded shape of the two-path mutating ops. The wire field
+// names (`source`, `destination`) match the request structs the client marshals
+// for copyFile / moveFile / moveDirectory. Capturing them as raw JSON keys (no
+// dependency on the client's request types) keeps the fake an independent
+// observer of the wire, so a transposition in the client-to-wire mapping is
+// genuinely caught rather than mirrored.
+type twoPathBody struct {
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+}
+
+// capturingBroker records the most recent decoded two-path body per op. It is
+// safe for concurrent handler goroutines (httptest serves each request in its
+// own goroutine; the race detector is on).
+type capturingBroker struct {
+	mu      sync.Mutex
+	byOp    map[string]twoPathBody
+	seenOps map[string]int
+}
+
+// lastTwoPath returns the most recently captured source/destination for op and
+// whether any request for that op was seen.
+func (b *capturingBroker) lastTwoPath(op string) (twoPathBody, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	v, ok := b.byOp[op]
+	return v, ok
+}
+
+// callCount returns how many requests for op the broker observed.
+func (b *capturingBroker) callCount(op string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.seenOps[op]
+}
+
+// startCapturingFakeBroker starts a fake broker that behaves exactly like
+// startFakeBroker for response shaping but additionally captures the decoded
+// request body of the two-path ops. It returns the socket path and the capture
+// handle. A t.Cleanup stops the server.
+func startCapturingFakeBroker(t *testing.T) (string, *capturingBroker) {
+	t.Helper()
+
+	f, err := os.CreateTemp("", "ocufs-cap-*.sock")
+	if err != nil {
+		t.Fatalf("startCapturingFakeBroker: create temp socket file: %v", err)
+	}
+	sockPath := f.Name()
+	_ = f.Close()
+	os.Remove(sockPath) //nolint:errcheck
+
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("startCapturingFakeBroker: listen unix %s: %v", sockPath, err)
+	}
+
+	cap := &capturingBroker{
+		byOp:    make(map[string]twoPathBody),
+		seenOps: make(map[string]int),
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Capture the two-path ops, then fall through to the canned responses
+		// the production decoders expect.
+		const prefix = "/ocu.filestore.v1alpha.FilesystemService/"
+		op := strings.TrimPrefix(r.URL.Path, prefix)
+		switch op {
+		case "copyFile", "moveFile", "moveDirectory":
+			body, _ := io.ReadAll(r.Body)
+			var decoded twoPathBody
+			_ = json.Unmarshal(body, &decoded)
+			cap.mu.Lock()
+			cap.byOp[op] = decoded
+			cap.seenOps[op]++
+			cap.mu.Unlock()
+			// Replace the drained body so any downstream read still works; the
+			// ack helper ignores it, but keep the contract clean.
+			r.Body = io.NopCloser(strings.NewReader(string(body)))
+			serveAck(w, r)
+		default:
+			fakeBrokerHandler(w, r)
+		}
+	})
+
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+
+	t.Cleanup(func() {
+		_ = srv.Shutdown(context.Background())
+		_ = ln.Close()
+		_ = os.Remove(sockPath)
+	})
+
+	return sockPath, cap
 }
