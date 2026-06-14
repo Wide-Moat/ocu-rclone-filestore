@@ -549,7 +549,7 @@ func TestWriteUploadFramesHappyPath(t *testing.T) {
 		t.Errorf("params frame missing overwrite_existing:true: %s", payload)
 	}
 	// Frame 2: chunk.
-	flag, payload, err = readFrame(&buf)
+	flag, _, err = readFrame(&buf)
 	if err != nil || flag != 0x00 {
 		t.Fatalf("chunk frame: flag=0x%02x err=%v", flag, err)
 	}

@@ -335,7 +335,7 @@ func TestOpenSeekBeyondEndClampsLengthToZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open with seek past EOF: %v", err)
 	}
-	rc.Close()
+	_ = rc.Close()
 	if c.downloadRangeCount != 1 {
 		t.Fatalf("DownloadRange called %d times, want 1", c.downloadRangeCount)
 	}
@@ -360,7 +360,7 @@ func TestOpenRangeToEndBeyondEndClampsLengthToZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open with open-ended range past EOF: %v", err)
 	}
-	rc.Close()
+	_ = rc.Close()
 	if c.downloadRangeCount != 1 {
 		t.Fatalf("DownloadRange called %d times, want 1", c.downloadRangeCount)
 	}

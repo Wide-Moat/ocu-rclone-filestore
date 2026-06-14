@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"strings"
@@ -73,15 +74,8 @@ func TestMainFailureExits(t *testing.T) {
 }
 
 // asExitError reports whether err is (or wraps) an *exec.ExitError and, if so,
-// stores it through target. It keeps the failure-path assertion readable
-// without importing errors solely for one As call.
+// stores it through target. errors.As walks the wrap chain, so a wrapped exit
+// error is still recognized.
 func asExitError(err error, target **exec.ExitError) bool {
-	if err == nil {
-		return false
-	}
-	ee, ok := err.(*exec.ExitError)
-	if ok {
-		*target = ee
-	}
-	return ok
+	return errors.As(err, target)
 }

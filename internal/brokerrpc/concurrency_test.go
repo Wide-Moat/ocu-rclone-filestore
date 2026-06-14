@@ -102,7 +102,6 @@ func TestConcurrentOpsOneSharedClient(t *testing.T) {
 	g, ctx := errgroup.WithContext(context.Background())
 
 	for i := 0; i < total; i++ {
-		i := i
 		g.Go(func() error {
 			switch i % 3 {
 			case 0:

@@ -122,7 +122,7 @@ func TestErrDecodeUnwrap(t *testing.T) {
 	cause := errors.New("unexpected EOF")
 	e := &ErrDecode{Err: cause}
 
-	if got := e.Unwrap(); got != cause {
+	if got := e.Unwrap(); !errors.Is(got, cause) {
 		t.Fatalf("Unwrap() = %v, want %v", got, cause)
 	}
 	if !errors.Is(e, cause) {

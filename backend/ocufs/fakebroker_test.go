@@ -385,7 +385,7 @@ func startCapturingFakeBroker(t *testing.T) (string, *capturingBroker) {
 		t.Fatalf("startCapturingFakeBroker: create temp socket file: %v", err)
 	}
 	sockPath := f.Name()
-	f.Close()
+	_ = f.Close()
 	os.Remove(sockPath) //nolint:errcheck
 
 	ln, err := net.Listen("unix", sockPath)
