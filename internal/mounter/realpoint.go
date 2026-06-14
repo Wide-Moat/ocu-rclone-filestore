@@ -350,11 +350,22 @@ func (r *realPointMounter) waitReady(ctx context.Context, dest string) error {
 // directory: a directory that was never mounted shares its parent's device and
 // fails here, so a stale or never-started mountpoint is not mistaken for ready.
 func mountServes(dest string) bool {
-	dst, err := os.Stat(dest)
+	// Clean dest first: filepath.Dir of a trailing-slash path ("/mnt/foo/")
+	// yields the path itself, which would compare the mountpoint against its own
+	// device and report a false negative. Cleaning strips the trailing slash so
+	// the parent is the real parent directory.
+	cleanDest := filepath.Clean(dest)
+	parentPath := filepath.Dir(cleanDest)
+	if parentPath == cleanDest {
+		// dest is a filesystem root (e.g. "/"): there is no distinct parent to
+		// compare against, so the device-boundary test cannot apply.
+		return false
+	}
+	dst, err := os.Stat(cleanDest)
 	if err != nil {
 		return false
 	}
-	parent, err := os.Stat(filepath.Dir(dest))
+	parent, err := os.Stat(parentPath)
 	if err != nil {
 		return false
 	}

@@ -474,6 +474,14 @@ func TestMountServesDeviceBoundary(t *testing.T) {
 	if mountServes(dir + "/does-not-exist") {
 		t.Fatal("mountServes on a nonexistent path = true; want false")
 	}
+	// A trailing slash must not change the verdict: filepath.Dir of "dir/"
+	// would otherwise return "dir" itself and compare the directory against its
+	// own device, a false negative. The cleaned path still shares its parent's
+	// device, so the unmounted directory stays correctly rejected.
+	if mountServes(dir + "/") {
+		t.Fatalf("mountServes(%q) = true for an unmounted trailing-slash path; "+
+			"dest must be cleaned so the parent lookup is the real parent", dir+"/")
+	}
 }
 
 // TestWaitReadyFunctionalFallback proves waitReady accepts readiness via the
