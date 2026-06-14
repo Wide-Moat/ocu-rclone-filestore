@@ -72,7 +72,7 @@ func startFakeBroker(t *testing.T) string {
 		t.Fatalf("startFakeBroker: create temp socket file: %v", err)
 	}
 	sockPath := f.Name()
-	f.Close()
+	_ = f.Close()
 	// Remove the placeholder file so net.Listen can create the socket there.
 	os.Remove(sockPath) //nolint:errcheck
 

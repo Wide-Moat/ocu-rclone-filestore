@@ -23,6 +23,9 @@ issue for a security report.
 - Use GitHub's private vulnerability reporting on this repository
   (**Security → Report a vulnerability**). This is the preferred channel and
   keeps the report and its discussion private until a fix is released.
+- If you cannot use that channel, email `developer@widemoat.ai` and we will
+  open a private advisory on your behalf. Do not include exploit details in an
+  unencrypted email beyond what is needed to establish contact.
 
 When reporting, include as much of the following as you can:
 
@@ -38,7 +41,11 @@ When reporting, include as much of the following as you can:
 - **Triage and an initial assessment** within 10 business days, including a
   severity judgement and whether the report is in scope.
 - **Coordinated disclosure**: we agree a disclosure timeline with the reporter
-  and credit reporters who wish to be named once a fix is available.
+  and credit reporters who wish to be named once a fix is available. Absent a
+  different agreement, the embargo runs until a fix is released or 90 days from
+  the acknowledgement, whichever comes first; we will tell you before any
+  public disclosure. A fix and its advisory are published together, and the
+  advisory names the affected versions and the fixed version.
 
 ## Scope
 

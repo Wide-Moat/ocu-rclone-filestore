@@ -134,6 +134,47 @@ func TestReadFrameAcceptsLengthAtCap(t *testing.T) {
 	}
 }
 
+// TestPayloadFitsFrameBoundary pins the outbound length-field bound: a payload
+// at or below math.MaxUint32 fits the 4-byte prefix; one byte more does not.
+// The over-limit case is checked through the predicate rather than by
+// allocating a >4 GiB slice (the guard's reason for existing is that such a
+// payload cannot be length-prefixed without truncation and stream desync).
+func TestPayloadFitsFrameBoundary(t *testing.T) {
+	if !payloadFitsFrame(0) {
+		t.Error("empty payload should fit")
+	}
+	// The boundary values exceed a 32-bit int, so this assertion is meaningful
+	// only where int is 64-bit. On a 32-bit int every length already fits the
+	// uint32 field, so the over-limit case cannot arise and the test is skipped.
+	const maxInt = uint64(^uint(0) >> 1) // largest int value on the build platform
+	if maxFramePayload > maxInt {
+		t.Skip("int is 32-bit here; the frame-length bound cannot be exceeded by a slice length")
+	}
+	atCap := int(maxFramePayload)
+	if !payloadFitsFrame(atCap) {
+		t.Error("a payload exactly at maxFramePayload should fit (the field holds it)")
+	}
+	if payloadFitsFrame(atCap + 1) {
+		t.Error("a payload one byte above maxFramePayload must not fit")
+	}
+}
+
+// TestWriteFrameWritesExactBytes asserts writeFrame emits exactly the 5-byte
+// prefix plus the payload and reports no error on a representable payload.
+func TestWriteFrameWritesExactBytes(t *testing.T) {
+	payload := []byte("payload-bytes")
+	var buf bytes.Buffer
+	if err := writeFrame(&buf, endStreamFlag, payload); err != nil {
+		t.Fatalf("writeFrame: %v", err)
+	}
+	if got, want := buf.Len(), frameHeaderLen+len(payload); got != want {
+		t.Fatalf("framed length: got %d, want %d", got, want)
+	}
+	if buf.Bytes()[0] != endStreamFlag {
+		t.Errorf("flag byte: got %02x, want %02x", buf.Bytes()[0], endStreamFlag)
+	}
+}
+
 // TestEndStreamSuccessRoundTrip writes a success end-stream frame and reads
 // it back; success/failure comes from the parsed EndStreamResponse, not the
 // HTTP status (always 200 for streams).

@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# A file's journey: what happens when the guest reads or writes a file.
+# Render: d2 docs/diagrams/02-file-path.d2 docs/diagrams/02-file-path.svg
+
+title: |md
+  # A file's journey — from the guest to durable storage
+| {near: top-center; style.font-size: 28}
+
+explanation: |md
+  A guest program just reads and writes files like normal.
+  Underneath, this binary turns each operation into one broker call.
+  **The bytes only ever travel through one unix socket, and the guest never holds a key.**
+| {near: top-left; style: {fill: "#fafafa"; stroke: "#bbb"; font-size: 14}}
+
+read: "READING a file" {
+  style: {fill: "#eef3ff"; stroke: "#3b5bcf"; stroke-width: 2; border-radius: 16; font-color: "#1f2f7a"}
+  direction: down
+  r1: "1. Program calls read()" {style.fill: "#d6e0ff"}
+  r2: "2. rclone VFS — warm cache?\nyes - answer locally, done" {style.fill: "#d6e0ff"}
+  r3: "3. cache miss - ocufs backend\nasks for the bytes by uuid" {style.fill: "#ffffff"}
+  r4: "4. brokerrpc sends fileDownload\n(intent=read, downloadable=false)" {style.fill: "#ffffff"}
+  r5: "5. broker checks who you are,\nsigns + fetches, streams bytes back" {style: {fill: "#d6ffe0"; stroke: "#2e9e54"}}
+  r1 -> r2 -> r3 -> r4 -> r5
+}
+
+write: "WRITING a file" {
+  style: {fill: "#fff1f0"; stroke: "#cf3b3b"; stroke-width: 2; border-radius: 16; font-color: "#7a1f1f"}
+  direction: down
+  w1: "1. Program calls write() + close()" {style.fill: "#ffd6d1"}
+  w2: "2. rclone VFS stores the bytes\nin the local cache - close returns" {style.fill: "#ffd6d1"}
+  w3: "3. in the background, ocufs uploads\nthe file in chunks (fileUpload)" {style.fill: "#ffffff"}
+  w4: "4. brokerrpc streams the chunks\n(intent=write, declared size)" {style.fill: "#ffffff"}
+  w5: "5. broker checks who you are,\nsigns + writes it to storage" {style: {fill: "#d6ffe0"; stroke: "#2e9e54"}}
+  w1 -> w2 -> w3 -> w4 -> w5
+}
+
+notes: |md
+  **Two things worth knowing**
+  - A warm read never leaves the guest — that is why the end-to-end gate proves
+    the broker path by reading the broker's own store, not the local cache.
+  - If the broker is throttling, the upload backs off and retries — the bytes are
+    never lost, just delayed (SEC-46).
+| {near: bottom-center; style: {fill: "#fffbe6"; stroke: "#d4a017"; font-size: 13}}

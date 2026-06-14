@@ -10,6 +10,8 @@ lives inside, the data path of a single file operation, and how the packages
 fit together — start with the overview in [`../architecture.md`](../architecture.md).
 The documents here are the per-package detail those sections point down into.
 
+![Package map: the entrypoint loads config and drives the mounter, which builds the ocufs backend per mount, which reaches the broker only through brokerrpc and its single socket.](../diagrams/03-package-map.svg)
+
 ## Components
 
 Listed in dependency order: the entrypoint loads and validates config, then

@@ -26,6 +26,68 @@ the host-side credential seam, the end-to-end data path of a file operation,
 and what each package in this repo is responsible for — see
 [`docs/architecture.md`](./docs/architecture.md).
 
+![The big picture: the guest sandbox talks to this binary, which talks only to the broker over one unix socket; the broker holds the credential and reaches the backend storage.](./docs/diagrams/01-big-picture.svg)
+
+## Quickstart
+
+You need **Go 1.26+** (see `go.mod`) and a running broker that exposes a
+per-session AF_UNIX socket. An actual mount needs Linux with `/dev/fuse`; on
+macOS, run it inside the Lima harness (see [`docs/e2e-local.md`](./docs/e2e-local.md)).
+
+![The four steps: have the prerequisites, build the binary, write a mount config, run it against the broker socket.](./docs/diagrams/04-setup.svg)
+
+**Build:**
+
+```sh
+go build -o ocu-rclone-filestore ./cmd/ocu-rclone-filestore
+./ocu-rclone-filestore --version
+```
+
+**Write a minimal mount config** (`mount.json`). One read-write mount of one
+session scope — note there is no `auth_token`: the guest holds no credential.
+
+```json
+{
+  "schema_version": "v1alpha",
+  "service_url": "https://broker.internal",
+  "mounts": [
+    {
+      "destination": "/workspace/out",
+      "filesystem_id": "session_01HXYZ_chat",
+      "writes": true,
+      "vfs_cache_mode": "writes",
+      "cache_duration_s": 3600,
+      "vfs_cache_max_size": "1G",
+      "dir_perms": "0755",
+      "file_perms": "0644"
+    }
+  ]
+}
+```
+
+`destination` must be an absolute path (not bare `/`). `filesystem_id` is the
+session scope; the broker resolves authorization from it.
+
+**Run** it against the broker's socket:
+
+```sh
+./ocu-rclone-filestore --config mount.json --broker-socket /run/ocu/session.sock
+```
+
+The flags:
+
+| Flag | Env | Meaning |
+| --- | --- | --- |
+| `--config` | — | path to the mount config (required) |
+| `--broker-socket` | `OCU_BROKER_SOCKET` | the per-session broker socket path |
+| `--broker-socket-dir` | `OCU_BROKER_SOCKET_DIR` | a directory; each mount dials `<dir>/<filesystem_id>.sock` (mutually exclusive with `--broker-socket`) |
+| `--ready-file` | `OCU_READY_FILE` | optional path touched once every mount is up |
+| `--version` | — | print the version and exit |
+
+`/workspace/out` is now a live filesystem backed by the broker. Any failure to
+bring up a mount is a hard, non-zero exit — never a silently missing directory.
+For a full local run with real brokers, see [`docs/e2e-local.md`](./docs/e2e-local.md).
+
 ## Status
 
 Prerelease, tracking the broker toward a joint `v0.1.0`. The full data path is
@@ -54,6 +116,21 @@ in the architecture repo (ADR-0012) covers the sandbox guest agent; the mount
 binary is delivered tooling inside the guest image, pinned to rclone's
 ecosystem by the buy-over-build rule.
 
+## Documentation
+
+Start at [`docs/`](./docs/) — its [README](./docs/README.md) routes you by what
+you need:
+
+- **Build and run it** → the [Quickstart](#quickstart) above.
+- **The system picture** (trust boundaries, the credential seam, the data path) →
+  [`docs/architecture.md`](./docs/architecture.md).
+- **See it, not read it** → [`docs/diagrams/`](./docs/diagrams/) — rendered SVGs
+  of the big picture, a file's read/write path, the package map, and the setup flow.
+- **Per-package detail** → [`docs/components/`](./docs/components/README.md).
+- **Run it locally with real brokers** → [`docs/e2e-local.md`](./docs/e2e-local.md).
+- **Why a wrapper, not a fork** → [`docs/fork-shape.md`](./docs/fork-shape.md).
+- **The invariants it must satisfy** → [`docs/requirements.md`](./docs/requirements.md).
+
 ## Sibling repos
 
 - [`ocu-filestore`](https://github.com/Wide-Moat/ocu-filestore) — the broker this binary talks to
@@ -61,10 +138,10 @@ ecosystem by the buy-over-build rule.
 
 ## Verifying a release
 
-Every release archive is signed keyless with Sigstore (no long-lived key) and
+Every release archive is signed keyless with Sigstore (no long-lived key),
 carries a SLSA build-provenance attestation tied to this repository and the
-release workflow. Verify provenance with the GitHub CLI, and the signature with
-cosign:
+release workflow, and ships a signed CycloneDX SBOM. Verify provenance with the
+GitHub CLI, and the signatures (checksums and SBOM) with cosign:
 
 ```sh
 # 1. SLSA build provenance (binds the artifact to this repo + workflow):
@@ -84,6 +161,16 @@ cosign verify-blob \
 
 # 3. Check the archive(s) you downloaded against the now-trusted checksums:
 sha256sum --ignore-missing -c checksums.txt
+
+# 4. (Optional) Verify the SBOM for an archive. Each archive ships a CycloneDX
+#    SBOM (<archive>.sbom.json) signed with the same keyless identity and
+#    carried in its own .cosign.bundle:
+cosign verify-blob \
+  --bundle ocu-rclone-filestore_<ver>_linux_amd64.tar.gz.sbom.json.cosign.bundle \
+  --certificate-identity-regexp \
+    '^https://github.com/Wide-Moat/ocu-rclone-filestore/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ocu-rclone-filestore_<ver>_linux_amd64.tar.gz.sbom.json
 ```
 
 ## License

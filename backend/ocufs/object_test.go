@@ -124,7 +124,7 @@ func TestOpenRangeTable(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Open: %v", err)
 			}
-			rc.Close()
+			_ = rc.Close()
 
 			if len(c.calls) != 1 {
 				t.Fatalf("expected 1 download call, got %d", len(c.calls))
@@ -179,7 +179,7 @@ func TestOpenNonMandatoryUnknownOptionIgnored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open with non-mandatory unknown option: %v", err)
 	}
-	rc.Close()
+	_ = rc.Close()
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +222,7 @@ func TestFallbackResolveOnOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	got, _ := io.ReadAll(rc)
 	_ = got
 
@@ -323,7 +323,7 @@ func TestListDerivedObjectOpenNoResolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 
 	if c.readMetadataCount != 0 {
 		t.Errorf("ReadMetadata was called %d times, want 0 for a uuid-bearing Object", c.readMetadataCount)
