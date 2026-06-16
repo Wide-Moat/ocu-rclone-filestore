@@ -350,9 +350,11 @@ services:
     environment:
       # A remote NAME (fsconf) rooted under /e2e; the suite creates /e2e through
       # the edge at bootstrap and writes beneath it. Distinct from the exercise
-      # runner's RCLONE_OCUFS_LIVE boolean.
+      # runner's RCLONE_OCUFS_LIVE boolean. RCLONE_CONFIG is deliberately UNSET:
+      # the remote is configured via RCLONE_CONFIG_FSCONF_* env overrides the
+      # bootstrap emits (so the multi-line CA PEM survives — rclone's file parser
+      # does not round-trip a bare multi-line value, but the env overrides do).
       OCU_FSTESTS_REMOTE: "fsconf:e2e"
-      RCLONE_CONFIG: /tmp/conformance-rclone.conf
     volumes:
       - shared:/shared:ro
     command:
@@ -361,11 +363,12 @@ services:
       - |
         /conformance-bootstrap \
           -remote fsconf \
-          -out /tmp/conformance-rclone.conf \
+          -out /tmp/conformance-env.sh \
           -service-url https://edge:8450 \
           -filesystem-id fsconf \
           -ca /shared/ca.pem \
           -tokens /shared/weak-tokens.json
+        . /tmp/conformance-env.sh
         exec /conformance.test -test.v -test.run '^TestFstestsLiveBroker$$' -test.count=1
 
 networks:

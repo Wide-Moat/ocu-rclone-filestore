@@ -82,6 +82,18 @@ func run(out, edgeHost string, edgePort int, fixtureTemplate string) error {
 		return fmt.Errorf("create out dir: %w", err)
 	}
 
+	// Idempotency guard: this step gates every long-running peer, but compose
+	// re-runs a service_completed_successfully dependency on every `compose run`.
+	// Re-generating the CA would rotate the trust anchor out from under the
+	// already-running edge/filestore (which loaded their leaves at startup),
+	// breaking the next dialer. If the rendered guest config already exists, the
+	// artifacts were produced by the first run; leave them untouched.
+	marker := filepath.Join(out, "guest-config.json")
+	if _, statErr := os.Stat(marker); statErr == nil {
+		fmt.Fprintf(os.Stdout, "harness-init: artifacts already present in %s; leaving them in place (idempotent)\n", out)
+		return nil
+	}
+
 	// 1. The CA.
 	ca, err := localca.New()
 	if err != nil {
