@@ -10,11 +10,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 )
 
-// serviceBase is the Connect-RPC service path prefix for the file-operations
-// service under the ocu.filestore.v1alpha namespace.
-const serviceBase = "/ocu.filestore.v1alpha.FilesystemService/"
+// restBase is the REST path prefix for the file-operations service. Each op
+// routes to <service_url>/v1/filestore/fs/<operation>.
+const restBase = "v1/filestore/fs/"
 
 // defaultMessageCeiling is the default maximum payload size for a single
 // streaming chunk frame, measured on the ENCODED frame payload. The chunker
@@ -32,66 +34,97 @@ type ClientOptions struct {
 	MessageCeiling int
 }
 
-// Client is the guest-side Connect-JSON client for the broker's
-// file-operations service. It is bound at construction to a per-session
-// AF_UNIX socket (the only egress path) and a filesystem_id (the sole scope
-// handle). It holds no credential, constructs no credential header, and
-// has no code path that sets downloadable to true.
+// Client is the guest-side REST client for the broker's file-operations
+// service. It is bound at construction to an HTTPS service_url (the only egress
+// path, reached over TLS that trusts the inspecting edge's CA), a filesystem_id
+// (the sole scope handle), and a static session credential read once at
+// construction. It has no code path that sets downloadable to true and no
+// credential-refresh path.
 type Client struct {
 	http           *http.Client
+	serviceURL     string
 	fsID           string
+	authToken      string
 	messageCeiling int
 }
 
-// New constructs a Client bound to the given per-session unix socket path and
-// filesystem_id. The socket path comes from the guest mount config; it is
-// never a shared constant.
-func New(socketPath string, fsID string) (*Client, error) {
-	return NewWithOptions(socketPath, fsID, ClientOptions{})
+// New constructs a Client bound to the broker's HTTPS service_url, the
+// session-scoped filesystem_id, the static session credential, and the PEM
+// trust anchor for the inspecting edge. All four arrive from host-side
+// provisioning; none is a shared constant.
+func New(serviceURL, fsID, authToken string, caCertPEM []byte) (*Client, error) {
+	return NewWithOptions(serviceURL, fsID, authToken, caCertPEM, ClientOptions{})
 }
 
 // NewWithOptions constructs a Client with explicit options.
-func NewWithOptions(socketPath, fsID string, opts ClientOptions) (*Client, error) {
-	if socketPath == "" {
-		return nil, fmt.Errorf("brokerrpc.New: socketPath must not be empty")
+func NewWithOptions(serviceURL, fsID, authToken string, caCertPEM []byte, opts ClientOptions) (*Client, error) {
+	if serviceURL == "" {
+		return nil, fmt.Errorf("brokerrpc.New: serviceURL must not be empty")
+	}
+	u, err := url.Parse(serviceURL)
+	if err != nil {
+		return nil, fmt.Errorf("brokerrpc.New: serviceURL is not a valid URL: %w", err)
+	}
+	if u.Scheme != "https" {
+		return nil, fmt.Errorf("brokerrpc.New: serviceURL must be an https:// URL, got scheme %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("brokerrpc.New: serviceURL must include a host")
 	}
 	if fsID == "" {
 		return nil, fmt.Errorf("brokerrpc.New: fsID must not be empty")
+	}
+	if authToken == "" {
+		return nil, fmt.Errorf("brokerrpc.New: authToken must not be empty")
+	}
+	if len(caCertPEM) == 0 {
+		return nil, fmt.Errorf("brokerrpc.New: caCertPEM must not be empty")
+	}
+	transport, err := httpsTransport(caCertPEM)
+	if err != nil {
+		return nil, fmt.Errorf("brokerrpc.New: build transport: %w", err)
 	}
 	ceiling := opts.MessageCeiling
 	if ceiling <= 0 {
 		ceiling = defaultMessageCeiling
 	}
 	return &Client{
-		http: &http.Client{
-			Transport: unixTransport(socketPath),
-		},
+		http:           &http.Client{Transport: transport},
+		serviceURL:     serviceURL,
 		fsID:           fsID,
+		authToken:      authToken,
 		messageCeiling: ceiling,
 	}, nil
 }
 
-// call is the unexported unary call helper. It marshals req to JSON, POSTs
-// to the per-op route /ocu.filestore.v1alpha.FilesystemService/<op> with the
-// required Connect-Protocol-Version: 1 header and Content-Type:
-// application/json, then decodes a 2xx JSON response into resp. On non-2xx it
-// returns a plain error; full closed-code mapping is wired in a later phase.
+// opURL builds the REST URL for an op: <service_url>/v1/filestore/fs/<op>.
+func (c *Client) opURL(op Op) string {
+	return strings.TrimRight(c.serviceURL, "/") + "/" + restBase + string(op)
+}
+
+// setAuthHeader stamps the static session credential on a request. The
+// credential is read once at construction; there is no refresh.
+func (c *Client) setAuthHeader(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+c.authToken)
+}
+
+// call is the unexported unary call helper. It marshals req to JSON, POSTs to
+// the per-op REST route <service_url>/v1/filestore/fs/<op> over HTTPS with a
+// static Authorization: Bearer header and Content-Type: application/json, then
+// decodes a 2xx JSON response into resp. On non-2xx it hands the HTTP status,
+// body, and Retry-After header to MapHTTPStatus.
 func (c *Client) call(ctx context.Context, op Op, req, resp interface{}) error {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("brokerrpc: marshal %s request: %w", op, err)
 	}
 
-	// The broker lives on a unix socket; the http.Transport's DialContext
-	// ignores the host portion. We use "http://broker" as a placeholder host
-	// so the standard library constructs a valid HTTP/1.1 request.
-	url := "http://broker" + serviceBase + string(op)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opURL(op), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("brokerrpc: build request for %s: %w", op, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Connect-Protocol-Version", "1")
+	c.setAuthHeader(httpReq)
 
 	httpResp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -107,18 +140,10 @@ func (c *Client) call(ctx context.Context, op Op, req, resp interface{}) error {
 	}
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
-		// Non-2xx unary error: decode the Connect error body and run it
-		// through the closed-code mapper (D4). The Retry-After header is
-		// present only on resource_exhausted per the locked contract.
-		var ce ConnectError
-		if jsonErr := json.Unmarshal(respBody, &ce); jsonErr != nil || ce.Code == "" {
-			// Body is not a parseable Connect error: fall back to a plain
-			// permanent error wrapping the raw body.
-			return fmt.Errorf("%w: %s: status %d: %s",
-				ErrPermanentOther, op, httpResp.StatusCode, string(respBody))
-		}
-		retryAfterRaw := httpResp.Header.Get("Retry-After")
-		return MapConnectError(&ce, retryAfterRaw)
+		// Non-2xx error: the HTTP status drives the typed mapping. The body is
+		// carried for diagnostics; the Retry-After header is honoured only on
+		// 429 inside MapHTTPStatus.
+		return MapHTTPStatus(httpResp.StatusCode, respBody, httpResp.Header.Get("Retry-After"))
 	}
 
 	if resp != nil {
@@ -141,8 +166,9 @@ func (c *Client) stamp(op Op) (string, AuthorizationMetadata, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Unary op methods — 16 total (fileUpload and fileDownload are streaming;
-// their transport is wired in plan 02-02; types are defined in messages.go).
+// Unary op methods — 16 total (fileUpload and fileDownload have REST
+// upload/download transports in upload.go/download.go; types in messages.go).
+// Each routes to <service_url>/v1/filestore/fs/<op> over HTTPS.
 // ---------------------------------------------------------------------------
 
 // ListDirectory lists a single page of the directory at path. When the
