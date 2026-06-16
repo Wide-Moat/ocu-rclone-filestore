@@ -8,6 +8,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -222,6 +223,73 @@ func TestResolveRejectsEmptyFilesystemID(t *testing.T) {
 	}
 }
 
+// TestResolveRejectsScopeMismatch covers WR-01: a token scoped to fs-B used for
+// an fs-A request must be refused, the peer must never be called, and nothing
+// must be cached under either scope. Without the cross-check, the exchange would
+// issue an fs-B credential and the glue would cache it under key fs-A, so a
+// later fs-A request would resolve to a foreign-scope credential.
+func TestResolveRejectsScopeMismatch(t *testing.T) {
+	cp, sink, _, ct := newWired(t)
+	g, err := New(Options{
+		ExchangeURL: "http://exchange.test" + exchange.ExchangePath,
+		Client:      &http.Client{Transport: ct},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// A valid, well-signed token whose own claim is fs-B.
+	weakB, err := cp.Mint("fs-B", "write", false)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+
+	// Request fs-A with the fs-B token: the scopes disagree, so Resolve refuses.
+	if _, rerr := g.Resolve(context.Background(), "fs-A", weakB); rerr == nil {
+		t.Fatalf("expected error on scope mismatch (fs-B token, fs-A request)")
+	}
+	// The peer must not have been called at all on a mismatch.
+	if got := atomic.LoadInt64(&ct.calls); got != 0 {
+		t.Fatalf("exchange peer hit %d times on a mismatch, want 0", got)
+	}
+	// Neither scope may be seeded in the cache, and no credential may have been
+	// issued into the sink.
+	if _, ok := g.Cached("fs-A"); ok {
+		t.Fatalf("a scope mismatch must not seed cache key fs-A")
+	}
+	if _, ok := g.Cached("fs-B"); ok {
+		t.Fatalf("a scope mismatch must not seed cache key fs-B")
+	}
+	if len(sink) != 0 {
+		t.Fatalf("a scope mismatch must not issue any credential, sink=%v", sink)
+	}
+}
+
+// TestResolveRejectsUnparseableToken covers the claim-extraction failure path: a
+// token that is not a compact JWS cannot be scope-checked, so Resolve refuses
+// before reaching the peer.
+func TestResolveRejectsUnparseableToken(t *testing.T) {
+	_, _, ts, _ := newWired(t)
+	g, err := New(Options{ExchangeURL: ts.URL + exchange.ExchangePath})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	cases := []string{
+		"not-a-jws",                   // not three segments
+		"a.!!!notbase64!!!.c",         // payload not base64url
+		"a." + b64("not json") + ".c", // payload not JSON
+		"a." + b64(`{"x":1}`) + ".c",  // JSON without a filesystem_id
+	}
+	for _, tok := range cases {
+		if _, rerr := g.Resolve(context.Background(), "fs-outputs", tok); rerr == nil {
+			t.Fatalf("expected error on unparseable token %q", tok)
+		}
+	}
+}
+
+// b64 is the base64url (no-pad) encoding used to build raw JWS payload segments
+// in tests.
+func b64(s string) string { return base64.RawURLEncoding.EncodeToString([]byte(s)) }
+
 func TestNewRejectsEmptyURL(t *testing.T) {
 	if _, err := New(Options{ExchangeURL: "   "}); err == nil {
 		t.Fatalf("expected error on empty exchange URL")
@@ -238,6 +306,25 @@ func TestNewDefaultsClient(t *testing.T) {
 	}
 }
 
+// mintScoped returns a valid weak JWT scoped to filesystemID, signed by a fresh
+// control-plane. The scope-check in Resolve passes when the request targets the
+// same scope, so these tests reach the downstream exchange/transport paths they
+// intend to exercise rather than short-circuiting on the WR-01 cross-check.
+func mintScoped(t *testing.T, filesystemID string) string {
+	t.Helper()
+	cp, err := controlplane.NewServer(controlplane.Options{
+		Issuer: issuer, Audience: audience, Kid: "kid-cp", Now: fixedNow,
+	})
+	if err != nil {
+		t.Fatalf("control-plane: %v", err)
+	}
+	tok, err := cp.Mint(filesystemID, "write", false)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	return tok
+}
+
 func TestExchangeErrorsOnTransportFailure(t *testing.T) {
 	// A URL that fails to dial surfaces a round-trip error and caches nothing.
 	g, err := New(Options{
@@ -247,7 +334,7 @@ func TestExchangeErrorsOnTransportFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, rerr := g.Resolve(context.Background(), "fs-outputs", "weak"); rerr == nil {
+	if _, rerr := g.Resolve(context.Background(), "fs-outputs", mintScoped(t, "fs-outputs")); rerr == nil {
 		t.Fatalf("expected transport error")
 	}
 }
@@ -259,7 +346,7 @@ func TestExchangeErrorsOnNon200(t *testing.T) {
 	}))
 	defer ts.Close()
 	g, _ := New(Options{ExchangeURL: ts.URL})
-	if _, err := g.Resolve(context.Background(), "fs-outputs", "weak"); err == nil {
+	if _, err := g.Resolve(context.Background(), "fs-outputs", mintScoped(t, "fs-outputs")); err == nil {
 		t.Fatalf("expected error on non-200")
 	}
 }
@@ -271,7 +358,7 @@ func TestExchangeErrorsOnEmptyAccessToken(t *testing.T) {
 	}))
 	defer ts.Close()
 	g, _ := New(Options{ExchangeURL: ts.URL})
-	if _, err := g.Resolve(context.Background(), "fs-outputs", "weak"); err == nil {
+	if _, err := g.Resolve(context.Background(), "fs-outputs", mintScoped(t, "fs-outputs")); err == nil {
 		t.Fatalf("expected error on empty access_token")
 	}
 }
@@ -283,7 +370,7 @@ func TestExchangeErrorsOnGarbledBody(t *testing.T) {
 	}))
 	defer ts.Close()
 	g, _ := New(Options{ExchangeURL: ts.URL})
-	if _, err := g.Resolve(context.Background(), "fs-outputs", "weak"); err == nil {
+	if _, err := g.Resolve(context.Background(), "fs-outputs", mintScoped(t, "fs-outputs")); err == nil {
 		t.Fatalf("expected error on garbled body")
 	}
 }
@@ -294,7 +381,7 @@ func TestExchangeErrorsOnBadRequestBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := g.Resolve(context.Background(), "fs-outputs", "weak"); err == nil {
+	if _, err := g.Resolve(context.Background(), "fs-outputs", mintScoped(t, "fs-outputs")); err == nil {
 		t.Fatalf("expected request-build error")
 	}
 }

@@ -20,6 +20,7 @@ package edgeglue
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,6 +43,16 @@ const maxResponseBytes = 1 << 20
 // tokenResponse is the RFC-8693 success body the exchange peer returns.
 type tokenResponse struct {
 	AccessToken string `json:"access_token"`
+}
+
+// scopeClaims is the slice of the weak session JWT payload the glue needs to
+// cross-check the requested scope against the token's own claim. It mirrors the
+// control-plane claim name and is decoded WITHOUT signature verification: the
+// exchange peer is the authority that verifies the signature and only issues a
+// credential bound to the token's true scope. The glue's own check exists purely
+// to refuse caching that credential under a mismatched cache key (WR-01).
+type scopeClaims struct {
+	FilesystemID string `json:"filesystem_id"`
 }
 
 // Exchanger performs the RFC-8693 exchange against the exchange peer and caches
@@ -106,6 +117,23 @@ func New(opts Options) (*Exchanger, error) {
 func (e *Exchanger) Resolve(ctx context.Context, filesystemID, weakJWT string) (string, error) {
 	if filesystemID == "" {
 		return "", fmt.Errorf("edgeglue: a filesystem_id is required")
+	}
+
+	// WR-01: the credential the exchange issues is bound to the scope the JWT
+	// itself claims, not to the caller-supplied filesystemID. Caching the result
+	// under filesystemID without first confirming the two agree would let a token
+	// scoped to fs-B seed an fs-B credential under cache key fs-A, so a later
+	// fs-A request would be answered with an fs-B credential. Cross-check the
+	// token's own filesystem_id claim against the requested scope before touching
+	// the cache or the peer, and refuse on a mismatch. The claim is read from the
+	// unverified payload only to compare it; the exchange peer remains the
+	// authority that verifies the signature.
+	claimedFSID, err := filesystemIDClaim(weakJWT)
+	if err != nil {
+		return "", fmt.Errorf("edgeglue: cannot read subject token scope: %w", err)
+	}
+	if claimedFSID != filesystemID {
+		return "", fmt.Errorf("edgeglue: subject token is scoped to %q, not the requested %q", claimedFSID, filesystemID)
 	}
 
 	e.mu.Lock()
@@ -185,4 +213,29 @@ func (e *Exchanger) exchange(ctx context.Context, weakJWT string) (string, error
 		return "", fmt.Errorf("edgeglue: exchange returned no access_token")
 	}
 	return tr.AccessToken, nil
+}
+
+// filesystemIDClaim extracts the filesystem_id claim from a compact JWS payload
+// segment without verifying the signature. It is used solely to cross-check the
+// requested scope against the token's own claim (WR-01); signature, issuer,
+// audience, and expiry remain the exchange peer's responsibility. A token that
+// is not a three-segment compact JWS, whose payload is not base64url, or whose
+// payload is not JSON is rejected, as is one carrying no filesystem_id.
+func filesystemIDClaim(token string) (string, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", fmt.Errorf("not a compact JWS")
+	}
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("payload is not base64url")
+	}
+	var sc scopeClaims
+	if err := json.Unmarshal(payloadJSON, &sc); err != nil {
+		return "", fmt.Errorf("payload is not JSON")
+	}
+	if sc.FilesystemID == "" {
+		return "", fmt.Errorf("subject token carries no filesystem_id")
+	}
+	return sc.FilesystemID, nil
 }
