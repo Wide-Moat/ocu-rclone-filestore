@@ -241,16 +241,27 @@ func TestNewFsReadOnly(t *testing.T) {
 	}
 }
 
-// TestNewFsMissingSocketPath verifies that NewFs returns a non-nil error when
-// the socket_path option is absent.
-func TestNewFsMissingSocketPath(t *testing.T) {
-	m := configmap.Simple{
+// TestNewFsMissingRequiredOptions verifies that NewFs returns a non-nil error
+// when any required option (service_url, auth_token, ca_cert_pem) is absent.
+func TestNewFsMissingRequiredOptions(t *testing.T) {
+	full := configmap.Simple{
+		"service_url":   "https://broker",
 		"filesystem_id": "fs-01",
-		// socket_path deliberately absent
+		"auth_token":    "t",
+		"ca_cert_pem":   "pem",
 	}
-	_, err := NewFs(context.Background(), "test", "/", m)
-	if err == nil {
-		t.Fatal("NewFs with missing socket_path returned nil error, want an error")
+	for _, missing := range []string{"service_url", "auth_token", "ca_cert_pem"} {
+		t.Run("missing_"+missing, func(t *testing.T) {
+			m := configmap.Simple{}
+			for k, v := range full {
+				if k != missing {
+					m[k] = v
+				}
+			}
+			if _, err := NewFs(context.Background(), "test", "/", m); err == nil {
+				t.Fatalf("NewFs with missing %s returned nil error, want an error", missing)
+			}
+		})
 	}
 }
 
@@ -258,7 +269,9 @@ func TestNewFsMissingSocketPath(t *testing.T) {
 // when the filesystem_id option is absent.
 func TestNewFsMissingFilesystemID(t *testing.T) {
 	m := configmap.Simple{
-		"socket_path": "/run/broker.sock",
+		"service_url": "https://broker",
+		"auth_token":  "t",
+		"ca_cert_pem": "pem",
 		// filesystem_id deliberately absent
 	}
 	_, err := NewFs(context.Background(), "test", "/", m)
