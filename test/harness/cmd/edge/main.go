@@ -97,6 +97,11 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Stage 2 + 4: FRESH upstream request — the inbound Authorization is NOT
 	// copied (the weak JWT is stripped); the exchanged credential is INJECTED in
 	// its place, then routed to the filestore.
+	//nolint:gosec // G704: this IS the egress edge — forwarding the request to the
+	// FIXED operator-configured filestore upstream (e.upstreamURL) is its entire
+	// purpose. The host is not client-controlled (only the path is, and the
+	// filestore confines every path under the scope root); this is a deliberate
+	// reverse proxy in a harness, not an SSRF sink.
 	up, err := http.NewRequestWithContext(r.Context(), r.Method, e.upstreamURL+r.URL.Path, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "build upstream request", http.StatusBadGateway)
@@ -107,7 +112,7 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	up.Header.Set("Authorization", "Bearer "+cred)
 
-	resp, err := e.upstream.Do(up)
+	resp, err := e.upstream.Do(up) //nolint:gosec // G704: deliberate edge forward to the fixed filestore upstream (see above)
 	if err != nil {
 		http.Error(w, "upstream unreachable", http.StatusBadGateway)
 		return
@@ -122,20 +127,30 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, resp.Body)
 }
 
-func main() {
-	addr := flag.String("addr", ":8450", "TLS listen address")
-	certPath := flag.String("cert", "/shared/edge.cert.pem", "leaf certificate PEM")
-	keyPath := flag.String("key", "/shared/edge.key.pem", "leaf private key PEM")
-	caPath := flag.String("ca", "/shared/ca.pem", "CA PEM for dialing the peers")
-	cpJWKSURL := flag.String("control-plane-jwks", "https://control-plane:8443/.well-known/jwks.json", "control-plane JWKS URL")
-	exchangeURL := flag.String("exchange-url", "https://exchange:8447/token", "exchange token endpoint URL")
-	upstreamURL := flag.String("upstream-url", "https://filestore:8444", "filestore upstream base URL")
-	flag.Parse()
+// runFn is the serving entry, seamed for tests.
+var runFn = run
 
-	if err := run(*addr, *certPath, *keyPath, *caPath, *cpJWKSURL, *exchangeURL, *upstreamURL); err != nil {
+func main() {
+	if err := mainWith(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "edge: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// mainWith parses args with a local FlagSet and invokes runFn.
+func mainWith(args []string) error {
+	fs := flag.NewFlagSet("edge", flag.ContinueOnError)
+	addr := fs.String("addr", ":8450", "TLS listen address")
+	certPath := fs.String("cert", "/shared/edge.cert.pem", "leaf certificate PEM")
+	keyPath := fs.String("key", "/shared/edge.key.pem", "leaf private key PEM")
+	caPath := fs.String("ca", "/shared/ca.pem", "CA PEM for dialing the peers")
+	cpJWKSURL := fs.String("control-plane-jwks", "https://control-plane:8443/.well-known/jwks.json", "control-plane JWKS URL")
+	exchangeURL := fs.String("exchange-url", "https://exchange:8447/token", "exchange token endpoint URL")
+	upstreamURL := fs.String("upstream-url", "https://filestore:8444", "filestore upstream base URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return runFn(*addr, *certPath, *keyPath, *caPath, *cpJWKSURL, *exchangeURL, *upstreamURL)
 }
 
 func run(addr, certPath, keyPath, caPath, cpJWKSURL, exchangeURL, upstreamURL string) error {
@@ -169,6 +184,6 @@ func run(addr, certPath, keyPath, caPath, cpJWKSURL, exchangeURL, upstreamURL st
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "edge: serving validate->strip->exchange->inject on %s -> %s\n", addr, upstreamURL)
+	_, _ = fmt.Fprintf(os.Stdout, "edge: serving validate->strip->exchange->inject on %s -> %s\n", addr, upstreamURL)
 	return serve.Run(addr, tlsConf, h)
 }

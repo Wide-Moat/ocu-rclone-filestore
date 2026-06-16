@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Optional runsc (gVisor) overlay for the network e2e graph. Layer it over the
+# base compose to run the guest mount under the gVisor sentry instead of runc:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.runsc.yml \
+#     up -d harness-init control-plane exchange filestore edge mount
+#
+# Canon says the storage leg is network on EVERY tier, so the network harness is
+# expected to work on the gVisor tier: the mount dials the edge over the docker
+# network (the sentry services that), and there are NO unix-socket peers in this
+# graph (the old UDS peer-uid blocker of the socket harness does not apply here).
+# FUSE serving in the sentry was already proven on this tier.
+#
+# KNOWN BLOCKER (re-proof deferred, see ../../docs/e2e-local.md): the sentry
+# rejects the rshared root-mount propagation the multi-container graph uses to
+# propagate the FUSE mounts from the mount container out to the test-runner
+# ("root mount propagation option must specify private or slave"). gVisor
+# supports only private/slave root propagation. Re-proving the network exercise
+# on gVisor therefore needs a co-located, single-sandbox harness shape (no
+# cross-container mount propagation) rather than this thin runtime overlay — the
+# same all-in-one shape the prior socket harness used, re-cut for the network
+# peers. This overlay documents the attempt and the exact blocker; it does NOT
+# run the full exercise as-is. runc remains the hard release gate; this tier is
+# additive/advisory (see ../../docs/ci-runsc-decision.md).
+
+services:
+  mount:
+    runtime: runsc

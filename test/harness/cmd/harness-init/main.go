@@ -65,20 +65,28 @@ const (
 )
 
 func main() {
-	out := flag.String("out", "/shared", "directory to write CA, leaf certs, keys, JWKS, and the rendered guest config into")
-	edgeHost := flag.String("edge-host", "edge", "the host the guest dials in service_url (must match the edge leaf SAN)")
-	edgePort := flag.Int("edge-port", 8450, "the port the guest dials the edge on")
-	fixtureTemplate := flag.String("fixture-template", "/fixtures/guest-config.json", "the single-shape guest config to render service_url/auth_token/ca_cert_pem into")
-	flag.Parse()
-
-	if err := run(*out, *edgeHost, *edgePort, *fixtureTemplate); err != nil {
+	if err := mainWith(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "harness-init: %v\n", err)
 		os.Exit(1)
 	}
 }
 
+// mainWith parses args with a local FlagSet and runs the keystone, so it is
+// callable from a test without racing the package flag set.
+func mainWith(args []string) error {
+	fs := flag.NewFlagSet("harness-init", flag.ContinueOnError)
+	out := fs.String("out", "/shared", "directory to write CA, leaf certs, keys, JWKS, and the rendered guest config into")
+	edgeHost := fs.String("edge-host", "edge", "the host the guest dials in service_url (must match the edge leaf SAN)")
+	edgePort := fs.Int("edge-port", 8450, "the port the guest dials the edge on")
+	fixtureTemplate := fs.String("fixture-template", "/fixtures/guest-config.json", "the single-shape guest config to render service_url/auth_token/ca_cert_pem into")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return run(*out, *edgeHost, *edgePort, *fixtureTemplate)
+}
+
 func run(out, edgeHost string, edgePort int, fixtureTemplate string) error {
-	if err := os.MkdirAll(out, 0o755); err != nil {
+	if err := os.MkdirAll(out, 0o750); err != nil {
 		return fmt.Errorf("create out dir: %w", err)
 	}
 
@@ -90,7 +98,7 @@ func run(out, edgeHost string, edgePort int, fixtureTemplate string) error {
 	// artifacts were produced by the first run; leave them untouched.
 	marker := filepath.Join(out, "guest-config.json")
 	if _, statErr := os.Stat(marker); statErr == nil {
-		fmt.Fprintf(os.Stdout, "harness-init: artifacts already present in %s; leaving them in place (idempotent)\n", out)
+		_, _ = fmt.Fprintf(os.Stdout, "harness-init: artifacts already present in %s; leaving them in place (idempotent)\n", out)
 		return nil
 	}
 
@@ -167,7 +175,7 @@ func run(out, edgeHost string, edgePort int, fixtureTemplate string) error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stdout, "harness-init: wrote CA, %d leaf certs, weak tokens, and guest-config.json to %s\n", len(serviceNames), out)
+	_, _ = fmt.Fprintf(os.Stdout, "harness-init: wrote CA, %d leaf certs, weak tokens, and guest-config.json to %s\n", len(serviceNames), out)
 	return nil
 }
 

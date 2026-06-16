@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -15,6 +16,25 @@ import (
 
 	"github.com/rclone/rclone/fs/fserrors"
 )
+
+// TestIsPipeClosure pins the pipe-closure classifier: io.ErrClosedPipe (and any
+// error wrapping it) is the broker-ended-the-request-early symptom that must be
+// swallowed when the HTTP status already carried the verdict, while every other
+// error is a real local fault the upload path must surface.
+func TestIsPipeClosure(t *testing.T) {
+	if !isPipeClosure(io.ErrClosedPipe) {
+		t.Fatal("isPipeClosure(io.ErrClosedPipe) = false; want true")
+	}
+	if !isPipeClosure(fmt.Errorf("write file part: %w", io.ErrClosedPipe)) {
+		t.Fatal("isPipeClosure of a wrapped ErrClosedPipe = false; want true")
+	}
+	if isPipeClosure(io.EOF) {
+		t.Fatal("isPipeClosure(io.EOF) = true; want false (EOF is not a pipe closure)")
+	}
+	if isPipeClosure(nil) {
+		t.Fatal("isPipeClosure(nil) = true; want false")
+	}
+}
 
 // parsedUpload holds the multipart fields a test handler reassembled from an
 // upload request: the params JSON and the file bytes.

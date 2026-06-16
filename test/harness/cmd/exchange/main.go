@@ -28,13 +28,13 @@ const (
 	cpIssuer   = "https://control-plane.test"
 	cpAudience = "filestore-edge"
 
-	credIssuer   = "https://exchange.test"
+	credIssuer   = "https://exchange.test" //nolint:gosec // G101: an issuer identifier URL, not a credential
 	credAudience = "filestore"
 	credKid      = "kid-cred"
 
 	// CredentialJWKSPath is where the exchange publishes the verification key set
 	// for the credential JWTs it issues. The filestore fetches this at startup.
-	credentialJWKSPath = "/credential-jwks"
+	credentialJWKSPath = "/credential-jwks" //nolint:gosec // G101: a URL path, not a credential
 )
 
 // staticJWKS adapts a fixed jwtmint.JWKS to the exchange.JWKSProvider interface,
@@ -44,18 +44,28 @@ type staticJWKS struct{ keys jwtmint.JWKS }
 
 func (s staticJWKS) JWKS() jwtmint.JWKS { return s.keys }
 
-func main() {
-	addr := flag.String("addr", ":8447", "TLS listen address")
-	certPath := flag.String("cert", "/shared/exchange.cert.pem", "leaf certificate PEM")
-	keyPath := flag.String("key", "/shared/exchange.key.pem", "leaf private key PEM")
-	caPath := flag.String("ca", "/shared/ca.pem", "CA PEM for dialing the control-plane")
-	cpJWKSURL := flag.String("control-plane-jwks", "https://control-plane:8443/.well-known/jwks.json", "control-plane JWKS URL")
-	flag.Parse()
+// runFn is the serving entry, seamed for tests.
+var runFn = run
 
-	if err := run(*addr, *certPath, *keyPath, *caPath, *cpJWKSURL); err != nil {
+func main() {
+	if err := mainWith(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "exchange: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// mainWith parses args with a local FlagSet and invokes runFn.
+func mainWith(args []string) error {
+	fs := flag.NewFlagSet("exchange", flag.ContinueOnError)
+	addr := fs.String("addr", ":8447", "TLS listen address")
+	certPath := fs.String("cert", "/shared/exchange.cert.pem", "leaf certificate PEM")
+	keyPath := fs.String("key", "/shared/exchange.key.pem", "leaf private key PEM")
+	caPath := fs.String("ca", "/shared/ca.pem", "CA PEM for dialing the control-plane")
+	cpJWKSURL := fs.String("control-plane-jwks", "https://control-plane:8443/.well-known/jwks.json", "control-plane JWKS URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return runFn(*addr, *certPath, *keyPath, *caPath, *cpJWKSURL)
 }
 
 func run(addr, certPath, keyPath, caPath, cpJWKSURL string) error {
@@ -100,6 +110,6 @@ func run(addr, certPath, keyPath, caPath, cpJWKSURL string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "exchange: serving token + credential JWKS on %s\n", addr)
+	_, _ = fmt.Fprintf(os.Stdout, "exchange: serving token + credential JWKS on %s\n", addr)
 	return serve.Run(addr, tlsConf, mux)
 }

@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	credIssuer   = "https://exchange.test"
+	credIssuer   = "https://exchange.test" //nolint:gosec // G101: an issuer identifier URL, not a credential
 	credAudience = "filestore"
 
 	fsRW       = "fsrw"
@@ -35,19 +35,29 @@ const (
 	fsConf     = "fsconf"
 )
 
-func main() {
-	addr := flag.String("addr", ":8444", "TLS listen address")
-	certPath := flag.String("cert", "/shared/filestore.cert.pem", "leaf certificate PEM")
-	keyPath := flag.String("key", "/shared/filestore.key.pem", "leaf private key PEM")
-	caPath := flag.String("ca", "/shared/ca.pem", "CA PEM for dialing the exchange")
-	credJWKSURL := flag.String("credential-jwks", "https://exchange:8447/credential-jwks", "exchange credential-JWKS URL")
-	root := flag.String("root", "/workspace", "engine root; each scope lives in a subdirectory")
-	flag.Parse()
+// runFn is the serving entry, seamed for tests.
+var runFn = run
 
-	if err := run(*addr, *certPath, *keyPath, *caPath, *credJWKSURL, *root); err != nil {
+func main() {
+	if err := mainWith(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "filestored: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// mainWith parses args with a local FlagSet and invokes runFn.
+func mainWith(args []string) error {
+	fs := flag.NewFlagSet("filestored", flag.ContinueOnError)
+	addr := fs.String("addr", ":8444", "TLS listen address")
+	certPath := fs.String("cert", "/shared/filestore.cert.pem", "leaf certificate PEM")
+	keyPath := fs.String("key", "/shared/filestore.key.pem", "leaf private key PEM")
+	caPath := fs.String("ca", "/shared/ca.pem", "CA PEM for dialing the exchange")
+	credJWKSURL := fs.String("credential-jwks", "https://exchange:8447/credential-jwks", "exchange credential-JWKS URL")
+	root := fs.String("root", "/workspace", "engine root; each scope lives in a subdirectory")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return runFn(*addr, *certPath, *keyPath, *caPath, *credJWKSURL, *root)
 }
 
 func run(addr, certPath, keyPath, caPath, credJWKSURL, root string) error {
@@ -101,6 +111,6 @@ func run(addr, certPath, keyPath, caPath, credJWKSURL, root string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "filestored: serving %d scopes on %s (root %s)\n", len(scopes), addr, root)
+	_, _ = fmt.Fprintf(os.Stdout, "filestored: serving %d scopes on %s (root %s)\n", len(scopes), addr, root)
 	return serve.Run(addr, tlsConf, srv.Handler())
 }

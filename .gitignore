@@ -13,6 +13,17 @@ dist/
 build/
 cover.out
 *.coverprofile
+# Root-level Go build artefacts (a `go build ./cmd/X` or `./test/harness/cmd/X`
+# drops the binary at the repo root named after the package basename). Never
+# commit these; the images build them in-container.
+/ocu-rclone-filestore
+/filestored
+/controlplane
+/exchange
+/edge
+/harness-init
+/conformance-bootstrap
+/peer
 .env
 .env.*
 !.env.example

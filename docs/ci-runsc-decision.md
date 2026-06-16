@@ -3,6 +3,18 @@
 
 # Running the e2e gate under gVisor (runsc) — decision record
 
+> **Superseded for the network topology.** This record describes the
+> all-in-one runsc harness for the earlier unix-socket peer graph, which has
+> since been replaced by the network-topology graph (the guest dials an HTTPS
+> edge; no unix-socket peers remain). The all-in-one image and entrypoint it
+> references have been removed. The gVisor findings below — FUSE serves in the
+> sentry; teardown rides SIGTERM → process exit → sandbox reclaim — still hold
+> and are the reason the network exercise is expected to pass on gVisor. The
+> network re-proof is a tracked follow-up: a thin runtime overlay trips on the
+> sentry's refusal of `rshared` root-mount propagation, so it needs a
+> co-located single-sandbox harness re-cut for the network peers (see
+> `e2e-local.md`, section 6). runc remains the hard release gate.
+
 ## Context
 
 The runc-based live e2e gate (`ci-fuse-decision.md`) stands in for the
@@ -55,14 +67,12 @@ is faithful to the target deployment, not a workaround for it.
 
 ## Decision
 
-The runsc leg runs the **same** brokers, mount binary, and test binaries as the
-runc leg, but co-located in one sandbox via a dedicated all-in-one image
-([`runsc-aio.Dockerfile`](../deploy/compose/runsc-aio.Dockerfile) +
-[`runsc-aio-entrypoint.sh`](../deploy/compose/runsc-aio-entrypoint.sh)). No test
-assertion changes; the exercise and conformance binaries are byte-for-byte the
-ones the runc harness compiles. The conformance suite (socket-direct, no FUSE)
-is the safe first green that de-risks the in-sentry socket independently of the
-FUSE path.
+The runsc leg ran the **same** brokers, mount binary, and test binaries as the
+runc leg, but co-located in one sandbox via a dedicated all-in-one image (since
+removed with the unix-socket graph). No test assertion changed; the exercise and
+conformance binaries were byte-for-byte the ones the runc harness compiled. The
+conformance suite (socket-direct, no FUSE) was the safe first green that
+de-risked the in-sentry socket independently of the FUSE path.
 
 The brokers' loopback metrics/ingress binds (`-ops-listen`, `-north-listen`)
 are disabled in the co-located orchestrator: separate containers each bind the

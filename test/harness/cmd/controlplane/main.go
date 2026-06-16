@@ -26,17 +26,29 @@ const (
 	cpKid      = "kid-cp"
 )
 
-func main() {
-	addr := flag.String("addr", ":8443", "TLS listen address")
-	certPath := flag.String("cert", "/shared/control-plane.cert.pem", "leaf certificate PEM")
-	keyPath := flag.String("key", "/shared/control-plane.key.pem", "leaf private key PEM")
-	signingKeyPath := flag.String("signing-key", "/shared/control-plane.signing.key.pem", "the stable ES256 signing key PEM (shared with harness-init)")
-	flag.Parse()
+// runFn is the serving entry, seamed so a test can substitute a stub and drive
+// mainWith without binding a real port.
+var runFn = run
 
-	if err := run(*addr, *certPath, *keyPath, *signingKeyPath); err != nil {
+func main() {
+	if err := mainWith(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "controlplane: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// mainWith parses args with a local FlagSet (no global state) and invokes runFn,
+// so it is callable from a test without racing the package flag set.
+func mainWith(args []string) error {
+	fs := flag.NewFlagSet("controlplane", flag.ContinueOnError)
+	addr := fs.String("addr", ":8443", "TLS listen address")
+	certPath := fs.String("cert", "/shared/control-plane.cert.pem", "leaf certificate PEM")
+	keyPath := fs.String("key", "/shared/control-plane.key.pem", "leaf private key PEM")
+	signingKeyPath := fs.String("signing-key", "/shared/control-plane.signing.key.pem", "the stable ES256 signing key PEM (shared with harness-init)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return runFn(*addr, *certPath, *keyPath, *signingKeyPath)
 }
 
 func run(addr, certPath, keyPath, signingKeyPath string) error {
@@ -57,7 +69,7 @@ func run(addr, certPath, keyPath, signingKeyPath string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stdout, "controlplane: serving mint + JWKS on %s\n", addr)
+	_, _ = fmt.Fprintf(os.Stdout, "controlplane: serving mint + JWKS on %s\n", addr)
 	return serve.Run(addr, tlsConf, srv.Handler())
 }
 

@@ -25,18 +25,26 @@ import (
 )
 
 func main() {
-	remote := flag.String("remote", "fsconf", "the rclone remote name (uppercased into the env override prefix)")
-	out := flag.String("out", "/tmp/conformance-env.sh", "the sourceable env file to write")
-	serviceURL := flag.String("service-url", "https://edge:8450", "the edge service_url the remote dials")
-	filesystemID := flag.String("filesystem-id", "fsconf", "the conformance scope")
-	caPath := flag.String("ca", "/shared/ca.pem", "CA PEM trust anchor path")
-	tokensPath := flag.String("tokens", "/shared/weak-tokens.json", "minted weak-token map written by harness-init")
-	flag.Parse()
-
-	if err := run(*remote, *out, *serviceURL, *filesystemID, *caPath, *tokensPath); err != nil {
+	if err := mainWith(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "conformance-bootstrap: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// mainWith parses args with a local FlagSet and runs the bootstrap, so it is
+// callable from a test without racing the package flag set.
+func mainWith(args []string) error {
+	fs := flag.NewFlagSet("conformance-bootstrap", flag.ContinueOnError)
+	remote := fs.String("remote", "fsconf", "the rclone remote name (uppercased into the env override prefix)")
+	out := fs.String("out", "/tmp/conformance-env.sh", "the sourceable env file to write")
+	serviceURL := fs.String("service-url", "https://edge:8450", "the edge service_url the remote dials")
+	filesystemID := fs.String("filesystem-id", "fsconf", "the conformance scope")
+	caPath := fs.String("ca", "/shared/ca.pem", "CA PEM trust anchor path")
+	tokensPath := fs.String("tokens", "/shared/weak-tokens.json", "minted weak-token map written by harness-init")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return run(*remote, *out, *serviceURL, *filesystemID, *caPath, *tokensPath)
 }
 
 func run(remote, out, serviceURL, filesystemID, caPath, tokensPath string) error {
@@ -84,7 +92,7 @@ func run(remote, out, serviceURL, filesystemID, caPath, tokensPath string) error
 		return fmt.Errorf("write env file %q: %w", out, err)
 	}
 
-	fmt.Fprintf(os.Stdout, "conformance-bootstrap: wrote %d rclone env overrides for remote %q dialing %s (scope %s) to %s\n",
+	_, _ = fmt.Fprintf(os.Stdout, "conformance-bootstrap: wrote %d rclone env overrides for remote %q dialing %s (scope %s) to %s\n",
 		len(overrides), remote, serviceURL, filesystemID, out)
 	return nil
 }

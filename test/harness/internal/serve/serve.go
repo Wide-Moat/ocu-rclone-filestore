@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -79,7 +80,7 @@ func Run(addr string, tlsConf *tls.Config, handler http.Handler) error {
 		// The cert+key are already in TLSConfig, so the empty path args are unused.
 		errCh <- srv.ListenAndServeTLS("", "")
 	}()
-	if err := <-errCh; err != nil && err != http.ErrServerClosed {
+	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve %q: %w", addr, err)
 	}
 	return nil
