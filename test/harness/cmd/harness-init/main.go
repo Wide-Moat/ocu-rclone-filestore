@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/fixture"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/jwtmint"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/localca"
 )
@@ -150,7 +151,7 @@ func run(out, edgeHost string, edgePort int, fixtureTemplate string) error {
 	// 5. Render the guest config: service_url -> edge, auth_token -> per-scope
 	// weak JWT, ca_cert_pem -> the CA PEM.
 	serviceURL := fmt.Sprintf("https://%s:%d", edgeHost, edgePort)
-	if err := renderGuestConfig(fixtureTemplate, filepath.Join(out, "guest-config.json"), serviceURL, string(caPEM), tokens); err != nil {
+	if err := fixture.RenderFile(fixtureTemplate, filepath.Join(out, "guest-config.json"), serviceURL, string(caPEM), tokens); err != nil {
 		return err
 	}
 

@@ -1,11 +1,11 @@
 {
   "schema_version": "v1alpha",
-  "service_url": "https://broker.internal",
-  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIBexampleinspectioncatrustanchorforthelocalegresshop\n-----END CERTIFICATE-----\n",
+  "service_url": "https://edge.invalid",
+  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nTEMPLATE_PLACEHOLDER_RENDERED_AT_BRINGUP\n-----END CERTIFICATE-----\n",
   "mounts": [
     {
       "destination": "/mnt/user-data/outputs/",
-      "auth_token": "tok.fsrw.session",
+      "auth_token": "TEMPLATE_PLACEHOLDER_RENDERED_AT_BRINGUP",
       "filesystem_id": "fsrw",
       "readonly": false,
       "vfs_cache_mode": "writes",
@@ -16,7 +16,7 @@
     },
     {
       "destination": "/mnt/user-data/outputs2/",
-      "auth_token": "tok.fsrw.session",
+      "auth_token": "TEMPLATE_PLACEHOLDER_RENDERED_AT_BRINGUP",
       "filesystem_id": "fsrw",
       "readonly": false,
       "vfs_cache_mode": "writes",
@@ -27,7 +27,7 @@
     },
     {
       "destination": "/mnt/user-data/throttle/",
-      "auth_token": "tok.fsthrottle.session",
+      "auth_token": "TEMPLATE_PLACEHOLDER_RENDERED_AT_BRINGUP",
       "filesystem_id": "fsthrottle",
       "readonly": false,
       "vfs_cache_mode": "writes",
@@ -38,7 +38,7 @@
     },
     {
       "destination": "/mnt/user-data/uploads/",
-      "auth_token": "tok.fsro.session",
+      "auth_token": "TEMPLATE_PLACEHOLDER_RENDERED_AT_BRINGUP",
       "filesystem_id": "fsro",
       "readonly": true,
       "vfs_cache_mode": "minimal",
