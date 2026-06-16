@@ -59,7 +59,9 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(1 << 20); err != nil {
+	// The parse is bounded: 1 MiB of in-memory form parts; the file part itself
+	// is separately capped by maxUploadBytes when copied below.
+	if err := r.ParseMultipartForm(1 << 20); err != nil { //nolint:gosec // G120: the in-memory budget is bounded and the file copy is LimitReader-capped
 		writeError(w, http.StatusBadRequest, "malformed multipart body")
 		return
 	}
@@ -109,12 +111,12 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if mkErr := os.MkdirAll(filepath.Dir(abs), 0o755); mkErr != nil {
+	if mkErr := os.MkdirAll(filepath.Dir(abs), 0o750); mkErr != nil {
 		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
 		return
 	}
 
-	f, err := os.OpenFile(abs, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(abs, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600) //nolint:gosec // G304: abs is traversal-guarded by resolveUnder, confined to the scope volume
 	if err != nil {
 		writeMetaError(w, err)
 		return
@@ -186,7 +188,7 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, scope Scope, body com
 		writeError(w, http.StatusBadRequest, "path escapes scope")
 		return
 	}
-	data, readErr := os.ReadFile(abs)
+	data, readErr := os.ReadFile(abs) //nolint:gosec // G304: abs is traversal-guarded by resolveUnder, confined to the scope volume
 	if readErr != nil {
 		writeMetaError(w, readErr)
 		return

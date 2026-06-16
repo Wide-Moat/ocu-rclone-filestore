@@ -73,15 +73,18 @@ func relPathForUUID(scope Scope, uuid string) (string, bool) {
 	var match string
 	found := false
 	_ = filepath.WalkDir(scope.Root, func(path string, d os.DirEntry, err error) error {
+		// Tolerate a per-entry walk error by skipping just that entry and
+		// continuing the scan, rather than aborting the whole walk: a transiently
+		// unreadable entry must not hide a matching file elsewhere in the volume.
 		if err != nil || found {
-			return nil
+			return nil //nolint:nilerr // intentional: skip the erroring entry and keep walking
 		}
 		if d == nil || d.IsDir() {
 			return nil
 		}
 		rel, rerr := filepath.Rel(scope.Root, path)
 		if rerr != nil {
-			return nil
+			return nil //nolint:nilerr // intentional: skip an unrelatable path and keep walking
 		}
 		if uuidForRelPath(scope.FilesystemID, rel) == uuid {
 			match = rel

@@ -78,11 +78,11 @@ func (s *Server) handleCreateFile(w http.ResponseWriter, scope Scope, body commo
 		writeError(w, http.StatusBadRequest, "path escapes scope")
 		return
 	}
-	if mkErr := os.MkdirAll(filepath.Dir(abs), 0o755); mkErr != nil {
+	if mkErr := os.MkdirAll(filepath.Dir(abs), 0o750); mkErr != nil {
 		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
 		return
 	}
-	f, err := os.OpenFile(abs, os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(abs, os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // G304: abs is traversal-guarded by resolveUnder, confined to the scope volume
 	if err != nil {
 		writeMetaError(w, err)
 		return
@@ -226,7 +226,7 @@ func (s *Server) handleMakeDirectory(w http.ResponseWriter, scope Scope, body co
 		writeError(w, http.StatusBadRequest, "path escapes scope")
 		return
 	}
-	if mkErr := os.MkdirAll(abs, 0o755); mkErr != nil {
+	if mkErr := os.MkdirAll(abs, 0o750); mkErr != nil {
 		writeMetaError(w, mkErr)
 		return
 	}
@@ -312,16 +312,16 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, scope Scope, body commonB
 			return
 		}
 	}
-	data, readErr := os.ReadFile(srcAbs)
+	data, readErr := os.ReadFile(srcAbs) //nolint:gosec // G304: srcAbs is traversal-guarded by resolveSrcDst, confined to the scope volume
 	if readErr != nil {
 		writeMetaError(w, readErr)
 		return
 	}
-	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o755); mkErr != nil {
+	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o750); mkErr != nil {
 		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
 		return
 	}
-	if wErr := os.WriteFile(dstAbs, data, 0o644); wErr != nil {
+	if wErr := os.WriteFile(dstAbs, data, 0o600); wErr != nil { //nolint:gosec // G703/G304: dstAbs is traversal-guarded by resolveSrcDst, confined to the scope volume
 		writeMetaError(w, wErr)
 		return
 	}
@@ -346,7 +346,7 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, scope Scope, body commonB
 			return
 		}
 	}
-	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o755); mkErr != nil {
+	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o750); mkErr != nil {
 		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
 		return
 	}
@@ -369,7 +369,7 @@ func (s *Server) handleMoveDirectory(w http.ResponseWriter, scope Scope, body co
 		writeError(w, status, msg)
 		return
 	}
-	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o755); mkErr != nil {
+	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o750); mkErr != nil {
 		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
 		return
 	}
