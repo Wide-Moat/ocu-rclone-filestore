@@ -5,15 +5,6 @@ package mountcfg
 
 import "fmt"
 
-// mountArray names the array a mount entry belongs to, so error messages can
-// point an operator at the exact entry that failed a rule.
-type mountArray string
-
-const (
-	arrayMounts         mountArray = "mounts"
-	arrayReadonlyMounts mountArray = "readonly_mounts"
-)
-
 // ErrSchemaVersion reports a schema_version that does not match the interface
 // version pattern.
 type ErrSchemaVersion struct {
@@ -36,19 +27,17 @@ func (e *ErrServiceURL) Error() string {
 
 // ErrDestination reports a mount destination that is not absolute.
 type ErrDestination struct {
-	Array mountArray
 	Index int
 	Value string
 }
 
 func (e *ErrDestination) Error() string {
-	return fmt.Sprintf("%s[%d] destination %q must be an absolute path matching ^/.+", e.Array, e.Index, e.Value)
+	return fmt.Sprintf("mounts[%d] destination %q must be an absolute path matching ^/.+", e.Index, e.Value)
 }
 
 // ErrMountScope reports a mount that does not carry exactly one of
 // filesystem_id / memory_store_id.
 type ErrMountScope struct {
-	Array         mountArray
 	Index         int
 	HasFilesystem bool
 	HasMemory     bool
@@ -57,9 +46,9 @@ type ErrMountScope struct {
 func (e *ErrMountScope) Error() string {
 	switch {
 	case e.HasFilesystem && e.HasMemory:
-		return fmt.Sprintf("%s[%d] sets both filesystem_id and memory_store_id; exactly one is required", e.Array, e.Index)
+		return fmt.Sprintf("mounts[%d] sets both filesystem_id and memory_store_id; exactly one is required", e.Index)
 	default:
-		return fmt.Sprintf("%s[%d] sets neither filesystem_id nor memory_store_id; exactly one is required", e.Array, e.Index)
+		return fmt.Sprintf("mounts[%d] sets neither filesystem_id nor memory_store_id; exactly one is required", e.Index)
 	}
 }
 
@@ -67,70 +56,68 @@ func (e *ErrMountScope) Error() string {
 // present but empty. The scope XOR keys on field presence; a present id must
 // still be a non-empty string.
 type ErrScopeID struct {
-	Array mountArray
 	Index int
 	Field string
 }
 
 func (e *ErrScopeID) Error() string {
-	return fmt.Sprintf("%s[%d] %s is present but empty; a scope id must be a non-empty string", e.Array, e.Index, e.Field)
+	return fmt.Sprintf("mounts[%d] %s is present but empty; a scope id must be a non-empty string", e.Index, e.Field)
 }
 
 // ErrPerms reports a dir_perms or file_perms value that is not an octal string.
 type ErrPerms struct {
-	Array mountArray
 	Index int
 	Field string
 	Value string
 }
 
 func (e *ErrPerms) Error() string {
-	return fmt.Sprintf("%s[%d] %s %q must be an octal string matching ^0[0-7]{3}$", e.Array, e.Index, e.Field, e.Value)
+	return fmt.Sprintf("mounts[%d] %s %q must be an octal string matching ^0[0-7]{3}$", e.Index, e.Field, e.Value)
 }
 
 // ErrByteSize reports a vfs_cache_max_size that is not a valid byte-size string.
 type ErrByteSize struct {
-	Array mountArray
 	Index int
 	Value string
 }
 
 func (e *ErrByteSize) Error() string {
-	return fmt.Sprintf("%s[%d] vfs_cache_max_size %q must match ^[0-9]+(B|K|M|G|T)?$", e.Array, e.Index, e.Value)
+	return fmt.Sprintf("mounts[%d] vfs_cache_max_size %q must match ^[0-9]+(B|K|M|G|T)?$", e.Index, e.Value)
 }
 
 // ErrCacheMode reports a vfs_cache_mode outside the permitted enum.
 type ErrCacheMode struct {
-	Array mountArray
 	Index int
 	Value string
 }
 
 func (e *ErrCacheMode) Error() string {
-	return fmt.Sprintf("%s[%d] vfs_cache_mode %q must be one of off/minimal/writes/full", e.Array, e.Index, e.Value)
+	return fmt.Sprintf("mounts[%d] vfs_cache_mode %q must be one of off/minimal/writes/full", e.Index, e.Value)
 }
 
-// ErrWritesPosture reports a writes flag that does not match the array the mount
-// belongs to (mounts require true, readonly_mounts require false). A nil flag is
-// also a posture failure because the field is required.
-type ErrWritesPosture struct {
-	Array    mountArray
-	Index    int
-	Expected bool
-	Missing  bool
+// ErrAuthToken reports a per-mount auth_token that is present but empty. The
+// guest holds the scoped session token; an empty string is not a usable token.
+type ErrAuthToken struct {
+	Index int
 }
 
-func (e *ErrWritesPosture) Error() string {
-	if e.Missing {
-		return fmt.Sprintf("%s[%d] is missing the required writes flag (expected %t)", e.Array, e.Index, e.Expected)
-	}
-	return fmt.Sprintf("%s[%d] has writes=%t but %s entries require writes=%t", e.Array, e.Index, !e.Expected, e.Array, e.Expected)
+func (e *ErrAuthToken) Error() string {
+	return fmt.Sprintf("mounts[%d] auth_token is present but empty; the per-mount session token must be a non-empty string", e.Index)
+}
+
+// ErrReadonlyMissing reports a mount that omits the required readonly flag. The
+// flag carries the RW/RO posture; absence is not a legal default.
+type ErrReadonlyMissing struct {
+	Index int
+}
+
+func (e *ErrReadonlyMissing) Error() string {
+	return fmt.Sprintf("mounts[%d] is missing the required readonly flag", e.Index)
 }
 
 // ErrCacheDuration reports a cache_duration_s that is missing or negative. The
 // field is required per mount with a minimum of 0 (an explicit 0 is legal).
 type ErrCacheDuration struct {
-	Array   mountArray
 	Index   int
 	Missing bool
 	Value   int
@@ -138,20 +125,9 @@ type ErrCacheDuration struct {
 
 func (e *ErrCacheDuration) Error() string {
 	if e.Missing {
-		return fmt.Sprintf("%s[%d] is missing the required cache_duration_s field", e.Array, e.Index)
+		return fmt.Sprintf("mounts[%d] is missing the required cache_duration_s field", e.Index)
 	}
-	return fmt.Sprintf("%s[%d] cache_duration_s %d must be >= 0", e.Array, e.Index, e.Value)
-}
-
-// ErrProvisionMarker reports a provision-side credential marker present in a
-// guest config. The guest variant carries no credential by construction.
-type ErrProvisionMarker struct {
-	Marker   string
-	Location string
-}
-
-func (e *ErrProvisionMarker) Error() string {
-	return fmt.Sprintf("provision-side marker %q present at %s; the guest config carries no credential material", e.Marker, e.Location)
+	return fmt.Sprintf("mounts[%d] cache_duration_s %d must be >= 0", e.Index, e.Value)
 }
 
 // ErrMissingField reports a schema-required top-level field that is absent

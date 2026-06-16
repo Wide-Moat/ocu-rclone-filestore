@@ -32,7 +32,7 @@ type point interface {
 }
 
 // mountSpec is one ordered unit of work: the config mount, its read-only
-// posture (derived from which array it came from), and the broker socket path
+// posture (derived from the mount's readonly key), and the broker socket path
 // the seam threads into the ocufs configmap.
 type mountSpec struct {
 	mount      mountcfg.Mount
@@ -94,7 +94,7 @@ type orchestrator struct {
 // run realizes every mount in cfg and blocks until teardown.
 //
 // It rejects an empty broker socket path up front, builds the ordered specs
-// (writable mounts then read-only mounts), rejects any memory-store spec as a
+// (one per mount, RW/RO from each mount's readonly key), rejects any memory-store spec as a
 // hard error before starting anything, starts each spec sequentially for
 // deterministic error attribution, best-effort-unmounts already-started points
 // on the first start error and returns an aggregated error naming the failed
@@ -233,12 +233,13 @@ func (o *orchestrator) shutdownDuringStartup(started []point) error {
 	return errors.Join(cleanupErrs...)
 }
 
-// buildSpecs orders the writable mounts before the read-only mounts and stamps
-// each with its broker socket path. A memory-store mount is a hard error here,
-// before any point is started, so it is never silently skipped. A destination
-// that repeats across Mounts ∪ ReadonlyMounts is likewise a hard error (ME-02):
-// two specs targeting the same path would have the second silently shadow the
-// first, violating the never-silently-mis-mounted discipline.
+// buildSpecs makes one spec per mount, deriving RW/RO from each mount's
+// readonly key, and stamps each with its broker socket path. A memory-store
+// mount is a hard error here, before any point is started, so it is never
+// silently skipped. A destination that repeats across the mounts array is
+// likewise a hard error (ME-02): two specs targeting the same path would have
+// the second silently shadow the first, violating the never-silently-
+// mis-mounted discipline.
 //
 // Socket resolution: in single-socket mode every spec carries the one
 // per-process brokerSocketPath. In socket-dir mode each spec derives
@@ -247,34 +248,30 @@ func (o *orchestrator) shutdownDuringStartup(started []point) error {
 // filesystem_id is the natural per-mount socket axis. The id is guaranteed
 // non-empty by the loader's scope XOR; it is re-checked here so a hand-built
 // config can never derive a directory-shaped socket path.
+//
+// The socket plumbing (brokerSocketPath / brokerSocketDirPath derivation here
+// and the configmap emit-fields in buildOcufsConfigmap) is the Phase C rewire;
+// Phase A's only change here is the two-array→one-array collapse.
 func (o *orchestrator) buildSpecs(cfg *mountcfg.Config) ([]mountSpec, error) {
-	specs := make([]mountSpec, 0, len(cfg.Mounts)+len(cfg.ReadonlyMounts))
+	specs := make([]mountSpec, 0, len(cfg.Mounts))
 	seen := make(map[string]struct{}, cap(specs))
-	add := func(mounts []mountcfg.Mount, readOnly bool) error {
-		for _, m := range mounts {
-			if m.MemoryStoreID != nil {
-				return fmt.Errorf("mount %q: memory-store mounts are not yet supported (no memory scope axis)", m.Destination)
-			}
-			if _, dup := seen[m.Destination]; dup {
-				return fmt.Errorf("mount %q: duplicate destination across mounts/readonly_mounts (a second mount would silently shadow the first)", m.Destination)
-			}
-			seen[m.Destination] = struct{}{}
-			socketPath := o.brokerSocketPath
-			if o.brokerSocketDirPath != "" {
-				if m.FilesystemID == nil || *m.FilesystemID == "" {
-					return fmt.Errorf("mount %q: filesystem_id is required to derive the per-mount socket from the socket directory", m.Destination)
-				}
-				socketPath = filepath.Join(o.brokerSocketDirPath, *m.FilesystemID+".sock")
-			}
-			specs = append(specs, mountSpec{mount: m, readOnly: readOnly, socketPath: socketPath})
+	for _, m := range cfg.Mounts {
+		readOnly := m.Readonly != nil && *m.Readonly
+		if m.MemoryStoreID != nil {
+			return nil, fmt.Errorf("mount %q: memory-store mounts are not yet supported (no memory scope axis)", m.Destination)
 		}
-		return nil
-	}
-	if err := add(cfg.Mounts, false); err != nil {
-		return nil, err
-	}
-	if err := add(cfg.ReadonlyMounts, true); err != nil {
-		return nil, err
+		if _, dup := seen[m.Destination]; dup {
+			return nil, fmt.Errorf("mount %q: duplicate destination across mounts (a second mount would silently shadow the first)", m.Destination)
+		}
+		seen[m.Destination] = struct{}{}
+		socketPath := o.brokerSocketPath
+		if o.brokerSocketDirPath != "" {
+			if m.FilesystemID == nil || *m.FilesystemID == "" {
+				return nil, fmt.Errorf("mount %q: filesystem_id is required to derive the per-mount socket from the socket directory", m.Destination)
+			}
+			socketPath = filepath.Join(o.brokerSocketDirPath, *m.FilesystemID+".sock")
+		}
+		specs = append(specs, mountSpec{mount: m, readOnly: readOnly, socketPath: socketPath})
 	}
 	return specs, nil
 }

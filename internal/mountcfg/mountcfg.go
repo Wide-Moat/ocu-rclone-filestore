@@ -4,10 +4,10 @@
 // Package mountcfg loads and strictly validates the guest mount config.
 //
 // The guest config is host-supplied input. The loader refuses anything that is
-// not a strict GuestMountConfig: unknown fields are rejected by strict decoding,
-// every structural rule is enforced with a distinct typed error, and any
-// provision-side credential marker is refused outright. The guest binary holds
-// no backend credential by construction.
+// not the single mount-config shape: unknown fields are rejected by strict
+// decoding, and every structural rule is enforced with a distinct typed error.
+// The config carries the per-mount session token (auth_token) and the top-level
+// trust anchor (ca_cert_pem); the loader holds them rather than refusing them.
 package mountcfg
 
 import (
@@ -23,9 +23,10 @@ import (
 // a zero value so the loader can enforce presence rules.
 type Mount struct {
 	Destination     string  `json:"destination"`
+	AuthToken       string  `json:"auth_token"`
 	FilesystemID    *string `json:"filesystem_id,omitempty"`
 	MemoryStoreID   *string `json:"memory_store_id,omitempty"`
-	Writes          *bool   `json:"writes,omitempty"`
+	Readonly        *bool   `json:"readonly,omitempty"`
 	VfsCacheMode    string  `json:"vfs_cache_mode"`
 	CacheDurationS  *int    `json:"cache_duration_s,omitempty"`
 	VfsCacheMaxSize string  `json:"vfs_cache_max_size"`
@@ -33,13 +34,18 @@ type Mount struct {
 	FilePerms       string  `json:"file_perms"`
 }
 
-// Config is the guest-facing mount config. It carries no credential field; the
-// bearer is injected at the egress edge and never seen in the guest.
+// Config is the guest mount config. It carries the top-level trust anchor
+// (ca_cert_pem) and a single mounts array; RW/RO is the per-mount readonly key.
 type Config struct {
-	SchemaVersion  string  `json:"schema_version"`
-	ServiceURL     string  `json:"service_url"`
-	Mounts         []Mount `json:"mounts"`
-	ReadonlyMounts []Mount `json:"readonly_mounts,omitempty"`
+	SchemaVersion string  `json:"schema_version"`
+	ServiceURL    string  `json:"service_url"`
+	CACertPEM     string  `json:"ca_cert_pem"`
+	Mounts        []Mount `json:"mounts"`
+	// BackendCacheTTL is accepted but not consumed by the guest. The single
+	// shape allows it as an optional top-level field; the loader decodes it so
+	// strict decoding does not reject a config that carries it (and so the
+	// loader and the frozen schema reach the same accept verdict).
+	BackendCacheTTL *int `json:"backend_cache_ttl,omitempty"`
 }
 
 var (
@@ -56,17 +62,11 @@ var cacheModes = map[string]struct{}{
 	"full":    {},
 }
 
-// provisionMarkers are the provision-side credential fields the guest config
-// must never carry. They are checked explicitly so the refusal is legible and
-// independently testable, in addition to strict decoding rejecting them as
-// unknown fields.
-var provisionMarkers = []string{"auth_token", "ca_cert_pem"}
-
 // Load reads and strictly validates a guest mount config from path.
 //
-// The config is decoded with unknown-field rejection into the guest variant,
-// then every rule is validated. A failure returns a distinct typed error from
-// this package naming the failing field (and mount index where applicable).
+// The config is decoded with unknown-field rejection, then every rule is
+// validated. A failure returns a distinct typed error from this package naming
+// the failing field (and mount index where applicable).
 func Load(path string) (*Config, error) {
 	// The path is the host-supplied --config provisioning input, the trusted
 	// entry point of this binary's contract — not attacker-controlled. Reading
@@ -74,13 +74,6 @@ func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path) //nolint:gosec // G304: trusted host-provisioned config path
 	if err != nil {
 		return nil, fmt.Errorf("read config %q: %w", path, err)
-	}
-
-	// Permissive pre-scan: refuse provision-side credential markers with a
-	// clearly-messaged error before the generic unknown-field path can fire,
-	// so the refusal is legible and independently asserted.
-	if err := scanProvisionMarkers(raw); err != nil {
-		return nil, err
 	}
 
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -97,45 +90,6 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// scanProvisionMarkers checks the top-level object and every mount entry for a
-// provision-side credential marker and returns ErrProvisionMarker on the first
-// hit, naming the marker and its location.
-func scanProvisionMarkers(raw []byte) error {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &top); err != nil {
-		// Not an object, or malformed; this scan only looks for provision
-		// markers, so it yields to the strict decoder, which reports the real
-		// malformed-JSON error. Returning err here would mis-attribute it.
-		return nil //nolint:nilerr // deliberate: malformed JSON is the strict decoder's error to report
-	}
-	for _, marker := range provisionMarkers {
-		if _, ok := top[marker]; ok {
-			return &ErrProvisionMarker{Marker: marker, Location: "top level"}
-		}
-	}
-	for _, arr := range []string{"mounts", "readonly_mounts"} {
-		rawArr, ok := top[arr]
-		if !ok {
-			continue
-		}
-		var entries []map[string]json.RawMessage
-		if err := json.Unmarshal(rawArr, &entries); err != nil {
-			continue
-		}
-		for i, entry := range entries {
-			for _, marker := range provisionMarkers {
-				if _, ok := entry[marker]; ok {
-					return &ErrProvisionMarker{
-						Marker:   marker,
-						Location: fmt.Sprintf("%s[%d]", arr, i),
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
 func validate(cfg *Config) error {
 	if !schemaVersionRe.MatchString(cfg.SchemaVersion) {
 		return &ErrSchemaVersion{Value: cfg.SchemaVersion}
@@ -143,20 +97,18 @@ func validate(cfg *Config) error {
 	if err := validateServiceURL(cfg.ServiceURL); err != nil {
 		return err
 	}
-	// The schema lists mounts as required for GuestMountConfig: the key must be
-	// present. An empty-but-present array is legal (the schema permits []);
-	// absence is not. A nil slice means the key was absent or null — both are
-	// rejected (null fails the schema's array type the same way).
+	// ca_cert_pem is a schema-required top-level field: the guest holds the
+	// trust anchor for the egress hop, so its presence is a load-time rule.
+	if cfg.CACertPEM == "" {
+		return &ErrMissingField{Field: "ca_cert_pem"}
+	}
+	// The schema lists mounts as required: the key must be present. An
+	// empty-but-present array is legal (the schema permits []); absence is not.
+	// A nil slice means the key was absent or null — both are rejected.
 	if cfg.Mounts == nil {
 		return &ErrMissingField{Field: "mounts"}
 	}
-	if err := validateMounts(arrayMounts, cfg.Mounts, true); err != nil {
-		return err
-	}
-	if err := validateMounts(arrayReadonlyMounts, cfg.ReadonlyMounts, false); err != nil {
-		return err
-	}
-	return nil
+	return validateMounts(cfg.Mounts)
 }
 
 func validateServiceURL(raw string) error {
@@ -169,18 +121,22 @@ func validateServiceURL(raw string) error {
 	return nil
 }
 
-func validateMounts(arr mountArray, mounts []Mount, wantWrites bool) error {
+func validateMounts(mounts []Mount) error {
 	for i, m := range mounts {
-		if err := validateMount(arr, i, m, wantWrites); err != nil {
+		if err := validateMount(i, m); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateMount(arr mountArray, i int, m Mount, wantWrites bool) error {
+func validateMount(i int, m Mount) error {
 	if !destinationRe.MatchString(m.Destination) {
-		return &ErrDestination{Array: arr, Index: i, Value: m.Destination}
+		return &ErrDestination{Index: i, Value: m.Destination}
+	}
+
+	if m.AuthToken == "" {
+		return &ErrAuthToken{Index: i}
 	}
 
 	// The scope XOR keys on presence of the field, exactly as the schema's
@@ -190,43 +146,43 @@ func validateMount(arr mountArray, i int, m Mount, wantWrites bool) error {
 	hasFS := m.FilesystemID != nil
 	hasMem := m.MemoryStoreID != nil
 	if hasFS == hasMem { // both present or neither present
-		return &ErrMountScope{Array: arr, Index: i, HasFilesystem: hasFS, HasMemory: hasMem}
+		return &ErrMountScope{Index: i, HasFilesystem: hasFS, HasMemory: hasMem}
 	}
 	if hasFS && *m.FilesystemID == "" {
-		return &ErrScopeID{Array: arr, Index: i, Field: "filesystem_id"}
+		return &ErrScopeID{Index: i, Field: "filesystem_id"}
 	}
 	if hasMem && *m.MemoryStoreID == "" {
-		return &ErrScopeID{Array: arr, Index: i, Field: "memory_store_id"}
+		return &ErrScopeID{Index: i, Field: "memory_store_id"}
 	}
 
-	if m.Writes == nil {
-		return &ErrWritesPosture{Array: arr, Index: i, Expected: wantWrites, Missing: true}
-	}
-	if *m.Writes != wantWrites {
-		return &ErrWritesPosture{Array: arr, Index: i, Expected: wantWrites}
+	// readonly is schema-required per mount and carries the RW/RO posture.
+	// The pointer distinguishes an absent field from an explicit false; both
+	// true and false are legal, only absence is rejected.
+	if m.Readonly == nil {
+		return &ErrReadonlyMissing{Index: i}
 	}
 
 	// cache_duration_s is schema-required with minimum 0. The pointer
 	// distinguishes an absent field from an explicit 0 (0 is legal; absence is
-	// not), mirroring the presence handling of writes.
+	// not).
 	if m.CacheDurationS == nil {
-		return &ErrCacheDuration{Array: arr, Index: i, Missing: true}
+		return &ErrCacheDuration{Index: i, Missing: true}
 	}
 	if *m.CacheDurationS < 0 {
-		return &ErrCacheDuration{Array: arr, Index: i, Value: *m.CacheDurationS}
+		return &ErrCacheDuration{Index: i, Value: *m.CacheDurationS}
 	}
 
 	if !octalRe.MatchString(m.DirPerms) {
-		return &ErrPerms{Array: arr, Index: i, Field: "dir_perms", Value: m.DirPerms}
+		return &ErrPerms{Index: i, Field: "dir_perms", Value: m.DirPerms}
 	}
 	if !octalRe.MatchString(m.FilePerms) {
-		return &ErrPerms{Array: arr, Index: i, Field: "file_perms", Value: m.FilePerms}
+		return &ErrPerms{Index: i, Field: "file_perms", Value: m.FilePerms}
 	}
 	if !byteSizeRe.MatchString(m.VfsCacheMaxSize) {
-		return &ErrByteSize{Array: arr, Index: i, Value: m.VfsCacheMaxSize}
+		return &ErrByteSize{Index: i, Value: m.VfsCacheMaxSize}
 	}
 	if _, ok := cacheModes[m.VfsCacheMode]; !ok {
-		return &ErrCacheMode{Array: arr, Index: i, Value: m.VfsCacheMode}
+		return &ErrCacheMode{Index: i, Value: m.VfsCacheMode}
 	}
 	return nil
 }

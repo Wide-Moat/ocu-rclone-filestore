@@ -104,10 +104,14 @@ func (f *fakePointMounter) socketPathByDest() map[string]string {
 // writableEntry / readonlyEntry build minimal valid config mounts for the
 // orchestrator tests (the scope split is enforced by the loader; here we only
 // need fields the orchestrator threads through).
+func ptrBool(v bool) *bool { return &v }
+
 func writableEntry(dest string) mountcfg.Mount {
 	return mountcfg.Mount{
 		Destination:     dest,
+		AuthToken:       "tok-" + dest,
 		FilesystemID:    ptrStr("fs-" + dest),
+		Readonly:        ptrBool(false),
 		VfsCacheMode:    "writes",
 		CacheDurationS:  ptrInt(60),
 		VfsCacheMaxSize: "0",
@@ -118,6 +122,7 @@ func writableEntry(dest string) mountcfg.Mount {
 
 func readonlyEntry(dest string) mountcfg.Mount {
 	m := writableEntry(dest)
+	m.Readonly = ptrBool(true)
 	return m
 }
 
@@ -127,8 +132,7 @@ func TestOrchestratorFanOutAndSignalTeardown(t *testing.T) {
 	readyFile := filepath.Join(t.TempDir(), "ready")
 
 	cfg := &mountcfg.Config{
-		Mounts:         []mountcfg.Mount{writableEntry("/mnt/w")},
-		ReadonlyMounts: []mountcfg.Mount{readonlyEntry("/mnt/r")},
+		Mounts: []mountcfg.Mount{writableEntry("/mnt/w"), readonlyEntry("/mnt/r")},
 	}
 
 	o := &orchestrator{
@@ -318,10 +322,10 @@ func TestOrchestratorSignalDuringFanOut(t *testing.T) {
 func TestOrchestratorMemoryStoreHardError(t *testing.T) {
 	fake := newFake()
 	cfg := &mountcfg.Config{
-		Mounts: []mountcfg.Mount{},
-		ReadonlyMounts: []mountcfg.Mount{{
+		Mounts: []mountcfg.Mount{{
 			Destination:   "/mnt/mem",
 			MemoryStoreID: ptrStr("mem-1"),
+			Readonly:      ptrBool(true),
 		}},
 	}
 	o := &orchestrator{
@@ -391,8 +395,7 @@ func TestOrchestratorSocketDirDerivesPerMountSocket(t *testing.T) {
 	ro := readonlyEntry("/mnt/r")
 	ro.FilesystemID = ptrStr("fsro")
 	cfg := &mountcfg.Config{
-		Mounts:         []mountcfg.Mount{rw},
-		ReadonlyMounts: []mountcfg.Mount{ro},
+		Mounts: []mountcfg.Mount{rw, ro},
 	}
 
 	o := &orchestrator{
@@ -558,13 +561,12 @@ func TestOrchestratorStaleReadyFileRemovedAndRetracted(t *testing.T) {
 }
 
 // TestOrchestratorDuplicateDestinationHardError is the ME-02 regression: a
-// destination repeated across mounts/readonly_mounts must be a hard error before
+// destination repeated within the mounts array must be a hard error before
 // any point starts, not a silent shadow.
 func TestOrchestratorDuplicateDestinationHardError(t *testing.T) {
 	fake := newFake()
 	cfg := &mountcfg.Config{
-		Mounts:         []mountcfg.Mount{writableEntry("/mnt/dup")},
-		ReadonlyMounts: []mountcfg.Mount{readonlyEntry("/mnt/dup")},
+		Mounts: []mountcfg.Mount{writableEntry("/mnt/dup"), readonlyEntry("/mnt/dup")},
 	}
 	o := &orchestrator{
 		seam:             fake,

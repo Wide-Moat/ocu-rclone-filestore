@@ -73,39 +73,36 @@ func TestNewGuestValidatorBadResourceID(t *testing.T) {
 	}
 }
 
-// TestNewGuestValidatorMissingEntryPoint registers a well-formed schema that has
-// no GuestMountConfig definition. Parsing and registration both succeed, but the
-// guest entry point #/$defs/GuestMountConfig cannot be resolved, so compilation
-// must fail. This pins that the constructor compiles the guest branch
-// specifically and does not fall back to the document root.
-func TestNewGuestValidatorMissingEntryPoint(t *testing.T) {
-	// A valid schema document that lacks the guest entry point entirely.
-	noGuestDef := []byte(`{
+// TestNewGuestValidatorUncompilableRoot registers a well-formed schema document
+// whose root references a $def that does not exist. Parsing and registration
+// both succeed, but the unresolvable $ref makes the root uncompilable, so the
+// constructor must surface a compile-stage error rather than returning an inert
+// validator.
+func TestNewGuestValidatorUncompilableRoot(t *testing.T) {
+	// A schema whose root $ref points at a missing definition.
+	danglingRef := []byte(`{
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
 		"$id": "https://schemas.open-computer-use.dev/storage/mount-config.schema.json",
-		"type": "object"
+		"$ref": "#/$defs/DoesNotExist"
 	}`)
 
-	v, err := NewGuestValidator(noGuestDef, schemaID)
+	v, err := NewGuestValidator(danglingRef, schemaID)
 	if err == nil {
-		t.Fatalf("expected a compile error when the guest entry point is absent, got a validator: %#v", v)
+		t.Fatalf("expected a compile error for an unresolvable root $ref, got a validator: %#v", v)
 	}
 	if v != nil {
 		t.Fatalf("expected nil validator on failure, got %#v", v)
 	}
-	if !strings.Contains(err.Error(), "compile guest entry point") {
+	if !strings.Contains(err.Error(), "compile vendored schema") {
 		t.Fatalf("error should name the compile stage, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), guestEntryPoint) {
-		t.Fatalf("error should quote the guest entry-point fragment, got: %v", err)
 	}
 }
 
 // TestNewGuestValidatorRoundTrips builds the validator from the real vendored
-// schema and confirms the constructed validator actually enforces the guest
-// branch: the minimal guest fixture validates and the provision-with-token
-// fixture is refused. This guards against a future change that returns a
-// non-nil-but-inert validator.
+// schema and confirms the constructed validator actually enforces the contract:
+// the minimal config (holding auth_token and ca_cert_pem) validates and a
+// structurally-invalid config (http service_url) is refused. This guards against
+// a future change that returns a non-nil-but-inert validator.
 func TestNewGuestValidatorRoundTrips(t *testing.T) {
 	v := newValidator(t)
 
@@ -114,15 +111,15 @@ func TestNewGuestValidatorRoundTrips(t *testing.T) {
 		t.Fatalf("read accept fixture: %v", err)
 	}
 	if err := v.Validate(ok); err != nil {
-		t.Fatalf("minimal guest config should validate, got: %v", err)
+		t.Fatalf("minimal config should validate, got: %v", err)
 	}
 
-	bad, err := os.ReadFile("testdata/reject/provision_with_token.json")
+	bad, err := os.ReadFile("testdata/reject/http_service_url.json")
 	if err != nil {
 		t.Fatalf("read reject fixture: %v", err)
 	}
 	if err := v.Validate(bad); err == nil {
-		t.Fatal("a provision-side config carrying a token must fail the guest branch")
+		t.Fatal("a config with a non-https service_url must fail the schema")
 	}
 }
 
@@ -161,7 +158,7 @@ func TestValidateMalformedDocument(t *testing.T) {
 func TestValidateSchemaRejection(t *testing.T) {
 	v := newValidator(t)
 
-	// Parses cleanly as JSON but is not a valid GuestMountConfig: missing every
+	// Parses cleanly as JSON but is not a valid mount config: missing every
 	// required field.
 	err := v.Validate([]byte(`{"unexpected":"document"}`))
 	if err == nil {

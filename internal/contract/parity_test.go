@@ -14,9 +14,9 @@ import (
 
 // TestLoaderSchemaParity feeds every config fixture — this package's
 // accept/reject sets and the loader's own testdata — through both
-// mountcfg.Load (the enforcement point in the binary) and the
-// GuestMountConfig subschema validator (the frozen contract) and asserts the
-// two reach the same accept/reject verdict on every document.
+// mountcfg.Load (the enforcement point in the binary) and the single-shape
+// schema-root validator (the frozen contract) and asserts the two reach the
+// same accept/reject verdict on every document.
 //
 // The two halves of config validation must provably agree: a document the
 // schema rejects but the loader accepts is a contract divergence in the

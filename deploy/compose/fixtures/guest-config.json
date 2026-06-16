@@ -1,11 +1,13 @@
 {
   "schema_version": "v1alpha",
   "service_url": "https://broker.internal",
+  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIBexampleinspectioncatrustanchorforthelocalegresshop\n-----END CERTIFICATE-----\n",
   "mounts": [
     {
       "destination": "/workspace/out",
+      "auth_token": "tok.fsrw.session",
       "filesystem_id": "fsrw",
-      "writes": true,
+      "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
       "vfs_cache_max_size": "1G",
@@ -14,8 +16,9 @@
     },
     {
       "destination": "/workspace/out2",
+      "auth_token": "tok.fsrw.session",
       "filesystem_id": "fsrw",
-      "writes": true,
+      "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
       "vfs_cache_max_size": "1G",
@@ -24,20 +27,20 @@
     },
     {
       "destination": "/workspace/throttle",
+      "auth_token": "tok.fsthrottle.session",
       "filesystem_id": "fsthrottle",
-      "writes": true,
+      "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
       "vfs_cache_max_size": "1G",
       "dir_perms": "0755",
       "file_perms": "0644"
-    }
-  ],
-  "readonly_mounts": [
+    },
     {
       "destination": "/workspace/in",
+      "auth_token": "tok.fsro.session",
       "filesystem_id": "fsro",
-      "writes": false,
+      "readonly": true,
       "vfs_cache_mode": "minimal",
       "cache_duration_s": 5,
       "vfs_cache_max_size": "256M",

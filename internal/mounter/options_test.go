@@ -64,7 +64,7 @@ func TestBuildVFSOptionsReadOnly(t *testing.T) {
 		t.Fatalf("buildVFSOptions: %v", err)
 	}
 	if !opt.ReadOnly {
-		t.Errorf("ReadOnly = false; want true for a readonly_mounts entry")
+		t.Errorf("ReadOnly = false; want true for a readonly mount")
 	}
 }
 

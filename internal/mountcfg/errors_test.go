@@ -10,9 +10,9 @@ import (
 
 // TestErrorMessages pins the exact Error() rendering of every typed error this
 // package returns. The message is the operator-facing contract: it names the
-// failing field, the array, and the index so a failed load is diagnosable from
-// the error alone. Each case asserts the full string, not merely that the type
-// is returned.
+// failing field and the mount index so a failed load is diagnosable from the
+// error alone. Each case asserts the full string, not merely that the type is
+// returned.
 func TestErrorMessages(t *testing.T) {
 	cases := []struct {
 		name string
@@ -31,73 +31,68 @@ func TestErrorMessages(t *testing.T) {
 		},
 		{
 			name: "destination",
-			err:  &ErrDestination{Array: arrayMounts, Index: 2, Value: "rel/path"},
+			err:  &ErrDestination{Index: 2, Value: "rel/path"},
 			want: `mounts[2] destination "rel/path" must be an absolute path matching ^/.+`,
 		},
 		{
 			name: "mount scope both set",
-			err:  &ErrMountScope{Array: arrayMounts, Index: 0, HasFilesystem: true, HasMemory: true},
+			err:  &ErrMountScope{Index: 0, HasFilesystem: true, HasMemory: true},
 			want: `mounts[0] sets both filesystem_id and memory_store_id; exactly one is required`,
 		},
 		{
 			name: "mount scope neither set",
-			err:  &ErrMountScope{Array: arrayReadonlyMounts, Index: 1, HasFilesystem: false, HasMemory: false},
-			want: `readonly_mounts[1] sets neither filesystem_id nor memory_store_id; exactly one is required`,
+			err:  &ErrMountScope{Index: 1, HasFilesystem: false, HasMemory: false},
+			want: `mounts[1] sets neither filesystem_id nor memory_store_id; exactly one is required`,
 		},
 		{
 			name: "scope id empty",
-			err:  &ErrScopeID{Array: arrayMounts, Index: 0, Field: "filesystem_id"},
+			err:  &ErrScopeID{Index: 0, Field: "filesystem_id"},
 			want: `mounts[0] filesystem_id is present but empty; a scope id must be a non-empty string`,
 		},
 		{
 			name: "perms",
-			err:  &ErrPerms{Array: arrayMounts, Index: 0, Field: "dir_perms", Value: "999"},
+			err:  &ErrPerms{Index: 0, Field: "dir_perms", Value: "999"},
 			want: `mounts[0] dir_perms "999" must be an octal string matching ^0[0-7]{3}$`,
 		},
 		{
 			name: "byte size",
-			err:  &ErrByteSize{Array: arrayReadonlyMounts, Index: 3, Value: "12X"},
-			want: `readonly_mounts[3] vfs_cache_max_size "12X" must match ^[0-9]+(B|K|M|G|T)?$`,
+			err:  &ErrByteSize{Index: 3, Value: "12X"},
+			want: `mounts[3] vfs_cache_max_size "12X" must match ^[0-9]+(B|K|M|G|T)?$`,
 		},
 		{
 			name: "cache mode",
-			err:  &ErrCacheMode{Array: arrayMounts, Index: 0, Value: "sometimes"},
+			err:  &ErrCacheMode{Index: 0, Value: "sometimes"},
 			want: `mounts[0] vfs_cache_mode "sometimes" must be one of off/minimal/writes/full`,
 		},
 		{
-			name: "writes posture wrong value (mounts expect true)",
-			err:  &ErrWritesPosture{Array: arrayMounts, Index: 0, Expected: true},
-			want: `mounts[0] has writes=false but mounts entries require writes=true`,
+			name: "auth token empty",
+			err:  &ErrAuthToken{Index: 0},
+			want: `mounts[0] auth_token is present but empty; the per-mount session token must be a non-empty string`,
 		},
 		{
-			name: "writes posture wrong value (readonly expect false)",
-			err:  &ErrWritesPosture{Array: arrayReadonlyMounts, Index: 0, Expected: false},
-			want: `readonly_mounts[0] has writes=true but readonly_mounts entries require writes=false`,
-		},
-		{
-			name: "writes posture missing",
-			err:  &ErrWritesPosture{Array: arrayMounts, Index: 1, Expected: true, Missing: true},
-			want: `mounts[1] is missing the required writes flag (expected true)`,
+			name: "readonly missing",
+			err:  &ErrReadonlyMissing{Index: 1},
+			want: `mounts[1] is missing the required readonly flag`,
 		},
 		{
 			name: "cache duration negative",
-			err:  &ErrCacheDuration{Array: arrayMounts, Index: 0, Value: -5},
+			err:  &ErrCacheDuration{Index: 0, Value: -5},
 			want: `mounts[0] cache_duration_s -5 must be >= 0`,
 		},
 		{
 			name: "cache duration missing",
-			err:  &ErrCacheDuration{Array: arrayReadonlyMounts, Index: 2, Missing: true},
-			want: `readonly_mounts[2] is missing the required cache_duration_s field`,
-		},
-		{
-			name: "provision marker",
-			err:  &ErrProvisionMarker{Marker: "auth_token", Location: "top level"},
-			want: `provision-side marker "auth_token" present at top level; the guest config carries no credential material`,
+			err:  &ErrCacheDuration{Index: 2, Missing: true},
+			want: `mounts[2] is missing the required cache_duration_s field`,
 		},
 		{
 			name: "missing field",
 			err:  &ErrMissingField{Field: "mounts"},
 			want: `required field "mounts" is missing`,
+		},
+		{
+			name: "missing field ca_cert_pem",
+			err:  &ErrMissingField{Field: "ca_cert_pem"},
+			want: `required field "ca_cert_pem" is missing`,
 		},
 		{
 			name: "decode",

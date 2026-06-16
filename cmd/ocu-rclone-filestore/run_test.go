@@ -14,29 +14,31 @@ import (
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mounter"
 )
 
-// validConfig is a minimal config that passes mountcfg.Load: a single write
-// mount and a single read-only mount, each with a filesystem scope, valid octal
-// perms, a byte-size cap, and an allowed cache mode.
+// validConfig is a minimal config that passes mountcfg.Load: a single
+// read-write mount and a single read-only mount in one mounts array, each with
+// a filesystem scope and a per-mount session token, valid octal perms, a
+// byte-size cap, and an allowed cache mode, plus the top-level trust anchor.
 const validConfig = `{
   "schema_version": "v1alpha",
   "service_url": "https://broker.internal",
+  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
   "mounts": [
     {
       "destination": "/workspace/out",
+      "auth_token": "tok.rw.session",
       "filesystem_id": "session_test_chat",
-      "writes": true,
+      "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
       "vfs_cache_max_size": "1G",
       "dir_perms": "0755",
       "file_perms": "0644"
-    }
-  ],
-  "readonly_mounts": [
+    },
     {
       "destination": "/workspace/in",
+      "auth_token": "tok.ro.session",
       "filesystem_id": "session_test_inputs",
-      "writes": false,
+      "readonly": true,
       "vfs_cache_mode": "minimal",
       "cache_duration_s": 3,
       "vfs_cache_max_size": "512M",

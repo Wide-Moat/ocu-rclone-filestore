@@ -1,4 +1,5 @@
 {
   "schema_version": "v1alpha",
-  "service_url": "https://broker.internal"
+  "service_url": "https://broker.internal",
+  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
 }

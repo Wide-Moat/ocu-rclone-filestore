@@ -51,11 +51,13 @@ func TestLoadUnparseableServiceURL(t *testing.T) {
 	doc := `{
   "schema_version": "v1alpha",
   "service_url": "` + unparseable + `",
+  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
   "mounts": [
     {
       "destination": "/workspace/out",
+      "auth_token": "tok.opaque.value",
       "filesystem_id": "session_01HXYZ_chat",
-      "writes": true,
+      "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
       "vfs_cache_max_size": "1G",
@@ -85,8 +87,7 @@ func TestLoadUnparseableServiceURL(t *testing.T) {
 }
 
 // TestLoadMalformedJSON covers the strict-decode failure path for bytes that are
-// not a decodable document. The pre-scan tolerates non-object bytes (it defers
-// to the strict decoder), so the observable result is ErrDecode wrapping the
+// not a decodable document. The observable result is ErrDecode wrapping the
 // decoder's own error.
 func TestLoadMalformedJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
@@ -104,56 +105,6 @@ func TestLoadMalformedJSON(t *testing.T) {
 	}
 	if e.Err == nil {
 		t.Fatal("expected ErrDecode to wrap the decoder error")
-	}
-}
-
-// TestScanProvisionMarkersNonObject covers the pre-scan early return: when the
-// raw bytes are not a JSON object, the scanner cannot enumerate fields, so it
-// returns nil and lets the strict decoder report the real error. The marker
-// refusal must not fire (and must not panic) on a top-level array.
-func TestScanProvisionMarkersNonObject(t *testing.T) {
-	for _, raw := range [][]byte{
-		[]byte(`[1,2,3]`),
-		[]byte(`"just a string"`),
-		[]byte(`not json at all`),
-		[]byte(``),
-	} {
-		if err := scanProvisionMarkers(raw); err != nil {
-			t.Fatalf("non-object bytes %q should pre-scan clean, got %v", raw, err)
-		}
-	}
-}
-
-// TestScanProvisionMarkersMalformedArray covers the inner unmarshal-failure
-// branch: a top-level object whose mounts value is present but is not an array
-// of objects. The scanner cannot enumerate entries, so it skips that array
-// rather than erroring; a marker hidden behind a non-array shape is left for the
-// strict decoder to reject. The scan itself returns nil.
-func TestScanProvisionMarkersMalformedArray(t *testing.T) {
-	raw := []byte(`{"mounts": "not an array", "readonly_mounts": 42}`)
-	if err := scanProvisionMarkers(raw); err != nil {
-		t.Fatalf("malformed mounts array should pre-scan clean, got %v", err)
-	}
-}
-
-// TestLoadMissingWrites covers the writes-absent branch of validateMount: the
-// writes flag is required per mount, so an entry that omits it entirely is a
-// posture failure flagged as missing (distinct from an entry that sets the
-// wrong value, which the fixture-driven table already covers).
-func TestLoadMissingWrites(t *testing.T) {
-	cfg, err := Load(filepath.Join("testdata", "invalid_missing_writes.json"))
-	if err == nil {
-		t.Fatalf("expected ErrWritesPosture, got cfg=%+v", cfg)
-	}
-	var e *ErrWritesPosture
-	if !errors.As(err, &e) {
-		t.Fatalf("expected *ErrWritesPosture, got %T: %v", err, err)
-	}
-	if !e.Missing {
-		t.Fatalf("expected the missing-flag posture, got %+v", e)
-	}
-	if e.Array != arrayMounts || !e.Expected {
-		t.Fatalf("expected mounts/expected=true, got %+v", e)
 	}
 }
 
@@ -178,20 +129,42 @@ func TestLoadBadFilePerms(t *testing.T) {
 	}
 }
 
-// TestScanProvisionMarkersInMount confirms a marker buried in a mount entry is
-// found at its array index location, exercising the per-entry scan loop's hit
-// path (the top-level hit path is exercised by the auth_token fixture).
-func TestScanProvisionMarkersInMount(t *testing.T) {
-	raw := []byte(`{"mounts":[{"destination":"/m","ca_cert_pem":"x"}]}`)
-	err := scanProvisionMarkers(raw)
-	var e *ErrProvisionMarker
-	if !errors.As(err, &e) {
-		t.Fatalf("expected *ErrProvisionMarker, got %T: %v", err, err)
+// TestLoadBackendCacheTTLAccepted covers the accepted-but-not-consumed top-level
+// backend_cache_ttl field. The single shape allows it at the top level, so the
+// loader must decode it (rather than reject it as unknown) and surface the value
+// without otherwise acting on it.
+func TestLoadBackendCacheTTLAccepted(t *testing.T) {
+	doc := `{
+  "schema_version": "v1alpha",
+  "service_url": "https://broker.internal",
+  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+  "backend_cache_ttl": 30,
+  "mounts": [
+    {
+      "destination": "/workspace/out",
+      "auth_token": "tok.opaque.value",
+      "filesystem_id": "session_01HXYZ_chat",
+      "readonly": false,
+      "vfs_cache_mode": "writes",
+      "cache_duration_s": 3600,
+      "vfs_cache_max_size": "1G",
+      "dir_perms": "0755",
+      "file_perms": "0644"
+    }
+  ]
+}`
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
 	}
-	if e.Marker != "ca_cert_pem" {
-		t.Fatalf("expected ca_cert_pem marker, got %q", e.Marker)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("a config carrying backend_cache_ttl must load, got %v", err)
 	}
-	if e.Location != "mounts[0]" {
-		t.Fatalf("expected location mounts[0], got %q", e.Location)
+	if cfg.BackendCacheTTL == nil {
+		t.Fatal("expected backend_cache_ttl to be decoded as present")
+	}
+	if *cfg.BackendCacheTTL != 30 {
+		t.Fatalf("expected backend_cache_ttl 30, got %d", *cfg.BackendCacheTTL)
 	}
 }

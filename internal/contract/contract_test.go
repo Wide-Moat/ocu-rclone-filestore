@@ -10,8 +10,8 @@ import (
 	"testing"
 )
 
-// schemaID is the vendored schema's own $id; the guest validator registers and
-// compiles the guest entry point relative to it.
+// schemaID is the vendored schema's own $id; the validator registers and
+// compiles the schema root under it.
 const schemaID = "https://schemas.open-computer-use.dev/storage/mount-config.schema.json"
 
 // vendoredSchemaPath is the byte-identical vendored copy of the canonical schema.
@@ -30,11 +30,11 @@ func newValidator(t *testing.T) *GuestValidator {
 	return v
 }
 
-// TestSchemaConformance compiles the GuestMountConfig subschema once and checks
-// that accept fixtures validate against the guest branch and reject fixtures
-// fail it. The reject set includes a document carrying auth_token, which only
-// fails because the entry point is the guest subschema (the root oneOf would
-// accept it as a ProvisionMountConfig).
+// TestSchemaConformance compiles the schema root once and checks that accept
+// fixtures validate and reject fixtures fail. The accept set holds auth_token
+// and ca_cert_pem (the guest holds the credential, so a credential-carrying
+// config is the valid shape); the reject set carries documents that violate a
+// structural rule (http service_url, both scope ids, absent ca_cert_pem).
 func TestSchemaConformance(t *testing.T) {
 	v := newValidator(t)
 
@@ -58,10 +58,10 @@ func TestSchemaConformance(t *testing.T) {
 				}
 				err = v.Validate(doc)
 				if wantValid && err != nil {
-					t.Fatalf("expected %s to validate against the guest branch, got: %v", name, err)
+					t.Fatalf("expected %s to validate against the schema, got: %v", name, err)
 				}
 				if !wantValid && err == nil {
-					t.Fatalf("expected %s to FAIL the guest branch, but it validated", name)
+					t.Fatalf("expected %s to FAIL the schema, but it validated", name)
 				}
 			})
 		}

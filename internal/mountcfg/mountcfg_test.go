@@ -25,6 +25,11 @@ func TestLoad(t *testing.T) {
 			wantErr: nil,
 		},
 		{
+			name:    "single array mixing readonly true and false loads",
+			fixture: "valid_readonly_mount.json",
+			wantErr: nil,
+		},
+		{
 			name:    "both ids is a hard error (CFG-02)",
 			fixture: "invalid_both_ids.json",
 			wantErr: new(*ErrMountScope),
@@ -74,50 +79,38 @@ func TestLoad(t *testing.T) {
 			wantErr: new(*ErrCacheMode),
 		},
 		{
-			name:    "readonly mount with writes=true rejected (CFG-03)",
-			fixture: "invalid_ro_writes_true.json",
-			wantErr: new(*ErrWritesPosture),
+			name:    "mount missing readonly rejected (CFG-03)",
+			fixture: "invalid_missing_readonly.json",
+			wantErr: new(*ErrReadonlyMissing),
 			assert: func(t *testing.T, err error) {
-				var e *ErrWritesPosture
+				var e *ErrReadonlyMissing
 				errors.As(err, &e)
-				if e.Array != arrayReadonlyMounts || e.Expected != false {
-					t.Fatalf("expected readonly writes=false posture, got %+v", e)
+				if e.Index != 0 {
+					t.Fatalf("expected index 0 flagged, got %+v", e)
 				}
 			},
 		},
 		{
-			name:    "rw mount with writes=false rejected (CFG-03)",
-			fixture: "invalid_rw_writes_false.json",
-			wantErr: new(*ErrWritesPosture),
+			name:    "mount with empty auth_token rejected (CFG-04)",
+			fixture: "invalid_empty_auth_token.json",
+			wantErr: new(*ErrAuthToken),
 			assert: func(t *testing.T, err error) {
-				var e *ErrWritesPosture
+				var e *ErrAuthToken
 				errors.As(err, &e)
-				if e.Array != arrayMounts || e.Expected != true {
-					t.Fatalf("expected mounts writes=true posture, got %+v", e)
+				if e.Index != 0 {
+					t.Fatalf("expected index 0 flagged, got %+v", e)
 				}
 			},
 		},
 		{
-			name:    "auth_token rejected as provision marker (CFG-04)",
-			fixture: "reject_auth_token.json",
-			wantErr: new(*ErrProvisionMarker),
+			name:    "missing top-level ca_cert_pem rejected (CFG-04)",
+			fixture: "invalid_missing_ca_cert.json",
+			wantErr: new(*ErrMissingField),
 			assert: func(t *testing.T, err error) {
-				var e *ErrProvisionMarker
+				var e *ErrMissingField
 				errors.As(err, &e)
-				if e.Marker != "auth_token" {
-					t.Fatalf("expected auth_token marker, got %q", e.Marker)
-				}
-			},
-		},
-		{
-			name:    "ca_cert_pem rejected as provision marker (CFG-04)",
-			fixture: "reject_ca_cert_pem.json",
-			wantErr: new(*ErrProvisionMarker),
-			assert: func(t *testing.T, err error) {
-				var e *ErrProvisionMarker
-				errors.As(err, &e)
-				if e.Marker != "ca_cert_pem" {
-					t.Fatalf("expected ca_cert_pem marker, got %q", e.Marker)
+				if e.Field != "ca_cert_pem" {
+					t.Fatalf("expected ca_cert_pem flagged as missing, got %+v", e)
 				}
 			},
 		},
@@ -238,7 +231,9 @@ func TestLoad(t *testing.T) {
 // `<= 0` this config would be wrongly rejected. The standalone test asserts both
 // that Load succeeds AND that 0 round-trips as a present (non-nil) zero on every
 // mount, so a wrong-direction off-by-one in either the presence check or the
-// range check is caught.
+// range check is caught. It also asserts the held-credential path is populated:
+// the top-level ca_cert_pem and each mount's auth_token survive the load
+// non-empty, proving the loader holds the credential rather than dropping it.
 func TestLoadAcceptsZeroCacheDuration(t *testing.T) {
 	cfg, err := Load(filepath.Join("testdata", "valid_cache_duration_zero.json"))
 	if err != nil {
@@ -248,21 +243,25 @@ func TestLoadAcceptsZeroCacheDuration(t *testing.T) {
 		t.Fatal("expected a *Config, got nil")
 	}
 
-	groups := map[string][]Mount{
-		"mounts":          cfg.Mounts,
-		"readonly_mounts": cfg.ReadonlyMounts,
+	if cfg.CACertPEM == "" {
+		t.Fatal("expected the held ca_cert_pem to survive the load, got empty")
 	}
-	for label, group := range groups {
-		if len(group) == 0 {
-			t.Fatalf("%s: expected at least one mount in the zero-duration fixture", label)
+
+	if len(cfg.Mounts) == 0 {
+		t.Fatal("expected at least one mount in the zero-duration fixture")
+	}
+	for i, m := range cfg.Mounts {
+		if m.CacheDurationS == nil {
+			t.Fatalf("mounts[%d]: cache_duration_s parsed as absent, want present 0", i)
 		}
-		for i, m := range group {
-			if m.CacheDurationS == nil {
-				t.Fatalf("%s[%d]: cache_duration_s parsed as absent, want present 0", label, i)
-			}
-			if *m.CacheDurationS != 0 {
-				t.Fatalf("%s[%d]: cache_duration_s parsed as %d, want 0", label, i, *m.CacheDurationS)
-			}
+		if *m.CacheDurationS != 0 {
+			t.Fatalf("mounts[%d]: cache_duration_s parsed as %d, want 0", i, *m.CacheDurationS)
+		}
+		if m.AuthToken == "" {
+			t.Fatalf("mounts[%d]: auth_token parsed as empty, want the held token", i)
+		}
+		if m.Readonly == nil {
+			t.Fatalf("mounts[%d]: readonly parsed as absent, want present", i)
 		}
 	}
 }
