@@ -25,6 +25,7 @@ package brokerrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -134,7 +135,7 @@ func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBy
 // broker ending the request early, which must not be treated as a real local
 // fault when the HTTP status already carried the verdict.
 func isPipeClosure(err error) bool {
-	return err == io.ErrClosedPipe
+	return errors.Is(err, io.ErrClosedPipe)
 }
 
 // jsonEnvelopeOverhead is retained for the chunk-size arithmetic below. It

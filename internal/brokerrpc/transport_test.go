@@ -114,7 +114,9 @@ func TestHTTPSTransportRejectsUntrustedEdge(t *testing.T) {
 		t.Fatalf("httpsTransport: %v", err)
 	}
 	client := &http.Client{Transport: tr}
-	if _, err := client.Get(srv.URL); err == nil {
+	resp, err := client.Get(srv.URL)
+	if err == nil {
+		_ = resp.Body.Close()
 		t.Error("expected TLS handshake failure against an untrusted edge, got nil")
 	}
 }
