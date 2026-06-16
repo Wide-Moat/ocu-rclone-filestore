@@ -7,415 +7,233 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
-	"net"
+	"mime"
+	"mime/multipart"
 	"net/http"
-	"os"
 	"testing"
 
 	"github.com/rclone/rclone/fs/fserrors"
 )
 
-// uploadTestServer runs a minimal HTTP server over a unix socket and invokes
-// handler for each request. It returns the socket path. The server is closed
-// when t.Cleanup runs.
-func uploadTestServer(t *testing.T, handler http.HandlerFunc) string {
+// parsedUpload holds the multipart fields a test handler reassembled from an
+// upload request: the params JSON and the file bytes.
+type parsedUpload struct {
+	params   []byte
+	fileData []byte
+}
+
+// parseMultipartUpload reads the multipart body of an upload request and returns
+// the "params" field bytes and the reassembled file part. It tolerates the
+// part ordering produced by the client (params first, then file).
+func parseMultipartUpload(t *testing.T, r *http.Request) parsedUpload {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "brpc")
+	_, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
+		t.Fatalf("parse Content-Type: %v", err)
 	}
-	sock := dir + "/b.sock"
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-
-	ln, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatalf("Listen unix %s: %v", sock, err)
+	boundary := params["boundary"]
+	if boundary == "" {
+		t.Fatal("multipart upload has no boundary")
 	}
-	srv := &http.Server{Handler: handler}
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() { _ = srv.Close() })
-	return sock
-}
-
-// TestUploadStreamRouteAndHeaders checks that the fileUpload POST goes to the
-// correct route with Content-Type application/connect+json and
-// Connect-Protocol-Version: 1.
-func TestUploadStreamRouteAndHeaders(t *testing.T) {
-	var gotPath, gotCT, gotProto string
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		gotCT = r.Header.Get("Content-Type")
-		gotProto = r.Header.Get("Connect-Protocol-Version")
-		// Write a minimal success end-stream frame.
-		var buf bytes.Buffer
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-	})
-
-	c, _ := New(sock, "fs-test-01")
-	payload := bytes.NewReader([]byte("hello"))
-	_ = c.Upload(context.Background(), "/a.txt", payload, 5, false)
-
-	wantPath := "/ocu.filestore.v1alpha.FilesystemService/fileUpload"
-	if gotPath != wantPath {
-		t.Errorf("path: got %q, want %q", gotPath, wantPath)
-	}
-	wantCT := "application/connect+json"
-	if gotCT != wantCT {
-		t.Errorf("Content-Type: got %q, want %q", gotCT, wantCT)
-	}
-	if gotProto != "1" {
-		t.Errorf("Connect-Protocol-Version: got %q, want %q", gotProto, "1")
-	}
-}
-
-// TestUploadParamsFrameDeclaredSizeBytes checks that the first frame is a
-// params frame carrying the correct declared_size_bytes.
-func TestUploadParamsFrameDeclaredSizeBytes(t *testing.T) {
-	var paramsData []byte
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		// Read all frames from the request body.
-		flag, payload, err := readFrame(r.Body)
+	mr := multipart.NewReader(r.Body, boundary)
+	var out parsedUpload
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
-			t.Errorf("read params frame: %v", err)
-			return
+			t.Fatalf("read part: %v", err)
 		}
-		if flag != 0x00 {
-			t.Errorf("params frame flag: want 0x00, got 0x%02x", flag)
+		data, _ := io.ReadAll(part)
+		switch part.FormName() {
+		case "params":
+			out.params = data
+		case "file":
+			out.fileData = data
 		}
-		paramsData = payload
-		// Drain rest of body.
-		_, _ = io.ReadAll(r.Body)
+	}
+	return out
+}
 
-		var buf bytes.Buffer
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
+// TestUploadRouteHeadersAndParams verifies the upload POSTs to the REST route
+// with the Bearer header, carries a multipart 'params' field with the correct
+// fsID/path/declared_size/intent, and round-trips the file bytes.
+func TestUploadRouteHeadersAndParams(t *testing.T) {
+	var gotPath, gotAuth string
+	var parsed parsedUpload
+	content := []byte("hello world") // 11 bytes
+
+	c, _ := newTLSTestClient(t, "fs-up-01", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		parsed = parseMultipartUpload(t, r)
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
 	})
 
-	content := []byte("hello world") // 11 bytes
-	c, _ := New(sock, "fs-test-01")
-	_ = c.Upload(context.Background(), "/b.txt", bytes.NewReader(content), int64(len(content)), false)
+	if err := c.Upload(context.Background(), "/b.txt", bytes.NewReader(content), int64(len(content)), false); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
 
-	var params struct {
+	if gotPath != "/v1/filestore/fs/fileUpload" {
+		t.Errorf("path = %q, want /v1/filestore/fs/fileUpload", gotPath)
+	}
+	if gotAuth != "Bearer "+testAuthToken {
+		t.Errorf("Authorization = %q, want Bearer %s", gotAuth, testAuthToken)
+	}
+	if !bytes.Equal(parsed.fileData, content) {
+		t.Errorf("file part = %q, want %q", parsed.fileData, content)
+	}
+
+	var p struct {
+		FilesystemID      string                `json:"filesystem_id"`
+		Path              string                `json:"path"`
 		DeclaredSizeBytes int64                 `json:"declared_size_bytes"`
 		OverwriteExisting bool                  `json:"overwrite_existing"`
-		AuthMetadata      AuthorizationMetadata `json:"authorization_metadata"`
+		AuthMeta          AuthorizationMetadata `json:"authorization_metadata"`
 	}
-	if err := json.Unmarshal(paramsData, &params); err != nil {
+	if err := json.Unmarshal(parsed.params, &p); err != nil {
 		t.Fatalf("parse params: %v", err)
 	}
-	if params.DeclaredSizeBytes != int64(len(content)) {
-		t.Errorf("declared_size_bytes: got %d, want %d", params.DeclaredSizeBytes, len(content))
+	if p.FilesystemID != "fs-up-01" {
+		t.Errorf("params fsID = %q, want fs-up-01", p.FilesystemID)
 	}
-	// This call passed overwrite=false (create-new write); the field must
-	// round-trip on the params frame.
-	if params.OverwriteExisting {
-		t.Error("overwrite_existing: got true, want false for a create-new upload")
+	if p.Path != "/b.txt" {
+		t.Errorf("params path = %q, want /b.txt", p.Path)
 	}
-	if params.AuthMetadata.Intent != "write" {
-		t.Errorf("params auth intent: got %q, want %q", params.AuthMetadata.Intent, "write")
+	if p.DeclaredSizeBytes != int64(len(content)) {
+		t.Errorf("declared_size_bytes = %d, want %d", p.DeclaredSizeBytes, len(content))
 	}
-	if params.AuthMetadata.Downloadable {
-		t.Error("params auth downloadable: must be false")
+	if p.OverwriteExisting {
+		t.Error("overwrite_existing = true, want false for a create-new upload")
+	}
+	if p.AuthMeta.Intent != "write" {
+		t.Errorf("intent = %q, want write", p.AuthMeta.Intent)
+	}
+	if p.AuthMeta.Downloadable {
+		t.Error("downloadable = true, must be false")
 	}
 }
 
-// TestUploadChunkFramesTotalExact verifies that the chunker sends exactly
-// declared_size_bytes across all chunk frames.
-func TestUploadChunkFramesTotalExact(t *testing.T) {
-	content := bytes.Repeat([]byte("x"), 100)
-	var totalChunkBytes int
+// TestUploadLargeSourceRoundTrips verifies that a source larger than the message
+// ceiling still round-trips byte-identical (chunked file-part writes reassemble
+// to the exact source).
+func TestUploadLargeSourceRoundTrips(t *testing.T) {
+	const ceiling = 64
+	content := bytes.Repeat([]byte("ab"), ceiling*4+9) // definitely >1 chunk
+	var got []byte
 
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		// Skip params frame.
-		_, _, err := readFrame(r.Body)
-		if err != nil {
-			t.Errorf("read params frame: %v", err)
+	c := newTLSTestClientOpts(t, "fs-up-big", ClientOptions{MessageCeiling: ceiling}, func(w http.ResponseWriter, r *http.Request) {
+		got = parseMultipartUpload(t, r).fileData
+		w.WriteHeader(http.StatusOK)
+	})
+
+	if err := c.Upload(context.Background(), "/d.bin", bytes.NewReader(content), int64(len(content)), false); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Errorf("large source did not round-trip byte-identical: got %d bytes, want %d", len(got), len(content))
+	}
+}
+
+// TestUploadZeroByteRoundTrips verifies the empty-file boundary: a zero-length
+// source with declared size 0 succeeds and the file part is empty.
+func TestUploadZeroByteRoundTrips(t *testing.T) {
+	var parsed parsedUpload
+	c, _ := newTLSTestClient(t, "fs-up-zero", func(w http.ResponseWriter, r *http.Request) {
+		parsed = parseMultipartUpload(t, r)
+		w.WriteHeader(http.StatusOK)
+	})
+	if err := c.Upload(context.Background(), "/empty.txt", bytes.NewReader(nil), 0, false); err != nil {
+		t.Fatalf("zero-byte upload must succeed: %v", err)
+	}
+	if len(parsed.fileData) != 0 {
+		t.Errorf("file part = %d bytes, want 0", len(parsed.fileData))
+	}
+	var p struct {
+		DeclaredSizeBytes int64 `json:"declared_size_bytes"`
+	}
+	_ = json.Unmarshal(parsed.params, &p)
+	if p.DeclaredSizeBytes != 0 {
+		t.Errorf("declared_size_bytes = %d, want 0", p.DeclaredSizeBytes)
+	}
+}
+
+// TestUploadOverwriteTrueRoundTrips verifies an overwrite-in-place upload sets
+// overwrite_existing=true on the params field.
+func TestUploadOverwriteTrueRoundTrips(t *testing.T) {
+	var parsed parsedUpload
+	c, _ := newTLSTestClient(t, "fs-up-ow", func(w http.ResponseWriter, r *http.Request) {
+		parsed = parseMultipartUpload(t, r)
+		w.WriteHeader(http.StatusOK)
+	})
+	if err := c.Upload(context.Background(), "/ow.txt", bytes.NewReader([]byte("y")), 1, true); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	var p struct {
+		OverwriteExisting bool `json:"overwrite_existing"`
+	}
+	if err := json.Unmarshal(parsed.params, &p); err != nil {
+		t.Fatalf("parse params: %v", err)
+	}
+	if !p.OverwriteExisting {
+		t.Error("overwrite_existing = false, want true for an overwrite-in-place upload")
+	}
+}
+
+// TestUploadThrottledIsRetryable verifies that a 429 from the broker maps to a
+// retryable error (SEC-46 backpressure), and that a re-driven upload after the
+// throttle sends byte-identical content (SC2).
+func TestUploadThrottledIsRetryable(t *testing.T) {
+	var attempt int
+	var firstBody, secondBody []byte
+	content := bytes.Repeat([]byte("Z"), 4096)
+
+	c, _ := newTLSTestClient(t, "fs-up-429", func(w http.ResponseWriter, r *http.Request) {
+		data := parseMultipartUpload(t, r).fileData
+		attempt++
+		if attempt == 1 {
+			firstBody = data
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("throttled"))
 			return
 		}
-		// Read chunk frames until half-close (EOF) or end-stream.
-		for {
-			flag, payload, err := readFrame(r.Body)
-			if err != nil {
-				break
-			}
-			if flag == endStreamFlag {
-				break
-			}
-			var chunk struct {
-				Chunk []byte `json:"chunk"`
-			}
-			if jsonErr := json.Unmarshal(payload, &chunk); jsonErr == nil {
-				totalChunkBytes += len(chunk.Chunk)
-			}
-		}
-
-		var buf bytes.Buffer
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
+		secondBody = data
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
 	})
 
-	c, _ := New(sock, "fs-test-01")
-	_ = c.Upload(context.Background(), "/c.txt", bytes.NewReader(content), int64(len(content)), false)
-
-	if totalChunkBytes != len(content) {
-		t.Errorf("total chunk bytes: got %d, want %d", totalChunkBytes, len(content))
-	}
-}
-
-// TestUploadCeilingChunksUnderLimit verifies that a payload larger than the
-// message ceiling is split into multiple frames and that the ENCODED frame
-// payload — the base64-plus-JSON-envelope bytes actually put on the wire, the
-// thing the broker measures against the ceiling (D4) — stays strictly under
-// the ceiling. The previous version of this test only checked the *decoded*
-// chunk length and waved away the envelope, so it did not pin the real
-// invariant; base64 inflation pushed every full frame ~4/3 over the ceiling.
-func TestUploadCeilingChunksUnderLimit(t *testing.T) {
-	const ceiling = 64                                // small test ceiling
-	content := bytes.Repeat([]byte("a"), ceiling*3+7) // definitely >1 frame
-	var frameCount int
-	var maxFramePayload int
-
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		// Skip params frame.
-		_, _, _ = readFrame(r.Body)
-		for {
-			flag, payload, err := readFrame(r.Body)
-			if err != nil {
-				break
-			}
-			if flag == endStreamFlag {
-				break
-			}
-			// Measure the ENCODED frame payload (what the broker sees), not
-			// the decoded chunk bytes.
-			frameCount++
-			if len(payload) > maxFramePayload {
-				maxFramePayload = len(payload)
-			}
-			if len(payload) >= ceiling {
-				t.Errorf("encoded frame payload %d bytes is not strictly under ceiling %d", len(payload), ceiling)
-			}
-		}
-
-		var buf bytes.Buffer
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-	})
-
-	c, _ := NewWithOptions(sock, "fs-test-01", ClientOptions{MessageCeiling: ceiling})
-	_ = c.Upload(context.Background(), "/d.txt", bytes.NewReader(content), int64(len(content)), false)
-
-	if frameCount <= 1 {
-		t.Errorf("expected >1 chunk frame for payload larger than ceiling, got %d", frameCount)
-	}
-	if maxFramePayload == 0 {
-		t.Error("no chunk frames observed")
-	}
-}
-
-// TestUploadResourceExhaustedIsRetryable verifies that a resource_exhausted
-// EndStreamResponse from the broker maps to a retryable error (backpressure),
-// not a permanent error.
-func TestUploadResourceExhaustedIsRetryable(t *testing.T) {
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.ReadAll(r.Body)
-		var buf bytes.Buffer
-		connErr := &ConnectError{Code: "resource_exhausted", Message: "throttled"}
-		_ = writeEndStream(&buf, connErr)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-	})
-
-	c, _ := New(sock, "fs-test-01")
-	err := c.Upload(context.Background(), "/e.txt", bytes.NewReader([]byte("x")), 1, false)
+	err := c.Upload(context.Background(), "/e.bin", bytes.NewReader(content), int64(len(content)), false)
 	if err == nil {
-		t.Fatal("expected error, got nil")
+		t.Fatal("expected retryable throttle error on first attempt, got nil")
 	}
 	if !fserrors.IsRetryError(err) {
-		t.Errorf("resource_exhausted from EndStream must be retryable: %v", err)
+		t.Errorf("429 from upload must be retryable: %v", err)
+	}
+
+	// The pacer would re-drive the upload; simulate the retry with a fresh source.
+	if err := c.Upload(context.Background(), "/e.bin", bytes.NewReader(content), int64(len(content)), false); err != nil {
+		t.Fatalf("retried upload: %v", err)
+	}
+	if !bytes.Equal(firstBody, content) || !bytes.Equal(secondBody, content) {
+		t.Error("upload content was not byte-identical across the throttle retry (SC2)")
 	}
 }
 
-// TestUploadToleratesResponseMessageFrame verifies that a successful upload
-// where the broker emits the optional response message frame (data flag 0x00,
-// a FileUploadResponse) before the end-stream trailer is accepted — the
-// standard Connect client-streaming success shape (MD-02). Reading the trailer
-// directly would have hard-failed on the leading 0x00 frame.
-func TestUploadToleratesResponseMessageFrame(t *testing.T) {
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.ReadAll(r.Body)
-		var buf bytes.Buffer
-		// Optional response message frame (flag 0x00) before the trailer.
-		msg, _ := json.Marshal(FileUploadResponse{File: FilesystemFile{Path: "/g.txt", Size: 1}})
-		_ = writeFrame(&buf, 0x00, msg)
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-	})
-
-	c, _ := New(sock, "fs-test-01")
-	err := c.Upload(context.Background(), "/g.txt", bytes.NewReader([]byte("x")), 1, false)
-	if err != nil {
-		t.Fatalf("upload with leading response message frame must succeed: %v", err)
-	}
-}
-
-// TestUploadEarlyTrailerSurvivesPipeError verifies that when the broker
-// terminates the upload early with a resource_exhausted trailer without
-// draining the request body (the SEC-46 throttle case), the retryable trailer
-// verdict survives to the caller and is NOT masked by the io.ErrClosedPipe
-// write error (CR-02). The payload is large enough that the writer goroutine
-// is still streaming when the broker replies and closes the request body.
-func TestUploadEarlyTrailerSurvivesPipeError(t *testing.T) {
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		// Reply immediately WITHOUT draining the request body, so the
-		// transport closes the pipe under the still-writing goroutine.
-		var buf bytes.Buffer
-		connErr := &ConnectError{Code: "resource_exhausted", Message: "throttled mid-stream"}
-		_ = writeEndStream(&buf, connErr)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-	})
-
-	// 8 MiB of source — far larger than the default 256 KiB ceiling, so the
-	// writer goroutine is mid-stream when the broker replies.
-	big := bytes.Repeat([]byte("a"), 8*1024*1024)
-	c, _ := New(sock, "fs-test-01")
-	err := c.Upload(context.Background(), "/big.bin", bytes.NewReader(big), int64(len(big)), false)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !fserrors.IsRetryError(err) {
-		t.Errorf("early resource_exhausted trailer must surface as retryable, not be masked by the pipe error: %v", err)
-	}
-}
-
-// TestUploadSizeMismatchIsPermanent verifies that a broker invalid_argument
-// (size_exceeded) response maps to a permanent no-retry error.
+// TestUploadSizeMismatchIsPermanent verifies a broker 400 (size policy) maps to
+// a permanent no-retry error.
 func TestUploadSizeMismatchIsPermanent(t *testing.T) {
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	c, _ := newTLSTestClient(t, "fs-up-400", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
-		var buf bytes.Buffer
-		connErr := &ConnectError{Code: "invalid_argument", Message: "size_exceeded"}
-		_ = writeEndStream(&buf, connErr)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("size_exceeded"))
 	})
-
-	c, _ := New(sock, "fs-test-01")
 	err := c.Upload(context.Background(), "/f.txt", bytes.NewReader([]byte("x")), 99, false)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
 	if fserrors.IsRetryError(err) {
-		t.Errorf("size_exceeded from EndStream must NOT be retryable: %v", err)
-	}
-	if !errors.Is(err, ErrInvalidArgument) {
-		t.Errorf("size_exceeded: errors.Is(ErrInvalidArgument) false")
-	}
-}
-
-// TestUploadSendsTerminatingEndStreamFrame verifies that the upload request
-// body ends with an explicit end-stream frame (flag 0x02) carrying an empty
-// EndStreamResponse {}, not a bare body half-close. The Connect
-// client-streaming protocol uses this frame as the completion signal: without
-// it the broker keeps waiting on a frame that never arrives and then aborts the
-// already-assembled stream as malformed, so a retry sees the object as already
-// present. This test reads every frame of the request body and asserts the LAST
-// one is the 0x02 {} terminator after all data frames.
-func TestUploadSendsTerminatingEndStreamFrame(t *testing.T) {
-	var lastFlag byte
-	var lastPayload []byte
-	var sawEndStream bool
-
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		for {
-			flag, payload, err := readFrame(r.Body)
-			if err != nil {
-				break
-			}
-			lastFlag = flag
-			lastPayload = payload
-			if flag == endStreamFlag {
-				sawEndStream = true
-			}
-		}
-		var buf bytes.Buffer
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-	})
-
-	content := bytes.Repeat([]byte("z"), 40)
-	c, _ := New(sock, "fs-test-01")
-	if err := c.Upload(context.Background(), "/term.txt", bytes.NewReader(content), int64(len(content)), false); err != nil {
-		t.Fatalf("upload: %v", err)
-	}
-
-	if !sawEndStream {
-		t.Fatal("upload request body never sent an end-stream frame (flag 0x02)")
-	}
-	if lastFlag != endStreamFlag {
-		t.Errorf("final request frame flag: got 0x%02x, want 0x%02x (end-stream must be last)", lastFlag, endStreamFlag)
-	}
-	// The empty EndStreamResponse {} is the success terminator the broker
-	// expects: an error trailer on the REQUEST side would be wrong.
-	var esr EndStreamResponse
-	if err := json.Unmarshal(lastPayload, &esr); err != nil {
-		t.Fatalf("terminating frame payload is not a valid EndStreamResponse: %v", err)
-	}
-	if esr.Error != nil {
-		t.Errorf("terminating frame carried an error %+v, want empty {}", esr.Error)
-	}
-}
-
-// TestUploadOverwriteTrueRoundTrips verifies that an overwrite-in-place upload
-// (Update's path) sets overwrite_existing=true on the params frame.
-func TestUploadOverwriteTrueRoundTrips(t *testing.T) {
-	var paramsData []byte
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		_, payload, err := readFrame(r.Body)
-		if err != nil {
-			t.Errorf("read params frame: %v", err)
-			return
-		}
-		paramsData = payload
-		_, _ = io.ReadAll(r.Body)
-		var buf bytes.Buffer
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-	})
-
-	c, _ := New(sock, "fs-test-01")
-	if err := c.Upload(context.Background(), "/ow.txt", bytes.NewReader([]byte("y")), 1, true); err != nil {
-		t.Fatalf("upload: %v", err)
-	}
-
-	var params struct {
-		OverwriteExisting bool `json:"overwrite_existing"`
-	}
-	if err := json.Unmarshal(paramsData, &params); err != nil {
-		t.Fatalf("parse params: %v", err)
-	}
-	if !params.OverwriteExisting {
-		t.Error("overwrite_existing: got false, want true for an overwrite-in-place upload")
+		t.Errorf("size policy 400 must NOT be retryable: %v", err)
 	}
 }

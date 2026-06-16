@@ -19,7 +19,7 @@ func TestRecursiveCursorEchoedUnmodified(t *testing.T) {
 	var page2Cursor string
 	callCount := 0
 
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		var body struct {
 			Cursor string `json:"cursor,omitempty"`
@@ -65,9 +65,9 @@ func TestRecursiveCursorEchoedUnmodified(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(respBody)
-	})
+	}
 
-	c, _ := New(sock, "fs-cursor-01")
+	c, _ := newTLSTestClient(t, "fs-cursor-01", handler)
 	entries, err := c.ListDirectoryAll(context.Background(), "/")
 	if err != nil {
 		t.Fatalf("ListDirectoryAll: %v", err)
@@ -90,7 +90,7 @@ func TestListFilesCursorEchoedUnmodified(t *testing.T) {
 	var page2AfterUUID string
 	callCount := 0
 
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		var body struct {
 			AfterUUID string `json:"after_uuid,omitempty"`
@@ -121,9 +121,9 @@ func TestListFilesCursorEchoedUnmodified(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(respBody)
-	})
+	}
 
-	c, _ := New(sock, "fs-cursor-01")
+	c, _ := newTLSTestClient(t, "fs-cursor-01", handler)
 	files, err := c.ListFilesAll(context.Background(), "root-uuid")
 	if err != nil {
 		t.Fatalf("ListFilesAll: %v", err)
@@ -145,7 +145,7 @@ func TestListFilesCursorEchoedUnmodified(t *testing.T) {
 // and returns an error (MD-03).
 func TestListDirectoryAllStopsOnNonAdvancingCursor(t *testing.T) {
 	callCount := 0
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		// Always return the SAME non-empty cursor — never advances.
 		type dirEntry struct {
@@ -165,9 +165,9 @@ func TestListDirectoryAllStopsOnNonAdvancingCursor(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(respBody)
-	})
+	}
 
-	c, _ := New(sock, "fs-cursor-01")
+	c, _ := newTLSTestClient(t, "fs-cursor-01", handler)
 	_, err := c.ListDirectoryAll(context.Background(), "/")
 	if err == nil {
 		t.Fatal("expected error on non-advancing cursor, got nil (would loop forever)")
@@ -183,7 +183,7 @@ func TestListDirectoryAllStopsOnNonAdvancingCursor(t *testing.T) {
 // for the uuid-paginated listFiles path (MD-03).
 func TestListFilesAllStopsOnNonAdvancingCursor(t *testing.T) {
 	callCount := 0
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		type file struct {
 			UUID string `json:"uuid"`
@@ -199,9 +199,9 @@ func TestListFilesAllStopsOnNonAdvancingCursor(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(respBody)
-	})
+	}
 
-	c, _ := New(sock, "fs-cursor-01")
+	c, _ := newTLSTestClient(t, "fs-cursor-01", handler)
 	_, err := c.ListFilesAll(context.Background(), "root-uuid")
 	if err == nil {
 		t.Fatal("expected error on non-advancing after_uuid, got nil (would loop forever)")
@@ -245,13 +245,13 @@ func TestListDirUnionDecodeMixedPage(t *testing.T) {
 		]
 	}`
 
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(mixedPage))
-	})
+	}
 
-	c, _ := New(sock, "fs-union-01")
+	c, _ := newTLSTestClient(t, "fs-union-01", handler)
 	entries, err := c.ListDirectoryAll(context.Background(), "/docs")
 	if err != nil {
 		t.Fatalf("ListDirectoryAll: %v", err)
@@ -302,7 +302,7 @@ func TestListDirUnionDecodeMixedPage(t *testing.T) {
 // returns all entries as []ListDirEntry.
 func TestListDirUnionTwoPageAggregation(t *testing.T) {
 	callCount := 0
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+	handler := func(w http.ResponseWriter, r *http.Request) {
 		callCount++
 		var respBody []byte
 		if callCount == 1 {
@@ -320,9 +320,9 @@ func TestListDirUnionTwoPageAggregation(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(respBody)
-	})
+	}
 
-	c, _ := New(sock, "fs-union-02")
+	c, _ := newTLSTestClient(t, "fs-union-02", handler)
 	entries, err := c.ListDirectoryAll(context.Background(), "/")
 	if err != nil {
 		t.Fatalf("ListDirectoryAll: %v", err)

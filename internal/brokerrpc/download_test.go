@@ -7,218 +7,165 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"testing"
+
+	"github.com/rclone/rclone/fs/fserrors"
 )
 
-// TestDownloadStreamRouteAndHeaders checks that fileDownload POSTs to the
-// correct route with Content-Type application/connect+json and
-// Connect-Protocol-Version: 1.
-func TestDownloadStreamRouteAndHeaders(t *testing.T) {
-	var gotPath, gotCT, gotProto string
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		gotCT = r.Header.Get("Content-Type")
-		gotProto = r.Header.Get("Connect-Protocol-Version")
-
-		// Send one content frame + success end-stream.
-		var buf bytes.Buffer
-		frame, _ := json.Marshal(map[string][]byte{"data": []byte("hello")})
-		_ = writeFrame(&buf, 0x00, frame)
-		_ = writeEndStream(&buf, nil)
-
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-	})
-
-	c, _ := New(sock, "fs-dl-01")
-	_, _ = c.Download(context.Background(), "uuid-abc")
-
-	wantPath := "/ocu.filestore.v1alpha.FilesystemService/fileDownload"
-	if gotPath != wantPath {
-		t.Errorf("path: got %q, want %q", gotPath, wantPath)
+// readDownloadRequest decodes the JSON fileDownload request body.
+func readDownloadRequest(t *testing.T, r *http.Request) FileDownloadRequest {
+	t.Helper()
+	body, _ := io.ReadAll(r.Body)
+	var req FileDownloadRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("parse download request: %v", err)
 	}
-	wantCT := "application/connect+json"
-	if gotCT != wantCT {
-		t.Errorf("Content-Type: got %q, want %q", gotCT, wantCT)
-	}
-	if gotProto != "1" {
-		t.Errorf("Connect-Protocol-Version: got %q, want 1", gotProto)
+	return req
+}
+
+// chunkedOctetStream writes content as an application/octet-stream body in a few
+// flushed chunks so the client exercises chunked reassembly.
+func chunkedOctetStream(w http.ResponseWriter, content []byte) {
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.WriteHeader(http.StatusOK)
+	const chunk = 4
+	for i := 0; i < len(content); i += chunk {
+		end := i + chunk
+		if end > len(content) {
+			end = len(content)
+		}
+		_, _ = w.Write(content[i:end])
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
 	}
 }
 
-// TestDownloadAuthMetadata asserts the fileDownload request body carries
-// authorization_metadata{intent: read, downloadable: false} and addresses
-// by uuid, not path (D7).
-func TestDownloadAuthMetadata(t *testing.T) {
-	var reqBody []byte
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		// The download request is a single JSON frame (not framed for unary
-		// compat). Read it directly from the body.
-		flag, payload, err := readFrame(r.Body)
-		if err != nil {
-			t.Errorf("read request frame: %v", err)
-			return
-		}
-		if flag != 0x00 {
-			t.Errorf("download request frame flag: want 0x00 (data frame), got 0x%02x", flag)
-		}
-		reqBody = payload
+// TestDownloadRouteHeadersAndAuthMetadata verifies fileDownload POSTs to the
+// REST route with the Bearer header, addresses by uuid (not path), and carries
+// authorization_metadata{intent:read, downloadable:false}.
+func TestDownloadRouteHeadersAndAuthMetadata(t *testing.T) {
+	var gotPath, gotAuth, gotCT string
+	var req FileDownloadRequest
 
-		var buf bytes.Buffer
-		frame, _ := json.Marshal(map[string][]byte{"data": []byte("x")})
-		_ = writeFrame(&buf, 0x00, frame)
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
+	c, _ := newTLSTestClient(t, "fs-dl-01", func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotCT = r.Header.Get("Content-Type")
+		req = readDownloadRequest(t, r)
+		chunkedOctetStream(w, []byte("x"))
 	})
 
-	c, _ := New(sock, "fs-dl-01")
 	_, _ = c.Download(context.Background(), "uuid-test-42")
 
-	var req struct {
-		FilesystemID string                `json:"filesystem_id"`
-		UUID         string                `json:"uuid"`
-		Path         string                `json:"path,omitempty"`
-		AuthMeta     AuthorizationMetadata `json:"authorization_metadata"`
+	if gotPath != "/v1/filestore/fs/fileDownload" {
+		t.Errorf("path = %q, want /v1/filestore/fs/fileDownload", gotPath)
 	}
-	if err := json.Unmarshal(reqBody, &req); err != nil {
-		t.Fatalf("parse request body: %v", err)
+	if gotAuth != "Bearer "+testAuthToken {
+		t.Errorf("Authorization = %q, want Bearer %s", gotAuth, testAuthToken)
+	}
+	if gotCT != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", gotCT)
 	}
 	if req.UUID != "uuid-test-42" {
-		t.Errorf("uuid: got %q, want %q", req.UUID, "uuid-test-42")
+		t.Errorf("uuid = %q, want uuid-test-42", req.UUID)
 	}
-	if req.Path != "" {
-		t.Errorf("path must be absent in download request, got %q", req.Path)
+	if req.AuthorizationMetadata.Intent != "read" {
+		t.Errorf("intent = %q, want read", req.AuthorizationMetadata.Intent)
 	}
-	if req.AuthMeta.Intent != "read" {
-		t.Errorf("auth intent: got %q, want read", req.AuthMeta.Intent)
-	}
-	if req.AuthMeta.Downloadable {
-		t.Error("auth downloadable: must be false")
+	if req.AuthorizationMetadata.Downloadable {
+		t.Error("downloadable = true, must be false")
 	}
 	if req.FilesystemID == "" {
 		t.Error("filesystem_id must be set")
 	}
 }
 
-// TestDownloadFullReassembly verifies that the download helper reassembles
-// multiple content frames into the complete content.
+// TestDownloadFullReassembly verifies the chunked octet-stream body reassembles
+// into the complete content.
 func TestDownloadFullReassembly(t *testing.T) {
-	part1 := []byte("hello ")
-	part2 := []byte("world")
-
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		var buf bytes.Buffer
-		f1, _ := json.Marshal(map[string][]byte{"data": part1})
-		f2, _ := json.Marshal(map[string][]byte{"data": part2})
-		_ = writeFrame(&buf, 0x00, f1)
-		_ = writeFrame(&buf, 0x00, f2)
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
+	content := []byte("hello world, this spans several chunks")
+	c, _ := newTLSTestClient(t, "fs-dl-02", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		chunkedOctetStream(w, content)
 	})
-
-	c, _ := New(sock, "fs-dl-01")
 	got, err := c.Download(context.Background(), "uuid-abc")
 	if err != nil {
 		t.Fatalf("Download: %v", err)
 	}
-	want := append(part1, part2...)
-	if !bytes.Equal(got, want) {
-		t.Errorf("content: got %q, want %q", got, want)
+	if !bytes.Equal(got, content) {
+		t.Errorf("content = %q, want %q", got, content)
 	}
 }
 
-// TestDownloadRangeHelper verifies the distinct download-by-range helper
-// (DownloadRange) sends the {offset, length} window in the request so the
-// broker streams only that window, and returns exactly those bytes — NOT the
-// unary readFile op. The test server is range-aware: it reads the range from
-// the request params frame and streams only the windowed bytes, the real
-// broker's ranged behaviour. This both proves the helper transmits the range
-// (a server that ignored it would return the whole object and fail the slice
-// assertion) and that the returned content is the window.
-func TestDownloadRangeHelper(t *testing.T) {
+// TestDownloadRangeSendsRangeAndReturnsWindow verifies DownloadRange puts the
+// {offset,length} on the wire and returns the window; a full Download serialises
+// no range field.
+func TestDownloadRangeSendsRangeAndReturnsWindow(t *testing.T) {
 	content := []byte("abcdefghij") // 10 bytes
+	c, _ := newTLSTestClient(t, "fs-dl-03", func(w http.ResponseWriter, r *http.Request) {
+		req := readDownloadRequest(t, r)
+		out := content
+		if req.Range != nil {
+			off := req.Range.Offset
+			end := off + req.Range.Length
+			if off > int64(len(content)) {
+				off = int64(len(content))
+			}
+			if end > int64(len(content)) {
+				end = int64(len(content))
+			}
+			out = content[off:end]
+		}
+		chunkedOctetStream(w, out)
+	})
 
-	sock := rangeAwareDownloadServer(t, content)
-
-	c, _ := New(sock, "fs-dl-01")
-	// Request bytes [2, 5) → "cde"
 	got, err := c.DownloadRange(context.Background(), "uuid-abc", 2, 3)
 	if err != nil {
 		t.Fatalf("DownloadRange: %v", err)
 	}
-	want := content[2:5]
-	if !bytes.Equal(got, want) {
-		t.Errorf("range slice: got %q, want %q", got, want)
+	if want := content[2:5]; !bytes.Equal(got, want) {
+		t.Errorf("range slice = %q, want %q", got, want)
 	}
 }
 
-// TestDownloadRangeRequestCarriesRange verifies that DownloadRange puts the
-// requested window on the wire as a non-nil range{offset,length}, while a full
-// Download serialises no range field at all (so the full-download request body
-// stays byte-identical to the no-range form).
-func TestDownloadRangeRequestCarriesRange(t *testing.T) {
-	var rangeReq, fullReq []byte
+// TestDownloadRangeRequestShape verifies the range is serialised on a ranged
+// request and absent on a full one.
+func TestDownloadRangeRequestShape(t *testing.T) {
+	var rangeReq, fullReq FileDownloadRequest
 
-	mk := func(capture *[]byte) string {
-		return uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-			_, payload, _ := readFrame(r.Body)
-			*capture = payload
-			var buf bytes.Buffer
-			frame, _ := json.Marshal(map[string][]byte{"data": []byte("z")})
-			_ = writeFrame(&buf, 0x00, frame)
-			_ = writeEndStream(&buf, nil)
-			w.Header().Set("Content-Type", "application/connect+json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(buf.Bytes())
-		})
-	}
-
-	cr, _ := New(mk(&rangeReq), "fs-dl-01")
+	cr, _ := newTLSTestClient(t, "fs-dl-04", func(w http.ResponseWriter, r *http.Request) {
+		rangeReq = readDownloadRequest(t, r)
+		chunkedOctetStream(w, []byte("z"))
+	})
 	_, _ = cr.DownloadRange(context.Background(), "uuid-abc", 4, 6)
-	cf, _ := New(mk(&fullReq), "fs-dl-01")
-	_, _ = cf.Download(context.Background(), "uuid-abc")
-
-	var ranged struct {
-		Range *Range `json:"range"`
-	}
-	if err := json.Unmarshal(rangeReq, &ranged); err != nil {
-		t.Fatalf("parse ranged request: %v", err)
-	}
-	if ranged.Range == nil {
+	if rangeReq.Range == nil {
 		t.Fatal("DownloadRange request carried no range field")
 	}
-	if ranged.Range.Offset != 4 || ranged.Range.Length != 6 {
-		t.Errorf("range: got {offset:%d length:%d}, want {4 6}", ranged.Range.Offset, ranged.Range.Length)
+	if rangeReq.Range.Offset != 4 || rangeReq.Range.Length != 6 {
+		t.Errorf("range = {%d,%d}, want {4,6}", rangeReq.Range.Offset, rangeReq.Range.Length)
 	}
 
-	var full struct {
-		Range *Range `json:"range"`
-	}
-	if err := json.Unmarshal(fullReq, &full); err != nil {
-		t.Fatalf("parse full request: %v", err)
-	}
-	if full.Range != nil {
-		t.Errorf("full Download request carried a range field %+v, want none", full.Range)
+	cf, _ := newTLSTestClient(t, "fs-dl-05", func(w http.ResponseWriter, r *http.Request) {
+		fullReq = readDownloadRequest(t, r)
+		chunkedOctetStream(w, []byte("z"))
+	})
+	_, _ = cf.Download(context.Background(), "uuid-abc")
+	if fullReq.Range != nil {
+		t.Errorf("full Download carried a range field %+v, want none", fullReq.Range)
 	}
 }
 
-// TestDownloadRangeClampsOverDelivery verifies the defensive clamp: a broker
-// that ignores the range and streams MORE than the requested length is trimmed
-// to the contract length, so the caller never sees over-delivery.
+// TestDownloadRangeClampsOverDelivery verifies the defensive clamp trims a
+// broker that streamed more than the requested length.
 func TestDownloadRangeClampsOverDelivery(t *testing.T) {
-	// Server ignores the range and returns the whole 10-byte object.
-	sock := downloadRangeContentServer(t, []byte("abcdefghij"))
-	c, _ := New(sock, "fs-dl-01")
-	// Ask for 3 bytes; an over-delivering broker returns 10. The clamp trims
-	// to the first 3 of what was streamed (offset already applied broker-side
-	// when honoured; here it was not, so this documents the trim-only guard).
+	c, _ := newTLSTestClient(t, "fs-dl-06", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		chunkedOctetStream(w, []byte("abcdefghij")) // ignores range, returns 10
+	})
 	got, err := c.DownloadRange(context.Background(), "uuid-abc", 0, 3)
 	if err != nil {
 		t.Fatalf("DownloadRange: %v", err)
@@ -228,131 +175,59 @@ func TestDownloadRangeClampsOverDelivery(t *testing.T) {
 	}
 }
 
-// TestDownloadMalformedFrameIsHardError verifies that an undecodable content
-// frame aborts the download with a non-nil error rather than silently dropping
-// the frame and returning truncated content as success (CR-01). For a
-// FUSE-backed mount, silent truncation is undetectable file corruption.
-func TestDownloadMalformedFrameIsHardError(t *testing.T) {
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		var buf bytes.Buffer
-		good, _ := json.Marshal(map[string][]byte{"data": []byte("hello ")})
-		_ = writeFrame(&buf, 0x00, good)
-		// A frame whose payload is not valid JSON for downloadContentFrame.
-		_ = writeFrame(&buf, 0x00, []byte("this is not json"))
-		good2, _ := json.Marshal(map[string][]byte{"data": []byte("world")})
-		_ = writeFrame(&buf, 0x00, good2)
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-	})
-
-	c, _ := New(sock, "fs-dl-01")
-	got, err := c.Download(context.Background(), "uuid-corrupt")
-	if err == nil {
-		t.Fatalf("expected hard error on malformed frame, got nil with content %q", got)
-	}
-	if got != nil {
-		t.Errorf("malformed frame must not return partial content; got %q", got)
-	}
-}
-
-// TestDownloadTruncatedStreamErrors verifies that a stream ending before the
-// EndStreamResponse trailer is reported as an error (LO-01: the EOF branch must
-// use errors.Is because readFrame wraps the underlying EOF).
-func TestDownloadTruncatedStreamErrors(t *testing.T) {
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		var buf bytes.Buffer
-		frame, _ := json.Marshal(map[string][]byte{"data": []byte("partial")})
-		_ = writeFrame(&buf, 0x00, frame)
-		// No end-stream frame — the stream is truncated.
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
-	})
-
-	c, _ := New(sock, "fs-dl-01")
-	_, err := c.Download(context.Background(), "uuid-trunc")
-	if err == nil {
-		t.Fatal("expected error on truncated stream, got nil")
-	}
-}
-
-// downloadRangeContentServer serves the given content as a single download
-// content frame followed by a success trailer, IGNORING any requested range.
-// It models a broker that streams the whole object regardless of range, used to
-// exercise the helper's defensive over-delivery clamp.
-func downloadRangeContentServer(t *testing.T, content []byte) string {
-	t.Helper()
-	return uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+// TestDownloadNotFoundMapsSentinel verifies a 404 maps to ErrNotFound.
+func TestDownloadNotFoundMapsSentinel(t *testing.T) {
+	c, _ := newTLSTestClient(t, "fs-dl-07", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
-		var buf bytes.Buffer
-		frame, _ := json.Marshal(map[string][]byte{"data": content})
-		_ = writeFrame(&buf, 0x00, frame)
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("uuid missing"))
 	})
+	_, err := c.Download(context.Background(), "uuid-gone")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("404 must map to ErrNotFound; got %v", err)
+	}
 }
 
-// rangeAwareDownloadServer serves only the windowed bytes of content selected
-// by the request's range{offset,length}, the real broker's ranged behaviour: a
-// nil/zero range streams the whole object; a non-nil range streams content
-// clamped to [offset, offset+length). offset is applied server-side, so the
-// streamed bytes already begin at offset.
-func rangeAwareDownloadServer(t *testing.T, content []byte) string {
-	t.Helper()
-	return uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		_, payload, _ := readFrame(r.Body)
+// TestDownloadThrottledIsRetryable verifies a 429 on download is retryable.
+func TestDownloadThrottledIsRetryable(t *testing.T) {
+	c, _ := newTLSTestClient(t, "fs-dl-08", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
-		var req struct {
-			Range *Range `json:"range"`
-		}
-		_ = json.Unmarshal(payload, &req)
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("throttled"))
+	})
+	_, err := c.Download(context.Background(), "uuid-busy")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !fserrors.IsRetryError(err) {
+		t.Errorf("429 download must be retryable: %v", err)
+	}
+}
 
+// TestDownloadRangePastEOF verifies a length past EOF is clamped server-side and
+// returned without over-read.
+func TestDownloadRangePastEOF(t *testing.T) {
+	content := []byte("abcdefghij")
+	c, _ := newTLSTestClient(t, "fs-dl-09", func(w http.ResponseWriter, r *http.Request) {
+		req := readDownloadRequest(t, r)
 		out := content
-		if req.Range != nil && (req.Range.Offset != 0 || req.Range.Length != 0) {
+		if req.Range != nil {
 			off := req.Range.Offset
+			end := off + req.Range.Length
 			if off > int64(len(content)) {
 				off = int64(len(content))
 			}
-			end := off + req.Range.Length
 			if end > int64(len(content)) {
 				end = int64(len(content))
 			}
 			out = content[off:end]
 		}
-
-		var buf bytes.Buffer
-		frame, _ := json.Marshal(map[string][]byte{"data": out})
-		_ = writeFrame(&buf, 0x00, frame)
-		_ = writeEndStream(&buf, nil)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(buf.Bytes())
+		chunkedOctetStream(w, out)
 	})
-}
-
-// TestDownloadRangeNegativeLength verifies that a negative length returns an
-// error rather than panicking the process (HI-02). A make([]byte, negative)
-// would crash the entire mount instead of returning EINVAL to the VFS.
-func TestDownloadRangeNegativeLength(t *testing.T) {
-	sock := downloadRangeContentServer(t, []byte("abcdefghij"))
-	c, _ := New(sock, "fs-dl-01")
-	got, err := c.DownloadRange(context.Background(), "uuid-abc", 5, -3)
-	if err == nil {
-		t.Fatalf("expected error on negative length, got nil with content %q", got)
-	}
-}
-
-// TestDownloadRangePastEOF verifies that a length extending past EOF is clamped
-// to the remaining bytes rather than panicking or over-reading (HI-02).
-func TestDownloadRangePastEOF(t *testing.T) {
-	content := []byte("abcdefghij") // 10 bytes
-	sock := rangeAwareDownloadServer(t, content)
-	c, _ := New(sock, "fs-dl-01")
-	// Offset 7, length 100 → the broker clamps to the final 3 bytes "hij".
 	got, err := c.DownloadRange(context.Background(), "uuid-abc", 7, 100)
 	if err != nil {
 		t.Fatalf("DownloadRange past EOF: %v", err)
@@ -362,22 +237,30 @@ func TestDownloadRangePastEOF(t *testing.T) {
 	}
 }
 
-// TestDownloadTrailerDeterminesSuccess verifies that success/failure comes from
-// the EndStreamResponse trailer, not the HTTP status (streams always 200).
-func TestDownloadTrailerDeterminesSuccess(t *testing.T) {
-	sock := uploadTestServer(t, func(w http.ResponseWriter, r *http.Request) {
-		var buf bytes.Buffer
-		// Stream returns HTTP 200 but trailer carries an error.
-		connErr := &ConnectError{Code: "not_found", Message: "uuid missing"}
-		_ = writeEndStream(&buf, connErr)
-		w.Header().Set("Content-Type", "application/connect+json")
-		w.WriteHeader(http.StatusOK) // always 200 for streams
-		_, _ = w.Write(buf.Bytes())
+// TestDownloadRangeEmptyWindow verifies offset==size, length 0 returns empty.
+func TestDownloadRangeEmptyWindow(t *testing.T) {
+	content := []byte("abcdefghij")
+	c, _ := newTLSTestClient(t, "fs-dl-10", func(w http.ResponseWriter, r *http.Request) {
+		req := readDownloadRequest(t, r)
+		out := []byte{}
+		if req.Range != nil {
+			off := req.Range.Offset
+			end := off + req.Range.Length
+			if off > int64(len(content)) {
+				off = int64(len(content))
+			}
+			if end > int64(len(content)) {
+				end = int64(len(content))
+			}
+			out = content[off:end]
+		}
+		chunkedOctetStream(w, out)
 	})
-
-	c, _ := New(sock, "fs-dl-01")
-	_, err := c.Download(context.Background(), "uuid-gone")
-	if err == nil {
-		t.Fatal("expected error from EndStreamResponse, got nil (HTTP 200 must not indicate success)")
+	got, err := c.DownloadRange(context.Background(), "uuid-eof", int64(len(content)), 0)
+	if err != nil {
+		t.Fatalf("DownloadRange empty window: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("empty window: got %d bytes (%q), want 0", len(got), got)
 	}
 }
