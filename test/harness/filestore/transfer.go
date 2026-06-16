@@ -83,6 +83,15 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stage-0 per-op ceiling: an upload to the throttled scope costs one token
+	// like any other op. An over-budget upload is refused with the unmapped
+	// throttle status (the guest surfaces it as a non-retryable EIO) before the
+	// destination is touched.
+	if !s.chargePerOp(params.FilesystemID) {
+		writeError(w, throttleRefusalStatus, "per-op ceiling exceeded; back off and retry")
+		return
+	}
+
 	// Throttle decision happens after auth so an unauthorised caller is never
 	// told to back off, and before the write so a throttled upload leaves the
 	// destination untouched.

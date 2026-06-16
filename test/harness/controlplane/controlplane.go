@@ -50,6 +50,13 @@ type Options struct {
 	// Now, when set, fixes the clock for deterministic tests. The zero value
 	// uses time.Now.
 	Now func() time.Time
+	// SigningKey, when non-nil, is used as the ES256 signing key instead of a
+	// freshly generated one. The live harness shares a STABLE key across the
+	// init step (which mints the fixture's weak JWTs) and the serving process
+	// (which publishes the matching JWKS), so a token minted at bringup verifies
+	// against the JWKS the running control-plane serves. The zero value generates
+	// a fresh per-process key (the original behaviour the unit tests rely on).
+	SigningKey *ecdsa.PrivateKey
 }
 
 // Server is the control-plane peer: it holds the signing key and serves the
@@ -66,9 +73,13 @@ type Server struct {
 
 // NewServer constructs a Server, generating a fresh P-256 signing key.
 func NewServer(opts Options) (*Server, error) {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, err
+	priv := opts.SigningKey
+	if priv == nil {
+		var err error
+		priv, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			return nil, err
+		}
 	}
 	ttl := opts.TTL
 	if ttl <= 0 {

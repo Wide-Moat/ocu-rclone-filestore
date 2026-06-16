@@ -117,6 +117,12 @@ type Options struct {
 	// Retry-After header so the guest's pacer/backoff path can be exercised. A
 	// value of 0 (the default) never throttles.
 	ThrottleEvery int
+	// PerOpThrottle, when set, applies a per-op token-bucket ceiling to a single
+	// named scope: every dispatched op (metadata ops AND fileUpload) against that
+	// scope costs one token, and an over-budget op is refused with the unmapped
+	// throttle status (which the guest surfaces as a non-retryable EIO). All other
+	// scopes are never charged. The zero value (nil) never throttles per-op.
+	PerOpThrottle *PerOpThrottle
 }
 
 // Server is the REST filestore peer.
@@ -128,6 +134,11 @@ type Server struct {
 	throttleEvery int
 	mu            sync.Mutex
 	writeCount    int
+
+	// perOpScope is the single scope the per-op token bucket applies to, empty
+	// when no per-op throttle is configured. perOpBucket is its bucket.
+	perOpScope  string
+	perOpBucket *tokenBucket
 }
 
 // NewServer constructs a Server from the given options. It panics on a missing
@@ -144,6 +155,10 @@ func NewServer(opts Options) *Server {
 	}
 	for _, sc := range opts.Scopes {
 		s.scopes[sc.FilesystemID] = sc
+	}
+	if t := opts.PerOpThrottle; t != nil && t.FilesystemID != "" {
+		s.perOpScope = t.FilesystemID
+		s.perOpBucket = newTokenBucket(t.Rate, t.Burst, t.Now)
 	}
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc(restBase, s.route)
@@ -211,7 +226,27 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stage-0 per-op ceiling: charge one token before the op runs. An
+	// over-budget op on the throttled scope is refused with the unmapped throttle
+	// status (the guest surfaces it as a non-retryable EIO). This is charged
+	// AFTER auth so an unauthorised caller is never told to back off.
+	if !s.chargePerOp(body.FilesystemID) {
+		writeError(w, throttleRefusalStatus, "per-op ceiling exceeded; back off and retry")
+		return
+	}
+
 	s.dispatch(w, r, opName, scope, body)
+}
+
+// chargePerOp charges one token against the per-op bucket when the requested
+// scope is the throttled one. It returns true (admit) when no per-op throttle
+// applies to this scope or a token was available, and false (refuse) when the
+// throttled scope is over budget.
+func (s *Server) chargePerOp(requestedFSID string) bool {
+	if s.perOpBucket == nil || requestedFSID != s.perOpScope {
+		return true
+	}
+	return s.perOpBucket.allow()
 }
 
 // commonBody is the shared prefix of every JSON request body: the scope handle
