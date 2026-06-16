@@ -56,26 +56,33 @@ type Fs struct {
 }
 
 // NewFs constructs an Fs from the provided config. It validates that the
-// required options (socket_path, filesystem_id) are present, then constructs
-// the brokerClient from the real brokerrpc.Client bound to the per-session
-// socket.
+// required options (service_url, filesystem_id, auth_token, ca_cert_pem) are
+// present, then constructs the brokerClient from the real brokerrpc.Client
+// bound to the broker's HTTPS service endpoint.
 //
-// The Fs holds no credential and constructs no AuthorizationMetadata. Auth
-// is stamped centrally by brokerrpc (SEC-25). NewFs does NOT dial the socket
-// synchronously — the first RPC call does.
+// The Fs constructs no AuthorizationMetadata. Auth/intent are stamped centrally
+// by brokerrpc. NewFs does NOT dial the broker synchronously — the first RPC
+// call does. The orchestrator/realpoint/cmd rewire that emits these option keys
+// is a later phase; here NewFs only consumes them.
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
 	var opts Options
 	if err := configstruct.Set(m, &opts); err != nil {
 		return nil, fmt.Errorf("ocufs: parse options: %w", err)
 	}
-	if opts.SocketPath == "" {
-		return nil, fmt.Errorf("ocufs: socket_path is required")
+	if opts.ServiceURL == "" {
+		return nil, fmt.Errorf("ocufs: service_url is required")
 	}
 	if opts.FilesystemID == "" {
 		return nil, fmt.Errorf("ocufs: filesystem_id is required")
 	}
+	if opts.AuthToken == "" {
+		return nil, fmt.Errorf("ocufs: auth_token is required")
+	}
+	if opts.CACertPEM == "" {
+		return nil, fmt.Errorf("ocufs: ca_cert_pem is required")
+	}
 
-	c, err := brokerrpc.New(opts.SocketPath, opts.FilesystemID)
+	c, err := brokerrpc.New(opts.ServiceURL, opts.FilesystemID, opts.AuthToken, []byte(opts.CACertPEM))
 	if err != nil {
 		return nil, fmt.Errorf("ocufs: create broker client: %w", err)
 	}
