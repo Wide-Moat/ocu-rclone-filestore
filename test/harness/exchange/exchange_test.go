@@ -7,6 +7,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -109,21 +110,28 @@ func TestExchangeIssuesAcceptedCredential(t *testing.T) {
 func TestExchangeRejectsBadSignature(t *testing.T) {
 	cp, _, ts := newPaired(t)
 	weak, _ := cp.Mint("fs-outputs", "write", false)
-	// Tamper the signature.
+	// Tamper the signature deterministically. Flipping the LAST base64url
+	// character of the encoded signature is unreliable: the final character only
+	// carries the low bits of the last signature byte, and many flips re-encode to
+	// the same decoded bytes, so the tampered token sometimes still verifies.
+	// Instead, decode the signature, flip a bit in a MIDDLE byte, and re-encode:
+	// that always changes the decoded R||S the verifier recomputes, so the
+	// negative is deterministic across runs.
 	parts := strings.Split(weak, ".")
-	parts[2] = parts[2][:len(parts[2])-1] + flip(parts[2][len(parts[2])-1])
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("decode signature: %v", err)
+	}
+	if len(sig) == 0 {
+		t.Fatalf("empty signature")
+	}
+	sig[len(sig)/2] ^= 0xFF
+	parts[2] = base64.RawURLEncoding.EncodeToString(sig)
 	resp := exchangeToken(t, ts, strings.Join(parts, "."))
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("bad signature: got %d want 400", resp.StatusCode)
 	}
-}
-
-func flip(b byte) string {
-	if b == 'A' {
-		return "B"
-	}
-	return "A"
 }
 
 func TestExchangeRejectsForeignKey(t *testing.T) {
