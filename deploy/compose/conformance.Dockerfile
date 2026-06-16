@@ -31,11 +31,16 @@ COPY . .
 ENV CGO_ENABLED=0
 RUN go test -c -trimpath -o /conformance.test ./backend/ocufs/
 
+# Also build the conformance-bootstrap step that renders the rclone remote at
+# bringup (service_url + minted weak JWT + CA PEM through the new transport).
+RUN go build -trimpath -o /conformance-bootstrap ./test/harness/cmd/conformance-bootstrap
+
 # Runtime. busybox 1.37.0-glibc pinned by digest (the static test binary needs
 # no libc; the shell drives the broker-socket readiness poll).
 FROM busybox@sha256:4279d9b47df4c1b02d80efd8d02cd59b3a8182c1e785a4ff3f6983bee19dc8b0 AS runtime
 
 COPY --from=builder /conformance.test /conformance.test
+COPY --from=builder /conformance-bootstrap /conformance-bootstrap
 
 # rclone's fstests bootstrap (fstest/testserver.Start) unconditionally locates
 # an fstest/testserver/init.d directory relative to the working directory
