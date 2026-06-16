@@ -123,7 +123,7 @@ func Verify(token string, jwks JWKS, expectedIss, expectedAud string, now time.T
 	}
 	pub, err := jwk.PublicKey()
 	if err != nil {
-		return Claims{}, fmt.Errorf("%w: jwk: %v", ErrUntrusted, err)
+		return Claims{}, fmt.Errorf("%w: jwk: %w", ErrUntrusted, err)
 	}
 
 	sig, err := b64.DecodeString(sigB64)
@@ -132,7 +132,7 @@ func Verify(token string, jwks JWKS, expectedIss, expectedAud string, now time.T
 	}
 	r, s, err := decodeRS(sig)
 	if err != nil {
-		return Claims{}, fmt.Errorf("%w: %v", ErrBadSignature, err)
+		return Claims{}, fmt.Errorf("%w: %w", ErrBadSignature, err)
 	}
 	digest := sha256.Sum256([]byte(headerB64 + "." + payloadB64))
 	if !ecdsa.Verify(pub, digest[:], r, s) {

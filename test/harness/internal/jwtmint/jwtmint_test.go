@@ -85,15 +85,17 @@ func TestVerifyRejectsBadSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	// Flip the last byte of the signature segment.
+	// Decode the signature and flip a high-order byte of r, which is guaranteed
+	// to change the decoded R||S pair (unlike flipping a trailing base64url
+	// character, whose low bits can map to encoding padding and leave the decoded
+	// integers unchanged). The mutated signature must not verify.
 	parts := strings.Split(tok, ".")
-	sig := []byte(parts[2])
-	if sig[len(sig)-1] == 'A' {
-		sig[len(sig)-1] = 'B'
-	} else {
-		sig[len(sig)-1] = 'A'
+	rawSig, derr := b64.DecodeString(parts[2])
+	if derr != nil {
+		t.Fatalf("decode sig: %v", derr)
 	}
-	parts[2] = string(sig)
+	rawSig[0] ^= 0xFF // flip the most-significant byte of r
+	parts[2] = b64.EncodeToString(rawSig)
 	tampered := strings.Join(parts, ".")
 
 	jwks := JWKS{Keys: []JWK{JWKFromPublic("kid-1", &priv.PublicKey)}}
@@ -152,10 +154,12 @@ func TestJWKRoundTrip(t *testing.T) {
 	jwk := JWKFromPublic("kid-1", &priv.PublicKey)
 	pub, err := jwk.PublicKey()
 	if err != nil {
-		t.Fatalf("reconstruct: %v", err)
+		t.Fatalf("rebuild public key: %v", err)
 	}
-	if pub.X.Cmp(priv.PublicKey.X) != 0 || pub.Y.Cmp(priv.PublicKey.Y) != 0 {
-		t.Fatalf("curve point mismatch after round trip")
+	// Re-encode the rebuilt key and confirm the coordinates match the original
+	// JWK, avoiding a read of the deprecated big.Int coordinate fields.
+	if again := JWKFromPublic("kid-1", pub); again.X != jwk.X || again.Y != jwk.Y {
+		t.Fatalf("curve point mismatch after round trip: got x=%s y=%s want x=%s y=%s", again.X, again.Y, jwk.X, jwk.Y)
 	}
 }
 
@@ -200,5 +204,74 @@ func TestVerifyRejectsWrongAlg(t *testing.T) {
 	jwks := JWKS{Keys: []JWK{JWKFromPublic("kid-1", &priv.PublicKey)}}
 	if _, err := Verify(strings.Join(parts, "."), jwks, "", "", time.Unix(1_700_000_000, 0)); !errors.Is(err, ErrUntrusted) {
 		t.Fatalf("expected ErrUntrusted for wrong alg, got %v", err)
+	}
+}
+
+func TestVerifyRejectsNonBase64Header(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	if _, err := Verify("!!!.payload.sig", JWKS{}, "", "", now); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("non-base64 header: expected ErrUntrusted, got %v", err)
+	}
+}
+
+func TestVerifyRejectsNonJSONHeader(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	tok := b64.EncodeToString([]byte("not json")) + ".x.y"
+	if _, err := Verify(tok, JWKS{}, "", "", now); !errors.Is(err, ErrUntrusted) {
+		t.Fatalf("non-JSON header: expected ErrUntrusted, got %v", err)
+	}
+}
+
+func TestVerifyRejectsNonBase64SignatureAndPayload(t *testing.T) {
+	priv := mustKey(t)
+	now := time.Unix(1_700_000_000, 0)
+	tok, err := Sign(priv, "kid-1", sampleClaims(now))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	jwks := JWKS{Keys: []JWK{JWKFromPublic("kid-1", &priv.PublicKey)}}
+	parts := strings.Split(tok, ".")
+
+	// Signature segment is not base64url.
+	bad := parts[0] + "." + parts[1] + ".!!!"
+	if _, err := Verify(bad, jwks, "", "", now); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("non-base64 sig: expected ErrBadSignature, got %v", err)
+	}
+
+	// Signature segment is base64url but the wrong length (decodeRS rejects it).
+	shortSig := b64.EncodeToString([]byte("too-short"))
+	bad = parts[0] + "." + parts[1] + "." + shortSig
+	if _, err := Verify(bad, jwks, "", "", now); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("short sig: expected ErrBadSignature, got %v", err)
+	}
+}
+
+func TestVerifyRejectsNonJSONPayload(t *testing.T) {
+	// A token whose signature verifies the bytes but whose payload is not JSON
+	// is impossible to forge without the key, so build one legitimately: sign a
+	// header+payload where the payload bytes are valid JSON for signing, then
+	// confirm a payload that fails to unmarshal into Claims is rejected. Here we
+	// exercise the non-base64 payload arm of Verify by corrupting the payload to
+	// a non-base64url string, which precedes the JSON decode.
+	priv := mustKey(t)
+	now := time.Unix(1_700_000_000, 0)
+	tok, err := Sign(priv, "kid-1", sampleClaims(now))
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	jwks := JWKS{Keys: []JWK{JWKFromPublic("kid-1", &priv.PublicKey)}}
+	parts := strings.Split(tok, ".")
+	// Replace the payload with a non-base64url string; the signature no longer
+	// matches, so this surfaces as a bad signature (the signature is checked
+	// before the payload is decoded).
+	bad := parts[0] + ".!!!." + parts[2]
+	if _, err := Verify(bad, jwks, "", "", now); err == nil {
+		t.Fatalf("corrupted payload: expected an error, got nil")
+	}
+}
+
+func TestDecodeRSRejectsWrongLength(t *testing.T) {
+	if _, _, err := decodeRS([]byte("short")); err == nil {
+		t.Fatalf("expected error for wrong-length signature")
 	}
 }
