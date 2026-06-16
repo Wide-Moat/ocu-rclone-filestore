@@ -40,15 +40,21 @@
 set -eu
 
 SOCK_DIR=/sock
+# WORKSPACE is the brokers' backend engine-root (where the local-volume engine
+# persists each scope's objects under <filesystem_id>/). It is NOT a mountpoint.
 WORKSPACE=/workspace
+# MOUNT_ROOT is the canonical parent of the FUSE mountpoints the guest config
+# points at. It is a distinct namespace from the broker engine-root above.
+MOUNT_ROOT=/mnt/user-data
 AUDIT_DIR=/audit
 READY_FILE=/run/ocu/mount-ready
 MAX_FILE_SIZE=67108864
 
-mkdir -p "$SOCK_DIR" "$WORKSPACE" "$AUDIT_DIR" /run/ocu
-# The mount destinations the guest config points at, plus the rw cold-read
-# second mount and the throttle mount. The mount binary does not create them.
-mkdir -p "$WORKSPACE/out" "$WORKSPACE/in" "$WORKSPACE/out2" "$WORKSPACE/throttle"
+mkdir -p "$SOCK_DIR" "$WORKSPACE" "$MOUNT_ROOT" "$AUDIT_DIR" /run/ocu
+# The mount destinations the guest config points at: the primary rw output, the
+# rw cold-read second output, the throttle mount, and the ro input. The mount
+# binary does not create them.
+mkdir -p "$MOUNT_ROOT/outputs" "$MOUNT_ROOT/uploads" "$MOUNT_ROOT/outputs2" "$MOUNT_ROOT/throttle"
 
 log() { echo "[runsc-aio] $*" >&2; }
 
@@ -149,10 +155,10 @@ run_conformance() {
 run_exercise() {
   log "running live exercise (pid $MOUNT_PID is the teardown target)"
   RCLONE_OCUFS_LIVE=1 \
-  OCU_E2E_RW_MOUNT="$WORKSPACE/out" \
-  OCU_E2E_RO_MOUNT="$WORKSPACE/in" \
-  OCU_E2E_RW_MOUNT2="$WORKSPACE/out2" \
-  OCU_E2E_THROTTLE_MOUNT="$WORKSPACE/throttle" \
+  OCU_E2E_RW_MOUNT="$MOUNT_ROOT/outputs" \
+  OCU_E2E_RO_MOUNT="$MOUNT_ROOT/uploads" \
+  OCU_E2E_RW_MOUNT2="$MOUNT_ROOT/outputs2" \
+  OCU_E2E_THROTTLE_MOUNT="$MOUNT_ROOT/throttle" \
   OCU_E2E_READY_FILE="$READY_FILE" \
   OCU_E2E_MOUNT_PID="$MOUNT_PID" \
   OCU_E2E_BROKER_RW_WORKSPACE="$WORKSPACE/fsrw" \

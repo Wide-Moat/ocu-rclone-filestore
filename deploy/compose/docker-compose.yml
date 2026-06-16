@@ -249,14 +249,14 @@ services:
       - broker-socket:/sock
       - mount-shared:/run/ocu
       # The mount destinations are a host BIND with rshared propagation so the
-      # FUSE mounts the entrypoint creates INSIDE this container propagate out
-      # to the host path and from there into the test-runner's rslave bind —
-      # a named volume does not propagate mounts created after container
-      # start. Create out/ and in/ under this path on the Docker host before
-      # `up` (see docs/e2e-local.md).
+      # FUSE mounts created INSIDE this container propagate out to the host path
+      # and from there into the test-runner's rslave bind — a named volume does
+      # not propagate mounts created after container start. The canonical mount
+      # root is /mnt/user-data; create outputs/ uploads/ outputs2/ throttle/
+      # under the host path before `up` (see docs/e2e-local.md).
       - type: bind
-        source: /tmp/ocu-e2e-workspace
-        target: /workspace
+        source: /tmp/ocu-e2e-mountroot
+        target: /mnt/user-data
         bind:
           propagation: rshared
     # The shipped entrypoint contract: --config (required), --broker-socket-dir
@@ -305,8 +305,8 @@ services:
     environment:
       # The live gate: the exercise runs for real in this service.
       RCLONE_OCUFS_LIVE: "1"
-      OCU_E2E_RW_MOUNT: /workspace/out
-      OCU_E2E_RO_MOUNT: /workspace/in
+      OCU_E2E_RW_MOUNT: /mnt/user-data/outputs
+      OCU_E2E_RO_MOUNT: /mnt/user-data/uploads
       OCU_E2E_READY_FILE: /run/ocu/mount-ready
       # A SECOND rw mount of the SAME scope (fsrw) at a distinct destination.
       # The orchestrator builds an independent VFS cache per mount entry, so
@@ -314,11 +314,11 @@ services:
       # first mount: a read here must traverse the broker fileDownload path, not
       # a warm write-back cache. That is the load-bearing proof of the read data
       # path (stronger than poking vfs/forget).
-      OCU_E2E_RW_MOUNT2: /workspace/out2
+      OCU_E2E_RW_MOUNT2: /mnt/user-data/outputs2
       # A THIRD rw mount on the throttled scope (fsthrottle). A burst of separate
       # write ops here drives the broker's two-per-second bucket over budget; the
       # throttled writes must still land byte-identical (SC2 no-data-loss).
-      OCU_E2E_THROTTLE_MOUNT: /workspace/throttle
+      OCU_E2E_THROTTLE_MOUNT: /mnt/user-data/throttle
       # The broker-rw engine-root SCOPE directory, mounted read-only below. The
       # local-volume engine nests each filesystem's objects under a
       # <filesystem_id>/ subdirectory of the engine root, so the rw scope (fsrw)
@@ -350,8 +350,8 @@ services:
       # rslave: receive the FUSE mounts the mount service propagates out
       # through its rshared bind; never propagate anything back.
       - type: bind
-        source: /tmp/ocu-e2e-workspace
-        target: /workspace
+        source: /tmp/ocu-e2e-mountroot
+        target: /mnt/user-data
         bind:
           propagation: rslave
       # The broker-rw engine-root workspace, READ-ONLY: the write steps hash

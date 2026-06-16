@@ -60,12 +60,13 @@ volume are the sole channel, and a unix socket needs no network stack.
 - `broker-{rw,ro}-workspace`, `broker-{rw,ro}-audit` — per-broker engine
   roots and audit sinks (the broker refuses to start without an engine root,
   an audit sink and an upload ceiling).
-- `/tmp/ocu-e2e-workspace` (host bind at `/workspace`, `rshared`) — the FUSE
-  mount destinations. A bind with rshared propagation is required so the
-  mounts created inside the mount container propagate to the host and into
-  the test-runner's rslave bind; a named volume does not propagate mounts
-  created after container start. Create `out/` and `in/` under it before
-  `up` (see [`../../docs/e2e-local.md`](../../docs/e2e-local.md)).
+- `/tmp/ocu-e2e-mountroot` (host bind at `/mnt/user-data`, `rshared`) — the
+  FUSE mount destinations under the canonical mount root. A bind with rshared
+  propagation is required so the mounts created inside the mount container
+  propagate to the host and into the test-runner's rslave bind; a named volume
+  does not propagate mounts created after container start. Create `outputs/`,
+  `uploads/`, `outputs2/` and `throttle/` under it before `up` (see
+  [`../../docs/e2e-local.md`](../../docs/e2e-local.md)).
 
 ## Readiness
 

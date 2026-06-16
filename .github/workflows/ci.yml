@@ -220,12 +220,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      # Every mount destination is a host bind with rshared propagation; the
-      # subdirectories must exist before the harness starts (the mount binary
-      # does not create them). out = rw scope, in = ro scope, out2 = the
-      # cold-read second mount of the rw scope, throttle = the SC2 throttle scope.
-      - name: Prepare the workspace bind
-        run: mkdir -p /tmp/ocu-e2e-workspace/out /tmp/ocu-e2e-workspace/in /tmp/ocu-e2e-workspace/out2 /tmp/ocu-e2e-workspace/throttle
+      # Every mount destination is a host bind (at the canonical /mnt/user-data
+      # mount root) with rshared propagation; the subdirectories must exist
+      # before the harness starts (the mount binary does not create them).
+      # outputs = rw scope, uploads = ro scope, outputs2 = the cold-read second
+      # mount of the rw scope, throttle = the SC2 throttle scope.
+      - name: Prepare the mount-root bind
+        run: mkdir -p /tmp/ocu-e2e-mountroot/outputs /tmp/ocu-e2e-mountroot/uploads /tmp/ocu-e2e-mountroot/outputs2 /tmp/ocu-e2e-mountroot/throttle
       - name: Bring up the harness (real brokers + mount)
         run: docker compose -f deploy/compose/docker-compose.yml up --build -d broker-rw broker-ro broker-throttle broker-conformance mount
       - name: Run the live exercise (test-runner service)

@@ -4,7 +4,7 @@
   "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIBexampleinspectioncatrustanchorforthelocalegresshop\n-----END CERTIFICATE-----\n",
   "mounts": [
     {
-      "destination": "/workspace/out",
+      "destination": "/mnt/user-data/outputs/",
       "auth_token": "tok.fsrw.session",
       "filesystem_id": "fsrw",
       "readonly": false,
@@ -15,7 +15,7 @@
       "file_perms": "0644"
     },
     {
-      "destination": "/workspace/out2",
+      "destination": "/mnt/user-data/outputs2/",
       "auth_token": "tok.fsrw.session",
       "filesystem_id": "fsrw",
       "readonly": false,
@@ -26,7 +26,7 @@
       "file_perms": "0644"
     },
     {
-      "destination": "/workspace/throttle",
+      "destination": "/mnt/user-data/throttle/",
       "auth_token": "tok.fsthrottle.session",
       "filesystem_id": "fsthrottle",
       "readonly": false,
@@ -37,7 +37,7 @@
       "file_perms": "0644"
     },
     {
-      "destination": "/workspace/in",
+      "destination": "/mnt/user-data/uploads/",
       "auth_token": "tok.fsro.session",
       "filesystem_id": "fsro",
       "readonly": true,

@@ -52,7 +52,7 @@ volume cannot propagate mounts created after container start). Create the
 directories on the Docker host (the Lima VM) before bringing the harness up:
 
 ```sh
-limactl shell <vm> mkdir -p /tmp/ocu-e2e-workspace/out /tmp/ocu-e2e-workspace/in /tmp/ocu-e2e-workspace/out2 /tmp/ocu-e2e-workspace/throttle
+limactl shell <vm> mkdir -p /tmp/ocu-e2e-mountroot/outputs /tmp/ocu-e2e-mountroot/uploads /tmp/ocu-e2e-mountroot/outputs2 /tmp/ocu-e2e-mountroot/throttle
 ```
 
 ## 3. Bring up the harness

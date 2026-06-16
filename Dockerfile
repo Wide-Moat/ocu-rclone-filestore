@@ -37,12 +37,13 @@ RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
       -o /ocu-rclone-filestore \
       ./cmd/ocu-rclone-filestore
 
-# Stage the empty mount destination directories the guest config points at
-# (/workspace/out, /workspace/in). The distroless runtime has no shell and the
-# mount binary does not create destinations, so the mountpoints must exist in
-# the image; staged here and copied below so the runtime stage stays a plain
-# COPY. Root-owned, traversable by the root runtime user.
-RUN mkdir -p /staging/workspace/out /staging/workspace/in
+# Stage the empty mount destination directories the guest config points at,
+# under the canonical /mnt/user-data mount root (outputs and uploads). The
+# distroless runtime has no shell and the mount binary does not create
+# destinations, so the mountpoints must exist in the image; staged here and
+# copied below so the runtime stage stays a plain COPY. Root-owned, traversable
+# by the root runtime user.
+RUN mkdir -p /staging/mnt/user-data/outputs /staging/mnt/user-data/uploads
 
 # Runtime. Distroless static, pinned by digest; the tag comment records the
 # human-readable reference. gcr.io/distroless/static-debian12 ROOT variant:

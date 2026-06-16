@@ -26,6 +26,8 @@ func TestDeployFixtureLoads(t *testing.T) {
 	}
 
 	var sawReadWrite, sawReadOnly bool
+	var roDest string
+	sawRWOutputs := false
 	for i, m := range cfg.Mounts {
 		if m.AuthToken == "" {
 			t.Fatalf("mounts[%d]: deploy fixture mount must hold a per-mount auth_token", i)
@@ -35,8 +37,12 @@ func TestDeployFixtureLoads(t *testing.T) {
 		}
 		if *m.Readonly {
 			sawReadOnly = true
+			roDest = m.Destination
 		} else {
 			sawReadWrite = true
+			if m.Destination == canonRWOutputsDest {
+				sawRWOutputs = true
+			}
 		}
 	}
 	if !sawReadWrite {
@@ -45,4 +51,25 @@ func TestDeployFixtureLoads(t *testing.T) {
 	if !sawReadOnly {
 		t.Fatal("deploy fixture must carry at least one read-only (readonly:true) mount")
 	}
+
+	// Pin the canonical mountpoints so the deploy harness can never silently
+	// drift off the agreed destination scheme: the read-only input mount lands
+	// at the canonical uploads path and a read-write mount lands at the
+	// canonical outputs path. The whole live e2e harness — the runsc entrypoint
+	// mkdirs, the compose OCU_E2E_*_MOUNT env, and the exercise mounts/reads —
+	// keys off these exact strings, so a drift here desyncs the harness.
+	if roDest != canonRODest {
+		t.Fatalf("deploy fixture read-only destination = %q, want canonical %q", roDest, canonRODest)
+	}
+	if !sawRWOutputs {
+		t.Fatalf("deploy fixture must carry a read-write mount at the canonical outputs destination %q", canonRWOutputsDest)
+	}
 }
+
+// The canonical e2e mountpoints. The deploy fixture, the runsc entrypoint, and
+// the compose env must all agree on these exact strings, or the live harness
+// mounts and reads at desynced paths.
+const (
+	canonRODest        = "/mnt/user-data/uploads/"
+	canonRWOutputsDest = "/mnt/user-data/outputs/"
+)
