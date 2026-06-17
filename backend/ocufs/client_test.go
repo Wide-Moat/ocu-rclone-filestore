@@ -4,7 +4,7 @@
 // Package ocufs tests — client.go production adapter forwarding.
 //
 // These tests construct a REAL brokerClientAdapter over the in-process fake
-// broker bound to a temp unix socket (fakebroker_test.go) and drive every
+// broker served from an httptest TLS server (fakebroker_test.go) and drive every
 // adapter method end-to-end. Each adapter method is a single forwarding call
 // into *brokerrpc.Client; exercising it against the fake confirms the method
 // reaches the wire, builds the right route, and decodes the canned response —

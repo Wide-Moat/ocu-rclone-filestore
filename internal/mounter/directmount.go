@@ -47,7 +47,8 @@ import (
 // own frontend assembles.
 //
 // SEC-25 is untouched: this is a kernel mount frontend, not a transport. The
-// only network/IPC path remains the ocufs backend's broker unix socket.
+// only network path remains the ocufs backend's outbound HTTPS connection to
+// the configured service_url.
 func directMountFn(VFS *vfs.VFS, mountpoint string, opt *mountlib.Options) (<-chan error, func() error, string, error) {
 	f := VFS.Fs()
 	if err := mountlib.CheckOverlap(f, mountpoint); err != nil {
