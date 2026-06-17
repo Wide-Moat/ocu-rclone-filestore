@@ -10,16 +10,16 @@ title: |md
   # How to run it — four steps
 | {near: top-center; style.font-size: 28}
 
-s1: "1. Have the prerequisites\n\nGo 1.26+\na broker with a unix socket\nLinux + /dev/fuse\n(macOS - use the Lima harness)" {
+s1: "1. Have the prerequisites\n\nGo 1.26+\nan HTTPS service_url (reached via the Envoy edge)\nLinux + /dev/fuse\n(macOS - use the Lima harness)" {
   style: {fill: "#fff7e6"; stroke: "#d4a017"; stroke-width: 2; border-radius: 12; font-color: "#000"}
 }
 s2: "2. Build\n\ngo build -o ocu-rclone-filestore \\\n  ./cmd/ocu-rclone-filestore" {
   style: {fill: "#eef3ff"; stroke: "#3b5bcf"; stroke-width: 2; border-radius: 12; font-color: "#000"}
 }
-s3: "3. Write mount.json\n\none mount: destination,\nfilesystem_id, writes,\nvfs_cache_mode ...\n(NO auth_token - no credential)" {
+s3: "3. Write mount.json\n\ntop-level service_url + ca_cert_pem;\nper mount: destination, filesystem_id,\nauth_token (the session JWT), readonly,\nvfs_cache_mode ..." {
   style: {fill: "#eef3ff"; stroke: "#3b5bcf"; stroke-width: 2; border-radius: 12; font-color: "#000"}
 }
-s4: "4. Run it\n\n./ocu-rclone-filestore \\\n  --config mount.json \\\n  --broker-socket /run/ocu/session.sock" {
+s4: "4. Run it\n\n./ocu-rclone-filestore \\\n  --config mount.json\n(transport is config-derived; no socket flag)" {
   style: {fill: "#eafaef"; stroke: "#2e9e54"; stroke-width: 3; border-radius: 12; bold: true; font-color: "#000"}
 }
 
@@ -30,11 +30,11 @@ result: "/workspace/out is now a live\nfilesystem backed by the broker" {
 
 s1 -> s2 -> s3 -> s4 -> result: "" {style.stroke: "#3b5bcf"}
 
-broker: "Broker\n(holds the credential,\nsigns to storage)" {
+broker: "Egress edge + broker\n(edge exchanges the JWT;\nbroker holds the credential,\nsigns to storage)" {
   shape: hexagon
   style: {fill: "#d6e0ff"; stroke: "#3b5bcf"; font-color: "#000"}
 }
-s4 -> broker: "talks over the\nunix socket" {style: {stroke: "#cf3b3b"; stroke-width: 2; stroke-dash: 3}}
+s4 -> broker: "dials service_url\nover TLS" {style: {stroke: "#cf3b3b"; stroke-width: 2; stroke-dash: 3}}
 
 note: |md
   Any mount that fails to come up is a **hard, non-zero exit** — never a silently
