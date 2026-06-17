@@ -9,10 +9,11 @@ building this binary. The canon wins on any conflict.
 
 ## What the binary is
 
-An rclone fork whose backend speaks the broker's file-operation RPC instead
-of any object-store protocol. It mounts one or more per-session filesystems
-into the guest tree and translates VFS operations into RPC calls. Mount
-verbs only — it serves nothing, proxies nothing, exposes no HTTP/S3 facade.
+A thin wrapper module over rclone whose backend reaches storage over
+HTTPS/REST via the egress edge instead of any object-store protocol. It mounts
+one or more per-session filesystems into the guest tree and translates VFS
+operations into file-operation requests. Mount verbs only — it serves nothing,
+proxies nothing, exposes no HTTP/S3 facade.
 
 ## Invariants (build targets)
 

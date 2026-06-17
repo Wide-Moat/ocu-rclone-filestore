@@ -5,9 +5,12 @@
 
 This repository is the guest-side mount binary of Open Computer Use. It runs
 inside an untrusted guest and is, by design, a security boundary: it holds no
-backend credential and no object-store client, and every file operation crosses
-the broker, which custodies the one credential and resolves authorization per
-request. Because of that posture, security reports are handled with priority.
+backend credential and no object-store client. It dials outbound over HTTPS/TLS
+and presents only a static, edge-only session JWT; every file operation crosses
+an Envoy egress edge that validates that JWT, strips it, and exchanges it for
+the real storage credential keyed on `filesystem_id` before the broker, which
+custodies the one backend credential and resolves authorization per request.
+Because of that posture, security reports are handled with priority.
 
 ## Supported versions
 

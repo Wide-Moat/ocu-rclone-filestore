@@ -1,7 +1,8 @@
 # Project Instructions — ocu-rclone-filestore
 
 This repository is the **guest-side mount binary** of Open Computer Use: an
-rclone-based FUSE mount whose backend speaks the broker's file-operation RPC.
+rclone-based FUSE mount whose backend reaches storage over HTTPS/REST via the
+egress edge.
 The **architecture and specifications** are the source of truth and live in
 `Wide-Moat/open-computer-use` under `docs/architecture/`. Do not re-decide
 here what an ADR already decided; if a decision must change, it changes in
@@ -15,8 +16,11 @@ This repo is **public**.
   binary talks to.
 - `contracts/storage/mount-config.schema.json` — the mount's input: per-mount
   destination, scope (`filesystem_id` XOR `memory_store_id`), read-only vs
-  write mounts, VFS cache knobs. The guest-side config carries **no
-  auth_token**; credential material stays host-side at provision.
+  write mounts, VFS cache knobs. Each mount carries a mandatory **`auth_token`**
+  — a weak, scoped, short-lived edge-only session JWT the guest presents as a
+  static `Authorization: Bearer`. The egress edge validates it, strips it, and
+  exchanges it for the real storage credential keyed on `filesystem_id`, so the
+  guest still holds **no BACKEND credential**.
 - `contracts/storage/file-ops.schema.json` — the RPC the backend speaks.
   Operation names and authorization axes are pinned; bodies marked TBD stay
   TBD — never invent a body here and code against it.
