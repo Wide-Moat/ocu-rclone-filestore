@@ -50,9 +50,10 @@ When reporting, include as much of the following as you can:
 ## Scope
 
 In scope: anything that lets the guest bypass the broker boundary — a direct
-network path to a backend, a second transport, credential or secret material
-reaching the guest, an authorization decision the guest makes that the broker
-should own, or a path that loses or corrupts data the broker acknowledged.
+network path to a backend, a second transport, BACKEND credential or secret
+material reaching the guest (the guest legitimately carries only the edge-only
+session JWT), an authorization decision the guest makes that the broker should
+own, or a path that loses or corrupts data the broker acknowledged.
 
 Out of scope: vulnerabilities in upstream dependencies (report those upstream;
 we track and update dependencies), and issues that require an attacker who
@@ -62,7 +63,9 @@ model — the broker is trusted by construction).
 ## Hardening already in place
 
 - The guest holds no backend credential, no object-store client, and opens no
-  second transport; the broker unix socket is the sole external channel.
+  second transport; the outbound HTTPS connection to the egress edge is the sole
+  external channel. The static session JWT it presents is an edge-only assertion
+  the edge exchanges for the real storage credential — never a backend key.
 - Release artifacts are built reproducibly (static, trimmed) and accompanied by
   checksums and an SBOM.
 - CI blocks on secret scanning, SAST, and dependency CVE scanning before any

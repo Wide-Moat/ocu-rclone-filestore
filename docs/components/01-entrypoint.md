@@ -6,8 +6,8 @@
 The guest mount binary's process shell. It turns a command-line invocation into
 a resolved set of inputs and a single call into the mounter, then maps the
 result onto a Unix exit code. No mount logic lives here: config schema work,
-socket dialing, FUSE mounting, and ordered teardown all sit behind one injected
-seam in `internal/mounter` and `internal/mountcfg`. Two files, and the split
+the outbound HTTPS transport, FUSE mounting, and ordered teardown all sit behind
+one injected seam in `internal/mounter` and `internal/mountcfg`. Two files, and the split
 between them is the whole design — `main` is the part that touches the process
 (`os.Args`, `os.Exit`), `run` is everything testable.
 
@@ -33,37 +33,31 @@ injected mount function. The injection point is the `mountFunc` type; production
 wires `productionMount`, and the test injects a recording double to assert the
 resolved inputs without a real mount.
 
-Five flags are accepted:
+Three flags are accepted:
 
 | Flag | Env fallback | Meaning |
 | --- | --- | --- |
 | `--config` | — | Path to the guest mount config. Required. |
 | `--version` | — | Print the build-stamped version and exit 0. |
 | `--ready-file` | `OCU_READY_FILE` | Optional path created once all mounts are ready. |
-| `--broker-socket` | `OCU_BROKER_SOCKET` | The per-session broker socket. |
-| `--broker-socket-dir` | `OCU_BROKER_SOCKET_DIR` | Per-session socket directory; each mount dials `<dir>/<filesystem_id>.sock`. Mutually exclusive with `--broker-socket`. |
 
-The ready-file and both socket inputs resolve through `resolveFlagOrEnv`: a set
-flag wins, an unset flag falls back to the env var, and an empty result is
-passed through untouched. `resolveFlagOrEnv` does not validate — the
-empty-socket rejection and the exclusivity check are the mounter's, so a flag or
-config error always surfaces before the socket check ever runs. The entrypoint
-forwards both socket strings as-is and never joins a path or decides which one
-wins; per-mount socket derivation belongs to the orchestrator.
+The ready-file resolves through `resolveFlagOrEnv`: a set flag wins, an unset
+flag falls back to the env var, and an empty result is passed through untouched
+(an empty ready-file simply disables the readiness signal). There is no socket
+flag — the transport is config-derived.
 
-## Runtime inputs are not config
+## Runtime inputs versus config
 
-The ready-file path and the broker socket are **host-controlled runtime
-inputs**, sourced from flags and env at launch. They are deliberately *not*
-fields of the guest mount config schema, and the socket path in particular is
-never derived from a config `service_url` or any schema field. The config
-describes *what* to mount — destination, scope, read-only versus write, cache
-knobs; the runtime inputs describe *where this process reaches the broker and how
-it signals readiness* for this one session. Keeping the socket out of the schema
-is what lets one validated config run against any provision-time socket without
-re-issuing the config. This is decision D2, and it is also why the guest stays
-credential-free — nothing here reads or fabricates an auth token, and the
-endpoint is handed in, not constructed.
+The ready-file path is the one **host-controlled runtime input**, sourced from a
+flag or env at launch. It is deliberately *not* a field of the guest mount config
+schema: the config describes *what* to mount — destination, scope, read-only
+versus write, cache knobs — and the transport it speaks (`service_url`,
+`ca_cert_pem`, per-mount `auth_token`), while the ready-file describes *how this
+process signals readiness* for this one session. The guest holds no BACKEND
+credential: the per-mount `auth_token` it carries is a static session JWT, an
+edge-only assertion the egress edge exchanges for the real storage credential.
+The entrypoint reads no credential from the environment; the JWT arrives in the
+validated config, and the endpoint is config-derived, not a runtime flag.
 
 ## Exit codes and signal ordering
 
@@ -71,7 +65,7 @@ Every failure path returns a non-nil error — a flag parse failure, a missing
 `--config`, or a config that fails to load — and `main` turns any of them into
 exit 1. The only nil returns are a clean `--version` short-circuit and a clean
 shutdown after the mounter tears down. `--version` is checked *before* the
-`--config` requirement, so a version query needs no config and no socket; it
+`--config` requirement, so a version query needs no config; it
 writes to stderr (the `FlagSet`'s output), not stdout, to keep the output
 contract simple.
 

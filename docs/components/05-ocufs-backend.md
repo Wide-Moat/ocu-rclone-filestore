@@ -7,9 +7,10 @@
 the broker's file-operation RPC. Mount it like any rclone remote and the guest
 sees a normal filesystem; underneath, every read, write, list, and rename is a
 broker call. The backend is deliberately thin — it holds no backend credential,
-links no object-store client, and opens no second transport. Its only handle is
-a per-session unix socket and a session-scoped `filesystem_id`, both supplied by
-the host at provision time. `init` registers the backend under the name `ocufs`,
+links no object-store client, and opens no second transport. Its handles are the
+broker's HTTPS `service_url`, a session-scoped `filesystem_id`, the static
+session `auth_token`, and the `ca_cert_pem` trust anchor, all supplied by the
+host at provision time. `init` registers the backend under the name `ocufs`,
 so rclone discovers it through the standard registry.
 
 Everything that touches the wire goes through the `brokerClient` interface,
@@ -30,10 +31,11 @@ translation, not the policy.
 
 ## What a caller touches
 
-`NewFs` builds an `Fs` from the mount config. It requires `socket_path` and
-`filesystem_id` and fails fast if either is missing; `read_only` defaults to
-false. It does not dial the socket — the first RPC does — so construction is
-cheap and a bad socket surfaces at first use, not at mount.
+`NewFs` builds an `Fs` from the mount config. It requires `service_url`,
+`filesystem_id`, `auth_token`, and `ca_cert_pem` and fails fast if any is
+missing; `read_only` defaults to false. It does not open the connection — the
+first RPC does — so construction is cheap and an unreachable endpoint surfaces at
+first use, not at mount.
 
 The reachable types are the standard rclone pair: `Fs` for directory-level
 operations and `Object` for a single file. A caller never constructs either
