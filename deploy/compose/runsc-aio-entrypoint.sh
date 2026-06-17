@@ -116,10 +116,13 @@ done
 log "all broker sockets present"
 
 # --- start the mount (the production binary, helper-free DirectMountStrict) ---
+# The transport (service_url + per-mount auth_token + ca_cert_pem) is now carried
+# in the config; the binary takes no socket flag. The surrounding socket-
+# provisioning harness above is superseded and is reconciled to the endpoint
+# model in the network-topology phase.
 log "starting mount"
 /ocu-rclone-filestore \
   --config /etc/ocu/guest-config.json \
-  --broker-socket-dir "$SOCK_DIR" \
   --ready-file "$READY_FILE" &
 MOUNT_PID=$!
 

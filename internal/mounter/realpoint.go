@@ -36,7 +36,7 @@ import (
 	// hold-data-across-a-throttled-retry mechanism (SEC-46) does not exist.
 	// This is a disk backend for the cache dir only: NOT a second transport
 	// and NOT an object-store client, so SEC-25 is untouched — the sole
-	// network/IPC path remains the broker unix socket.
+	// network/egress path remains the broker HTTPS endpoint.
 	_ "github.com/rclone/rclone/backend/local"
 )
 
@@ -197,7 +197,7 @@ func (p *realPoint) doUnmount() error {
 func (r *realPointMounter) mountAndWaitReady(ctx context.Context, spec mountSpec) (point, error) {
 	dest := spec.mount.Destination
 
-	cm, err := buildOcufsConfigmap(spec.mount, spec.readOnly, spec.socketPath)
+	cm, err := buildOcufsConfigmap(spec.mount, spec.readOnly, spec.serviceURL, spec.caCertPEM)
 	if err != nil {
 		return nil, err
 	}

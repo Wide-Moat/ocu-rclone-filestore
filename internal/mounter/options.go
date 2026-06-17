@@ -95,15 +95,16 @@ func buildMountOptions(_ mountcfg.Mount) (mountlib.Options, error) {
 }
 
 // buildOcufsConfigmap builds the configmap the ocufs backend reads via
-// configstruct.Set: socket_path, filesystem_id, read_only. The filesystem_id is
-// the mount's sole scope handle; read_only matches the posture.
+// configstruct.Set: service_url, auth_token, ca_cert_pem, filesystem_id,
+// read_only. The filesystem_id is the mount's sole scope handle; read_only
+// matches the posture. The transport triplet (service_url + ca_cert_pem from the
+// top-level config, auth_token from this mount) is what the backend threads into
+// brokerrpc.New.
 //
 // A memory-store mount (MemoryStoreID set, FilesystemID absent) is a hard error
 // here — there is no memory scope axis on the backend today, so such a mount is
-// never silently skipped or mounted unscoped. The socketPath is the
-// orchestrator's explicit runtime input and is assumed non-empty (the
-// orchestrator rejects an empty value before any spec is built).
-func buildOcufsConfigmap(m mountcfg.Mount, readOnly bool, socketPath string) (configmap.Simple, error) {
+// never silently skipped or mounted unscoped.
+func buildOcufsConfigmap(m mountcfg.Mount, readOnly bool, serviceURL, caCertPEM string) (configmap.Simple, error) {
 	if m.MemoryStoreID != nil {
 		return nil, fmt.Errorf("mount %q: memory-store mounts are not yet supported (no memory scope axis)", m.Destination)
 	}
@@ -112,7 +113,9 @@ func buildOcufsConfigmap(m mountcfg.Mount, readOnly bool, socketPath string) (co
 	}
 
 	cm := configmap.Simple{}
-	cm.Set("socket_path", socketPath)
+	cm.Set("service_url", serviceURL)
+	cm.Set("auth_token", m.AuthToken)
+	cm.Set("ca_cert_pem", caCertPEM)
 	cm.Set("filesystem_id", *m.FilesystemID)
 	if readOnly {
 		cm.Set("read_only", "true")

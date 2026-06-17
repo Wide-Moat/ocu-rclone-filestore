@@ -40,9 +40,10 @@ func TestLiveMultimount(t *testing.T) {
 	//   sig := make(chan os.Signal, 1)
 	//   m := New(
 	//       WithReadiness(ReadinessConfig{ReadyFilePath: readyPath}),
-	//       WithBrokerSocket(liveSocketPath),
 	//       WithSignals(sig),
 	//   )
+	//   // The transport (service_url + per-mount auth_token + ca_cert_pem) is
+	//   // carried in cfg; no socket option is needed.
 	//   ... go m.Mount(cfg); assert both up; assert RO write -> EROFS;
 	//   ... assert readyPath appears only after all up; sig <- SIGTERM; assert teardown.
 	t.Skip("RCLONE_OCUFS_LIVE set but the Phase-5 live broker harness is not yet wired; this is the Phase-5 entry point")

@@ -20,18 +20,16 @@ import (
 
 // mountFunc realizes a loaded config under the given runtime inputs. run wires
 // the production mounter; the table test injects a recording double so the
-// flag/env resolution is asserted without a real mount. brokerSocket and
-// brokerSocketDir are the two mutually exclusive socket inputs (single
-// per-session socket vs per-session socket directory the mounts derive
-// <filesystem_id>.sock from); the orchestrator enforces the exclusivity.
-type mountFunc func(cfg *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket, brokerSocketDir string, signals <-chan os.Signal) error
+// flag/env resolution is asserted without a real mount. The transport
+// (service_url + per-mount auth_token + ca_cert_pem) arrives in the config, so
+// the only runtime input here is the ready-file.
+type mountFunc func(cfg *mountcfg.Config, rc mounter.ReadinessConfig, signals <-chan os.Signal) error
 
 // run parses args, loads the guest mount config from the --config path, sources
-// the runtime inputs (ready-file and broker socket, each from a flag with an env
-// fallback) and the termination-signal channel, and drives the mounter. It
-// returns a non-nil error on every failure path and nil only on a clean
-// shutdown. It never calls os.Exit; main maps the returned error to the exit
-// code.
+// the ready-file runtime input (flag with an env fallback) and the
+// termination-signal channel, and drives the mounter. It returns a non-nil error
+// on every failure path and nil only on a clean shutdown. It never calls
+// os.Exit; main maps the returned error to the exit code.
 func run(args []string, stderr io.Writer) error {
 	return runWith(args, stderr, productionMount)
 }
@@ -49,8 +47,6 @@ func runWith(args []string, stderr io.Writer, mount mountFunc) error {
 	configPath := fs.String("config", "", "path to the guest mount config file")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	readyFile := fs.String("ready-file", "", "optional path to create once all mounts are ready (env: OCU_READY_FILE)")
-	brokerSocket := fs.String("broker-socket", "", "per-session broker socket path supplied at provision (env: OCU_BROKER_SOCKET)")
-	brokerSocketDir := fs.String("broker-socket-dir", "", "per-session broker socket directory; each mount dials <dir>/<filesystem_id>.sock (env: OCU_BROKER_SOCKET_DIR; mutually exclusive with --broker-socket)")
 	if err := fs.Parse(args); err != nil {
 		return fmt.Errorf("parse flags: %w", err)
 	}
@@ -71,11 +67,9 @@ func runWith(args []string, stderr io.Writer, mount mountFunc) error {
 	}
 
 	// Flag wins over env; an unset flag falls back to the env var. The ready-file
-	// and broker socket paths are host-controlled RUNTIME inputs, never fields of
-	// the frozen guest mount config schema (D2).
+	// path is a host-controlled RUNTIME input, never a field of the frozen guest
+	// mount config schema.
 	resolvedReadyFile := resolveFlagOrEnv(*readyFile, "OCU_READY_FILE")
-	resolvedBrokerSocket := resolveFlagOrEnv(*brokerSocket, "OCU_BROKER_SOCKET")
-	resolvedBrokerSocketDir := resolveFlagOrEnv(*brokerSocketDir, "OCU_BROKER_SOCKET_DIR")
 
 	cfg, err := mountcfg.Load(*configPath)
 	if err != nil {
@@ -99,12 +93,12 @@ func runWith(args []string, stderr io.Writer, mount mountFunc) error {
 	defer signal.Stop(sig)
 
 	rc := mounter.ReadinessConfig{ReadyFilePath: resolvedReadyFile}
-	return mount(cfg, rc, resolvedBrokerSocket, resolvedBrokerSocketDir, sig)
+	return mount(cfg, rc, sig)
 }
 
 // resolveFlagOrEnv returns the flag value when set, otherwise the env var. An
-// empty result is left to the downstream consumer to reject (the empty broker
-// socket is a hard error in the orchestrator).
+// empty result is left to the downstream consumer to handle (an empty ready-file
+// disables the ready-file signal).
 func resolveFlagOrEnv(flagVal, envKey string) string {
 	if flagVal != "" {
 		return flagVal
@@ -114,20 +108,16 @@ func resolveFlagOrEnv(flagVal, envKey string) string {
 
 // newMounter constructs the mounter from the functional options productionMount
 // assembles. It is a package-level seam (default: mounter.New) so a test can
-// substitute a recording constructor and assert which option lands on which
-// mounter field — that the resolved single-socket reaches WithBrokerSocket and
-// the socket directory reaches WithBrokerSocketDir, neither dropped nor
-// transposed — without driving a real kernel mount.
+// substitute a recording constructor and assert the readiness and signals
+// options land on the mounter without driving a real kernel mount.
 var newMounter = mounter.New
 
-// productionMount wires the runtime inputs into the functional-options mounter
-// and runs it. Mount(cfg) stays unchanged; the entrypoint contract does not
-// break.
-func productionMount(cfg *mountcfg.Config, rc mounter.ReadinessConfig, brokerSocket, brokerSocketDir string, signals <-chan os.Signal) error {
+// productionMount wires the ready-file and signal runtime inputs into the
+// functional-options mounter and runs it. The transport flows in cfg; Mount(cfg)
+// stays unchanged and the entrypoint contract does not break.
+func productionMount(cfg *mountcfg.Config, rc mounter.ReadinessConfig, signals <-chan os.Signal) error {
 	return newMounter(
 		mounter.WithReadiness(rc),
-		mounter.WithBrokerSocket(brokerSocket),
-		mounter.WithBrokerSocketDir(brokerSocketDir),
 		mounter.WithSignals(signals),
 	).Mount(cfg)
 }

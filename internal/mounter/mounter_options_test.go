@@ -17,15 +17,14 @@ import (
 // TestNewAppliesFunctionalOptions asserts each functional option threads its
 // value onto the constructed mounter. New returns the Mounter interface, so we
 // type-assert back to the concrete orchestratorMounter (same-package access) and
-// inspect the fields the options set. This proves WithReadiness, WithBrokerSocket
-// and WithSignals are wired, not merely defined.
+// inspect the fields the options set. This proves WithReadiness and WithSignals
+// are wired, not merely defined.
 func TestNewAppliesFunctionalOptions(t *testing.T) {
 	rc := ReadinessConfig{ReadyFilePath: "/run/ocufs.ready"}
 	sig := make(chan os.Signal, 1)
 
 	m := New(
 		WithReadiness(rc),
-		WithBrokerSocket("/run/broker.sock"),
 		WithSignals(sig),
 	)
 
@@ -36,9 +35,6 @@ func TestNewAppliesFunctionalOptions(t *testing.T) {
 	if om.readiness != rc {
 		t.Errorf("readiness = %+v; want %+v (WithReadiness not applied)", om.readiness, rc)
 	}
-	if om.brokerSocketPath != "/run/broker.sock" {
-		t.Errorf("brokerSocketPath = %q; want /run/broker.sock (WithBrokerSocket not applied)", om.brokerSocketPath)
-	}
 	if om.signals == nil {
 		t.Error("signals = nil; want the injected channel (WithSignals not applied)")
 	}
@@ -48,32 +44,13 @@ func TestNewAppliesFunctionalOptions(t *testing.T) {
 	}
 }
 
-// TestNewBrokerSocketDirOption asserts WithBrokerSocketDir threads onto the
-// mounter and that the two socket inputs remain independently settable.
-func TestNewBrokerSocketDirOption(t *testing.T) {
-	m := New(WithBrokerSocketDir("/run/sockets"))
-	om, ok := m.(orchestratorMounter)
-	if !ok {
-		t.Fatalf("New returned %T; want orchestratorMounter", m)
-	}
-	if om.brokerSocketDirPath != "/run/sockets" {
-		t.Errorf("brokerSocketDirPath = %q; want /run/sockets", om.brokerSocketDirPath)
-	}
-	if om.brokerSocketPath != "" {
-		t.Errorf("brokerSocketPath = %q; want empty (only the dir option was set)", om.brokerSocketPath)
-	}
-}
-
 // TestNewNoOptionsLeavesZeroValues asserts that with no options the constructed
-// mounter carries zero socket inputs and a nil signal channel, so Mount installs
-// the default signal handling and the socket check fires first.
+// mounter carries a nil signal channel, so Mount installs the default signal
+// handling, and the zero ReadinessConfig.
 func TestNewNoOptionsLeavesZeroValues(t *testing.T) {
 	om, ok := New().(orchestratorMounter)
 	if !ok {
 		t.Fatal("New() did not return orchestratorMounter")
-	}
-	if om.brokerSocketPath != "" || om.brokerSocketDirPath != "" {
-		t.Errorf("socket inputs = %q/%q; want both empty", om.brokerSocketPath, om.brokerSocketDirPath)
 	}
 	if om.signals != nil {
 		t.Error("signals != nil; want nil so Mount installs the default channel")
@@ -94,7 +71,6 @@ func TestWithSignalsChannelDrivesTeardown(t *testing.T) {
 	sig := make(chan os.Signal, 1)
 
 	m := New(
-		WithBrokerSocket("/run/x.sock"),
 		WithSignals(sig),
 	).(orchestratorMounter)
 	// Swap the production seam for the recording fake so Mount drives the
@@ -103,6 +79,7 @@ func TestWithSignalsChannelDrivesTeardown(t *testing.T) {
 
 	cfg := &mountcfg.Config{
 		ServiceURL: "https://broker.example",
+		CACertPEM:  "pem",
 		Mounts:     []mountcfg.Mount{writableEntry("/mnt/w")},
 	}
 
@@ -143,7 +120,6 @@ func TestWithReadinessFileCreatedThroughNew(t *testing.T) {
 	readyFile := tmpReadyPath(t)
 
 	m := New(
-		WithBrokerSocket("/run/x.sock"),
 		WithReadiness(ReadinessConfig{ReadyFilePath: readyFile}),
 		WithSignals(sig),
 	).(orchestratorMounter)
@@ -151,6 +127,7 @@ func TestWithReadinessFileCreatedThroughNew(t *testing.T) {
 
 	cfg := &mountcfg.Config{
 		ServiceURL: "https://broker.example",
+		CACertPEM:  "pem",
 		Mounts:     []mountcfg.Mount{writableEntry("/mnt/w")},
 	}
 
@@ -179,11 +156,12 @@ func TestWithReadinessFileCreatedThroughNew(t *testing.T) {
 // through New(...).Mount exercises the orchestratorMounter.Mount -> run wiring.
 func TestMountSeamConstructorErrorSurfaces(t *testing.T) {
 	wantErr := errors.New("seam build failed")
-	m := New(WithBrokerSocket("/run/x.sock")).(orchestratorMounter)
+	m := New().(orchestratorMounter)
 	m.newSeam = func() (pointMounter, error) { return nil, wantErr }
 
 	err := m.Mount(&mountcfg.Config{
 		ServiceURL: "https://broker.example",
+		CACertPEM:  "pem",
 		Mounts:     []mountcfg.Mount{writableEntry("/mnt/w")},
 	})
 	if !errors.Is(err, wantErr) {

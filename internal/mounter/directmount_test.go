@@ -36,7 +36,9 @@ func newTestMount2FS(t *testing.T, name string, vfsOpt *vfscommon.Options, mount
 		t.Fatalf("ocufs backend not registered: %v", err)
 	}
 	cm := configmap.Simple{}
-	cm.Set("socket_path", "/tmp/ocufs-unit-not-dialed.sock")
+	cm.Set("service_url", "https://broker.internal")
+	cm.Set("auth_token", "tok")
+	cm.Set("ca_cert_pem", validCAPEM(t))
 	cm.Set("filesystem_id", "session_unit_fs")
 	cm.Set("read_only", "false")
 	fsObj, err := info.NewFs(context.Background(), name, "", cm)

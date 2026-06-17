@@ -61,8 +61,9 @@ func (f *unmountErrFake) unmountCount() int {
 // hard error after the socket check passes, before any mount is attempted.
 func TestRunNoSeamConfigured(t *testing.T) {
 	o := &orchestrator{
-		signals:          make(chan os.Signal, 1),
-		brokerSocketPath: "/run/x.sock",
+		signals:    make(chan os.Signal, 1),
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 		// seam and newSeam both nil
 	}
 	err := o.run(context.Background(), &mountcfg.Config{
@@ -82,8 +83,9 @@ func TestRunNoSeamConfigured(t *testing.T) {
 // the branch runs without depending on delivering a real OS signal.
 func TestRunInstallsDefaultSignalChannel(t *testing.T) {
 	o := &orchestrator{
-		seam:             newFake(),
-		brokerSocketPath: "/run/x.sock",
+		seam:       newFake(),
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 		// signals nil -> run installs the default channel
 	}
 	if err := o.run(context.Background(), &mountcfg.Config{Mounts: []mountcfg.Mount{}}); err != nil {
@@ -106,9 +108,10 @@ func TestUnmountAllCollectsErrors(t *testing.T) {
 		Mounts: []mountcfg.Mount{writableEntry("/mnt/a"), writableEntry("/mnt/b")},
 	}
 	o := &orchestrator{
-		seam:             fake,
-		signals:          sig,
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 
 	done := make(chan error, 1)
@@ -154,9 +157,10 @@ func TestRunCleanSpontaneousExit(t *testing.T) {
 		Mounts: []mountcfg.Mount{writableEntry("/mnt/x"), writableEntry("/mnt/y")},
 	}
 	o := &orchestrator{
-		seam:             fake,
-		signals:          sig,
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 
 	done := make(chan error, 1)
@@ -186,57 +190,6 @@ func TestRunCleanSpontaneousExit(t *testing.T) {
 	}
 }
 
-// TestBuildSpecsSocketDirMissingFilesystemID covers the socket-dir branch where
-// a mount lacks a filesystem_id: deriving <dir>/<filesystem_id>.sock is
-// impossible, so run hard-fails before any mount. A hand-built config (no
-// scope) is the only way to reach this; the loader's scope XOR normally
-// guarantees the id.
-func TestBuildSpecsSocketDirMissingFilesystemID(t *testing.T) {
-	fake := newFake()
-	noScope := writableEntry("/mnt/w")
-	noScope.FilesystemID = nil // no scope handle to derive the socket from
-
-	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{noScope}}
-	o := &orchestrator{
-		seam:                fake,
-		signals:             make(chan os.Signal, 1),
-		brokerSocketDirPath: "/run/sockets",
-	}
-	err := o.run(context.Background(), cfg)
-	if err == nil {
-		t.Fatal("run = nil; want a hard error when filesystem_id is missing in socket-dir mode")
-	}
-	if !strings.Contains(err.Error(), "filesystem_id is required") {
-		t.Fatalf("run error = %q; want the missing-filesystem_id derivation error", err.Error())
-	}
-	if fake.mountCount() != 0 {
-		t.Errorf("mountCount = %d; want 0 (rejected during spec build)", fake.mountCount())
-	}
-}
-
-// TestBuildSpecsSocketDirEmptyFilesystemID is the empty-string sibling of the
-// missing-id case: an explicitly empty filesystem_id likewise cannot derive a
-// socket filename and is rejected.
-func TestBuildSpecsSocketDirEmptyFilesystemID(t *testing.T) {
-	fake := newFake()
-	emptyScope := writableEntry("/mnt/w")
-	emptyScope.FilesystemID = ptrStr("")
-
-	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{emptyScope}}
-	o := &orchestrator{
-		seam:                fake,
-		signals:             make(chan os.Signal, 1),
-		brokerSocketDirPath: "/run/sockets",
-	}
-	err := o.run(context.Background(), cfg)
-	if err == nil {
-		t.Fatal("run = nil; want a hard error when filesystem_id is empty in socket-dir mode")
-	}
-	if !strings.Contains(err.Error(), "filesystem_id is required") {
-		t.Fatalf("run error = %q; want the missing-filesystem_id derivation error", err.Error())
-	}
-}
-
 // TestRunSignalAfterLastMount covers the second signalPending check in run: a
 // termination signal that arrives after every mount completed but before
 // readiness is signalled must still suppress the ready-file and tear down
@@ -254,10 +207,11 @@ func TestRunSignalAfterLastMount(t *testing.T) {
 		Mounts: []mountcfg.Mount{writableEntry("/mnt/a"), writableEntry("/mnt/b")},
 	}
 	o := &orchestrator{
-		seam:             fake,
-		readiness:        ReadinessConfig{ReadyFilePath: readyFile},
-		signals:          sig,
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		readiness:  ReadinessConfig{ReadyFilePath: readyFile},
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 
 	done := make(chan error, 1)

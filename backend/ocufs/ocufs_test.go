@@ -231,10 +231,10 @@ func TestRegister(t *testing.T) {
 // TestNewFsReadOnly verifies that NewFs with read_only=true produces an Fs
 // whose read-only flag is set.
 func TestNewFsReadOnly(t *testing.T) {
-	// NewFs requires a real socket path; we skip the actual connection by
-	// checking option parsing directly via the Fs struct.
-	// The test constructs an Fs directly rather than calling NewFs because
-	// NewFs dials the socket — integration with a live broker is a later phase.
+	// NewFs requires a reachable broker endpoint; we skip the actual connection
+	// by checking option parsing directly via the Fs struct. The test
+	// constructs an Fs directly rather than calling NewFs because NewFs builds
+	// the broker client — integration with a live broker is a later phase.
 	f := newTestFs(t, &fakeClient{}, true)
 	if !f.readOnly {
 		t.Error("readOnly flag is false, want true")
@@ -1160,8 +1160,8 @@ func TestPathEncodingRoundTrip(t *testing.T) {
 	}
 }
 
-// TestNewObjectMissingFilesystemID ensures NewFs returns an error when both
-// socket_path and filesystem_id are present but value is empty.
+// TestNewFsBothMissing ensures NewFs returns an error when the configmap is
+// empty: the required transport and scope options are all absent.
 func TestNewFsBothMissing(t *testing.T) {
 	m := configmap.Simple{}
 	_, err := NewFs(context.Background(), "test", "/", m)
