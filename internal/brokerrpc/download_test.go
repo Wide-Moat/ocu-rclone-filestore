@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/rclone/rclone/fs/fserrors"
@@ -262,5 +263,82 @@ func TestDownloadRangeEmptyWindow(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("empty window: got %d bytes (%q), want 0", len(got), got)
+	}
+}
+
+// TestDownloadThrottledTypedRetryAfter asserts the 429 download path produces a
+// retryable error that carries the broker's Retry-After deadline (not merely a
+// non-nil error): doDownload's non-2xx arm hands the status, body, and
+// Retry-After through MapHTTPStatus, and a positive in-bound hint becomes an
+// ErrorRetryAfter the upstream pacer can honour.
+func TestDownloadThrottledTypedRetryAfter(t *testing.T) {
+	c, _ := newTLSTestClient(t, "fs-dl-throttle-ra", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Retry-After", "2")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte("slow down"))
+	})
+	_, err := c.Download(context.Background(), "uuid-busy")
+	if err == nil {
+		t.Fatal("expected retryable error, got nil")
+	}
+	if !fserrors.IsRetryError(err) {
+		t.Fatalf("429 download must be retryable: %v", err)
+	}
+	if !fserrors.IsRetryAfterError(err) {
+		t.Errorf("expected a Retry-After deadline on the 429 download, got %v", err)
+	}
+	if when := fserrors.RetryAfterErrorTime(err); when.IsZero() {
+		t.Errorf("expected a non-zero Retry-After time on the 429 download, got zero")
+	}
+}
+
+// TestDownloadServiceUnavailableIsRetryable asserts a 503 on download maps to a
+// retryable error (the second backpressure-class status), with no Retry-After
+// honoured on this status.
+func TestDownloadServiceUnavailableIsRetryable(t *testing.T) {
+	c, _ := newTLSTestClient(t, "fs-dl-503", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("unavailable"))
+	})
+	_, err := c.Download(context.Background(), "uuid-503")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !fserrors.IsRetryError(err) {
+		t.Errorf("503 download must be retryable: %v", err)
+	}
+}
+
+// TestDownloadBodyReadFailureSurfaces drives doDownload's io.ReadAll error arm:
+// a 2xx handler that promises a long Content-Length but writes fewer bytes and
+// hangs up makes the body read fail with an unexpected EOF, which must surface as
+// a read-body error rather than a silent short success (silent truncation would
+// be file corruption on a FUSE-backed mount).
+func TestDownloadBodyReadFailureSurfaces(t *testing.T) {
+	c, _ := newTLSTestClient(t, "fs-dl-shortbody", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		// Promise more than we deliver, then hang up mid-body.
+		w.Header().Set("Content-Length", "64")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("short"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, herr := hj.Hijack()
+			if herr == nil {
+				_ = conn.Close()
+			}
+		}
+	})
+	_, err := c.Download(context.Background(), "uuid-short")
+	if err == nil {
+		t.Fatal("expected a body-read error from a truncated stream, got nil")
+	}
+	if !strings.Contains(err.Error(), "fileDownload") {
+		t.Errorf("error %q does not name fileDownload", err.Error())
 	}
 }

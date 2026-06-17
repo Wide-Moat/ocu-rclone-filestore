@@ -6,7 +6,9 @@ package brokerrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -339,5 +341,69 @@ func TestListDirUnionTwoPageAggregation(t *testing.T) {
 	}
 	if entries[1].Directory == nil {
 		t.Error("entries[1].Directory is nil, expected directory arm populated")
+	}
+}
+
+// TestListDirectoryAllErrorsMidPagination drives the call-error branch of the
+// ListDirectoryAll loop AFTER a successful first page: page 1 returns entries and
+// a cursor, page 2 returns a non-2xx. The error must propagate (named
+// ListDirectoryAll, preserving the underlying sentinel) and pagination must halt
+// — partial pages are never returned as a complete listing.
+func TestListDirectoryAllErrorsMidPagination(t *testing.T) {
+	callCount := 0
+	c, _ := newTLSTestClient(t, "fs-lda-midfail", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"entries":[{"directory":{"path":"/a"}}],"cursor":"page2"}`))
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("page 2 unavailable"))
+	})
+	entries, err := c.ListDirectoryAll(context.Background(), "/")
+	if err == nil {
+		t.Fatal("expected a page-2 error, got nil")
+	}
+	if entries != nil {
+		t.Errorf("a mid-pagination failure must not return partial entries, got %d", len(entries))
+	}
+	if !strings.Contains(err.Error(), "ListDirectoryAll") {
+		t.Errorf("error %q does not name ListDirectoryAll", err.Error())
+	}
+	if callCount != 2 {
+		t.Errorf("expected exactly 2 page calls before the failure halted paging, got %d", callCount)
+	}
+}
+
+// TestListFilesAllErrorsMidPagination is the listFiles analogue: page 1 returns
+// files and an after_uuid cursor, page 2 returns a non-2xx, and the error
+// propagates while paging halts.
+func TestListFilesAllErrorsMidPagination(t *testing.T) {
+	callCount := 0
+	c, _ := newTLSTestClient(t, "fs-lfa-midfail", func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		if callCount == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"files":[{"path":"/f1","uuid":"u1"}],"after_uuid":"page2"}`))
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("page 2 denied"))
+	})
+	files, err := c.ListFilesAll(context.Background(), "root-uuid")
+	if err == nil {
+		t.Fatal("expected a page-2 error, got nil")
+	}
+	if files != nil {
+		t.Errorf("a mid-pagination failure must not return partial files, got %d", len(files))
+	}
+	if !strings.Contains(err.Error(), "ListFilesAll") {
+		t.Errorf("error %q does not name ListFilesAll", err.Error())
+	}
+	if !errors.Is(err, ErrPermissionDenied) {
+		t.Errorf("the underlying 403 must be preserved; got %v", err)
 	}
 }

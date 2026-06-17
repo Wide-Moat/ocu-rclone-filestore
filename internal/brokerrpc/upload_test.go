@@ -7,11 +7,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/rclone/rclone/fs/fserrors"
@@ -256,4 +258,86 @@ func TestUploadSizeMismatchIsPermanent(t *testing.T) {
 	if fserrors.IsRetryError(err) {
 		t.Errorf("size policy 400 must NOT be retryable: %v", err)
 	}
+}
+
+// TestUploadForbiddenMapsToPermissionDenied drives the upload non-2xx arm with a
+// 403 and asserts the typed permission-denied sentinel (not just non-nil).
+func TestUploadForbiddenMapsToPermissionDenied(t *testing.T) {
+	c, _ := newTLSTestClient(t, "fs-up-403", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("foreign scope"))
+	})
+	err := c.Upload(context.Background(), "/f.txt", bytes.NewReader([]byte("data")), 4, false)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrPermissionDenied) {
+		t.Errorf("403 upload must map to ErrPermissionDenied; got %v", err)
+	}
+}
+
+// TestUploadResponseBodyReadErrorSurfacesOn2xx drives the readErr != nil arm of
+// Upload: the broker returns 2xx but the response body read fails (the handler
+// promises a long Content-Length then hangs up), which surfaces as a
+// read-response-body error rather than a silent success.
+func TestUploadResponseBodyReadErrorSurfacesOn2xx(t *testing.T) {
+	c, _ := newTLSTestClient(t, "fs-up-readerr", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Length", "64")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, herr := hj.Hijack()
+			if herr == nil {
+				_ = conn.Close()
+			}
+		}
+	})
+	err := c.Upload(context.Background(), "/f.txt", bytes.NewReader([]byte("data")), 4, false)
+	if err == nil {
+		t.Fatal("expected a 2xx-with-body-read-failure error, got nil")
+	}
+	if !strings.Contains(err.Error(), "fileUpload") {
+		t.Errorf("error %q does not name fileUpload", err.Error())
+	}
+}
+
+// TestUploadMidStreamSourceFaultSurfaces drives the file-part write branch in
+// writeUploadMultipart: a source reader that yields some bytes then errors makes
+// the streamed file part fail mid-write, and on a 2xx that genuine (non-pipe)
+// write fault surfaces. midErrReader is distinct from errReader (which fails on
+// the first read) so the file-chunk write path actually executes before failing.
+func TestUploadMidStreamSourceFaultSurfaces(t *testing.T) {
+	c, _ := newTLSTestClient(t, "fs-up-midfault", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	})
+	src := &midErrReader{prefix: bytes.Repeat([]byte("a"), 16)}
+	err := c.Upload(context.Background(), "/f.txt", src, 16, false)
+	if err == nil {
+		t.Fatal("expected a mid-stream source fault to surface, got nil")
+	}
+	if !strings.Contains(err.Error(), "write body") && !strings.Contains(err.Error(), "read source") {
+		t.Errorf("error %q does not mention the write/read fault", err.Error())
+	}
+}
+
+// midErrReader yields its prefix once, then returns a forced error on the next
+// read so the file part is partly written before the source faults.
+type midErrReader struct {
+	prefix []byte
+	sent   bool
+}
+
+func (m *midErrReader) Read(p []byte) (int, error) {
+	if !m.sent {
+		m.sent = true
+		n := copy(p, m.prefix)
+		return n, nil
+	}
+	return 0, errors.New("midErrReader: forced mid-stream failure")
 }

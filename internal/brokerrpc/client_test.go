@@ -6,6 +6,7 @@ package brokerrpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -202,5 +203,49 @@ func TestClientNewRejectsBadInputs(t *testing.T) {
 	// All valid: construction succeeds.
 	if _, err := New("https://broker:8443", "fs", testAuthToken, goodCert); err != nil {
 		t.Errorf("valid construction: %v", err)
+	}
+}
+
+// TestUnaryMethodsSurfaceTypedErrorOnNondxx drives the shared error-return path
+// of the unary op methods through the PUBLIC surface: a TLS server returning a
+// non-2xx for each op must make the op method return the matching typed sentinel
+// (via errors.Is), proving the c.call error propagates verbatim through every
+// thin op wrapper rather than being swallowed or remapped. One read-class and
+// several write-class methods are covered so both intent arms exercise the path.
+func TestUnaryMethodsSurfaceTypedErrorOnNon2xx(t *testing.T) {
+	// 404 -> ErrNotFound for the read-class metadata op.
+	cNF, _ := newTLSTestClient(t, "fs-unary-404", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("missing"))
+	})
+	if _, err := cNF.ReadMetadata(context.Background(), "/x"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("ReadMetadata 404: want ErrNotFound, got %v", err)
+	}
+	if _, err := cNF.GetFileMetadata(context.Background(), "uuid"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetFileMetadata 404: want ErrNotFound, got %v", err)
+	}
+
+	// 403 -> ErrPermissionDenied for write-class mutating ops.
+	cPD, _ := newTLSTestClient(t, "fs-unary-403", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("denied"))
+	})
+	if _, err := cPD.MakeDirectory(context.Background(), "/d"); !errors.Is(err, ErrPermissionDenied) {
+		t.Errorf("MakeDirectory 403: want ErrPermissionDenied, got %v", err)
+	}
+	if _, err := cPD.RemoveFile(context.Background(), "/f"); !errors.Is(err, ErrPermissionDenied) {
+		t.Errorf("RemoveFile 403: want ErrPermissionDenied, got %v", err)
+	}
+
+	// 409 -> ErrAlreadyExists for a create-class op.
+	cAE, _ := newTLSTestClient(t, "fs-unary-409", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte("exists"))
+	})
+	if _, err := cAE.CreateFile(context.Background(), "/f"); !errors.Is(err, ErrAlreadyExists) {
+		t.Errorf("CreateFile 409: want ErrAlreadyExists, got %v", err)
 	}
 }
