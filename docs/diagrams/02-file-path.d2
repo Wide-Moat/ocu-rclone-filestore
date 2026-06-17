@@ -11,7 +11,7 @@ title: |md
 explanation: |md
   A guest program just reads and writes files like normal.
   Underneath, this binary turns each operation into one broker call.
-  **The bytes only ever travel through one unix socket, and the guest never holds a key.**
+  **The bytes travel outbound over HTTPS to the egress edge, which exchanges the guest's edge-only JWT for the real credential; the guest never holds a backend key.**
 | {near: top-left; style: {fill: "#fafafa"; stroke: "#bbb"; font-size: 14}}
 
 read: "READING a file" {

@@ -18,24 +18,24 @@ negated-tag stub fails closed everywhere else.
 
 Callers touch only `New` and the `Mounter` interface. `New` returns an
 `orchestratorMounter` wired with the production seam and accepts functional
-options — `WithBrokerSocket` or `WithBrokerSocketDir`, `WithReadiness`,
-`WithSignals` — that thread the entrypoint's runtime inputs without changing the
-single `Mount(cfg)` method.
+options — `WithReadiness`, `WithSignals` — that thread the entrypoint's runtime
+inputs without changing the single `Mount(cfg)` method. The transport is
+config-derived: the top-level `service_url` + `ca_cert_pem` and each mount's
+`auth_token` come from the validated config, so there is no socket option.
 
 ## Multimount orchestration
 
-`orchestrator.run` is the spine. It rejects bad socket inputs, builds an ordered
-spec list, fans out one mount per spec, signals readiness once, then blocks
-until teardown. The non-linear part is the wait at the end — a signal and N
-spontaneous point-exits race each other — so that is the only flowchart this doc
-earns:
+`orchestrator.run` is the spine. It builds an ordered spec list, fans out one
+mount per spec, signals readiness once, then blocks until teardown. The
+non-linear part is the wait at the end — a signal and N spontaneous point-exits
+race each other — so that is the only flowchart this doc earns:
 
 ```mermaid
 sequenceDiagram
     participant O as orchestrator.run
     participant S as pointMounter seam
     participant P as points (live mounts)
-    O->>O: reject empty/both socket inputs, remove stale ready-file
+    O->>O: remove stale ready-file
     O->>O: buildSpecs - writable then read-only
     loop each spec, sequential
         O->>O: signalPending? if yes - teardown, exit clean, no ready-file
@@ -54,7 +54,8 @@ specs are ordered writable-first by `buildSpecs`, which also rejects two hard
 errors before any mount starts: a memory-store mount (there is no memory scope
 axis yet) and a destination that repeats across the writable and read-only
 arrays (the second would silently shadow the first). Each spec is stamped with
-its resolved broker socket path here.
+the config-derived transport here: the top-level `service_url` + `ca_cert_pem`
+and the mount's own `auth_token`.
 
 **Fail-fast with best-effort cleanup.** The first `mountAndWaitReady` error ends
 the run. `run` best-effort-unmounts everything already up through `unmountAll`
@@ -89,12 +90,11 @@ The orchestrator never constructs a mount. It depends only on `pointMounter`
 records calls and can fail the Nth start proves fan-out, fail-fast aggregation,
 readiness ordering, and signal teardown with no kernel involved.
 
-A note on the socket input: the broker socket is a runtime flag/env (decision
-D2), never derived from the validated `service_url`. An empty value is a hard
-error, and `WithBrokerSocket` / `WithBrokerSocketDir` are mutually exclusive.
-In directory mode each spec derives `<dir>/<filesystem_id>.sock`, matching the
-broker's one-socket-per-filesystem provisioning, so an N-scope config dials N
-broker instances.
+A note on the transport: it is config-derived, not a runtime flag/env. The
+top-level `service_url` (loader-checked `^https://`) and `ca_cert_pem` plus each
+mount's `auth_token` come straight from the validated config and are stamped onto
+each spec; there is no socket input to resolve. An N-scope config dials the
+egress edge over its single `service_url`, one `ocufs` Fs per `filesystem_id`.
 
 Code: orchestrator.go (run, buildSpecs, signalReady, signalPending,
 shutdownDuringStartup, blockUntilTeardown, unmountAll).
@@ -129,10 +129,12 @@ unitless value and appends `"B"` to force a bytes reading; suffixed values pass
 through. Do not remove this without re-checking the contract's `ByteSize`
 pattern.
 
-`buildOcufsConfigmap` writes the only three keys the backend reads:
-`socket_path`, `filesystem_id`, `read_only`. No auth material is ever set —
-`filesystem_id` is the sole scope handle. A memory-store mount or an empty
-`filesystem_id` is a hard error here too.
+`buildOcufsConfigmap` writes the keys the backend reads: `service_url`,
+`auth_token`, `ca_cert_pem`, `filesystem_id`, `read_only`. The transport triplet
+(`service_url` + `ca_cert_pem` from the top-level config, `auth_token` from this
+mount) is what the backend threads into `brokerrpc`; `filesystem_id` is the sole
+scope handle. A memory-store mount or an empty `filesystem_id` is a hard error
+here too.
 
 ## The direct kernel-mount path
 
@@ -164,8 +166,8 @@ Teardown order matters and is fixed in `serveFuse`: the unmount closure shuts
 the VFS down first, so in-flight writes flush, then detaches the kernel mount.
 The terminal value lands on the error channel only after the serve loop exits
 and `srv.Wait` drains, so a consumer sees a fully quiesced server. This is none
-of it a transport — it is a kernel mount frontend, and the only network/IPC
-path remains the backend's broker unix socket.
+of it a transport — it is a kernel mount frontend, and the only network
+path remains the backend's outbound HTTPS connection to the configured `service_url`.
 
 `directMountFn` and the production point seam share the `linux ||
 (darwin && amd64)` build tag. On linux the kernel can be polled for readiness;
@@ -187,11 +189,11 @@ silently skipped (MNT-02), and `go build ./...` stays green on every target
 while the binary refuses to mount where it cannot. The two `defaultRealSeam`
 definitions carry exactly-negated tags and must stay mutually exclusive.
 
-The seam is constructed lazily. `orchestratorMounter` stores `newSeam` and
-`run` calls it only after the empty-socket check passes. This ordering is
-deliberate: on an empty socket the socket hard error must win even on an
-unsupported platform where the seam constructor would itself error. Do not move
-seam construction earlier.
+The seam is constructed through `newSeam`. `orchestratorMounter` stores
+`newSeam` and `run` calls it on entry (the fake-driven tests inject the seam
+directly and leave `newSeam` nil). On an unsupported platform the constructor
+returns `errMountMethodUnavailable`, so the session fails closed before any mount
+is attempted.
 
 `realPointMounter.mountAndWaitReady` is where one spec becomes a kernel mount.
 It builds the configmap, finds and instantiates the `ocufs` Fs, builds the VFS
@@ -222,8 +224,8 @@ unmounts, which is rclone-internal and not deduplicatable from here — the Once
 removes the double-call from our code, the residual race is upstream's.
 
 This package opens no second transport and holds no backend credential. The only
-Fs edge is the blank-imported `ocufs` backend, and the only network/IPC path is
-that backend's broker unix socket. The local disk backend is blank-imported
+Fs edge is the blank-imported `ocufs` backend, and the only network path is
+that backend's outbound HTTPS connection to the configured `service_url`. The local disk backend is blank-imported
 solely so the VFS cache directory can be built — a disk backend for the cache
 dir, not an object-store client.
 

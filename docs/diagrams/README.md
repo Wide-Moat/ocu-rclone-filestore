@@ -9,8 +9,8 @@ from the `.d2` source beside it — the `.d2` is the editable source of truth, t
 
 | Diagram | Source | Shows |
 | --- | --- | --- |
-| `01-big-picture.svg` | `01-big-picture.d2` | The guest, this binary, the broker, and backend storage, with the trust zones. |
-| `02-file-path.svg` | `02-file-path.d2` | A file's read and write paths, including the VFS cache and throttle behaviour. |
+| `01-big-picture.svg` | `01-big-picture.d2` | The guest, this binary, the Envoy egress edge, the REST filestore, and backend storage, with the trust zones. |
+| `02-file-path.svg` | `02-file-path.d2` | A file's read and write paths through the Envoy egress edge, including the VFS cache and throttle behaviour. |
 | `03-package-map.svg` | `03-package-map.d2` | The repository's packages and who calls whom, down to the single egress. |
 | `04-setup.svg` | `04-setup.d2` | The four steps to build and run the binary against a broker. |
 

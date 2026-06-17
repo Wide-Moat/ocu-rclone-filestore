@@ -51,20 +51,8 @@ type Mounter interface {
 // orchestratorMounter realizes a config by running the orchestrator over a
 // production pointMounter seam constructed lazily inside Mount.
 type orchestratorMounter struct {
-	// newSeam constructs the production pointMounter. It is built lazily inside
-	// Mount so the orchestrator's empty-broker-socket check fires BEFORE seam
-	// construction — on an empty socket the socket hard error wins regardless of
-	// platform, including where the unsupported-platform constructor would
-	// itself error.
+	// newSeam constructs the production pointMounter, built lazily inside Mount.
 	newSeam func() (pointMounter, error)
-	// brokerSocketPath is the per-session socket path, an explicit runtime input
-	// (flag/env) supplied by the entrypoint.
-	brokerSocketPath string
-	// brokerSocketDirPath is the per-session socket DIRECTORY alternative:
-	// each mount derives <dir>/<filesystem_id>.sock, matching the broker's
-	// one-socket-per-filesystem provisioning. Exactly one of the two socket
-	// inputs may be set; the orchestrator enforces the exclusivity.
-	brokerSocketDirPath string
 	// readiness carries the optional ready-file path (flag/env).
 	readiness ReadinessConfig
 	// signals is the termination-signal channel the entrypoint installs. When
@@ -73,15 +61,16 @@ type orchestratorMounter struct {
 }
 
 // Mount runs the orchestrator over the lazily constructed production seam. The
-// orchestrator rejects an empty broker socket path before the seam is built, so
-// that hard error wins over an unsupported-platform seam error.
+// transport values (service_url + ca_cert_pem) are read from the validated
+// config and threaded onto the orchestrator; the per-mount auth_token rides on
+// each mount.
 func (m orchestratorMounter) Mount(cfg *mountcfg.Config) error {
 	o := &orchestrator{
-		newSeam:             m.newSeam,
-		readiness:           m.readiness,
-		signals:             m.signals,
-		brokerSocketPath:    m.brokerSocketPath,
-		brokerSocketDirPath: m.brokerSocketDirPath,
+		newSeam:    m.newSeam,
+		readiness:  m.readiness,
+		signals:    m.signals,
+		serviceURL: cfg.ServiceURL,
+		caCertPEM:  cfg.CACertPEM,
 	}
 	return o.run(context.Background(), cfg)
 }
@@ -95,23 +84,6 @@ func WithReadiness(rc ReadinessConfig) Option {
 	return func(m *orchestratorMounter) { m.readiness = rc }
 }
 
-// WithBrokerSocket sets the per-session broker socket path, an explicit runtime
-// input sourced from a flag/env. An empty value makes the orchestrator hard-fail
-// before any mount.
-func WithBrokerSocket(path string) Option {
-	return func(m *orchestratorMounter) { m.brokerSocketPath = path }
-}
-
-// WithBrokerSocketDir sets the per-session broker socket DIRECTORY, an explicit
-// runtime input sourced from a flag/env. Each mount derives its own socket path
-// as <dir>/<filesystem_id>.sock, matching the broker's one-session-socket-per-
-// filesystem provisioning, so a multi-filesystem config dials one broker
-// instance per scope. Mutually exclusive with WithBrokerSocket; setting both
-// makes the orchestrator hard-fail before any mount.
-func WithBrokerSocketDir(dir string) Option {
-	return func(m *orchestratorMounter) { m.brokerSocketDirPath = dir }
-}
-
 // WithSignals installs the termination-signal channel the orchestrator selects
 // on for teardown. When unset, the mounter installs a default SIGTERM/SIGINT
 // channel.
@@ -121,30 +93,12 @@ func WithSignals(sig <-chan os.Signal) Option {
 
 // New returns the orchestrator-backed mounter wired with the production seam
 // (the live build-tagged seam on a supported platform, the fail-closed stub
-// elsewhere). Functional options thread the readiness config, the broker socket
-// path, and the signal channel from the entrypoint without changing Mount.
+// elsewhere). Functional options thread the readiness config and the signal
+// channel from the entrypoint without changing Mount.
 func New(opts ...Option) Mounter {
 	m := orchestratorMounter{newSeam: defaultRealSeam}
 	for _, opt := range opts {
 		opt(&m)
 	}
 	return m
-}
-
-// AppliedSockets applies the given functional options to a fresh mounter and
-// reports the resolved broker socket inputs: the single per-session socket
-// (WithBrokerSocket) and the per-session socket directory (WithBrokerSocketDir).
-//
-// It exists so the entrypoint's option-assembly adapter is assertable across the
-// package boundary — that the resolved single-socket value reaches the socket
-// field and the directory value reaches the directory field, neither dropped nor
-// transposed — without constructing a live mount. It applies the options exactly
-// as New does and reads back only the two socket fields; it has no production
-// caller.
-func AppliedSockets(opts ...Option) (brokerSocket, brokerSocketDir string) {
-	var m orchestratorMounter
-	for _, opt := range opts {
-		opt(&m)
-	}
-	return m.brokerSocketPath, m.brokerSocketDirPath
 }

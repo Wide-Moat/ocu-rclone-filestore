@@ -14,10 +14,10 @@ cmd: "cmd/ocu-rclone-filestore\nthe entrypoint: parse flags, load config,\nclaim
   style: {fill: "#e8eaff"; stroke: "#5b3bcf"; stroke-width: 2; border-radius: 10; font-color: "#000"}
 }
 
-mountcfg: "internal/mountcfg\nstrictly decode the mount config;\nrefuse any credential marker" {
+mountcfg: "internal/mountcfg\nstrictly decode the single-shape config;\nhold service_url + ca_cert_pem + per-mount auth_token" {
   style: {fill: "#eef3ff"; stroke: "#3b5bcf"; border-radius: 10; font-color: "#000"}
 }
-contract: "internal/contract\nvalidate config against the\nguest subschema (test-time gate)" {
+contract: "internal/contract\nvalidate config against the\nschema root (test-time gate)" {
   style: {fill: "#f0f0f0"; stroke: "#888"; border-radius: 10; font-color: "#000"}
 }
 
@@ -29,24 +29,24 @@ ocufs: "backend/ocufs\nthe rclone backend: map file ops\nto broker calls; read-o
   style: {fill: "#eafaef"; stroke: "#2e9e54"; stroke-width: 2; border-radius: 10; font-color: "#000"}
 }
 
-brokerrpc: "internal/brokerrpc\nthe ONLY way out: Connect-RPC client\nover the per-session unix socket" {
+brokerrpc: "internal/brokerrpc\nthe ONLY way out: HTTPS/REST client\nover the outbound service_url" {
   style: {fill: "#fff1f0"; stroke: "#cf3b3b"; stroke-width: 3; border-radius: 10; bold: true; font-color: "#000"}
 }
 
-socket: "broker unix socket" {shape: cylinder; style: {fill: "#ffe9b3"; stroke: "#d4a017"; font-color: "#000"}}
+edge: "Envoy egress edge\n(service_url over TLS)" {shape: cylinder; style: {fill: "#ffe9b3"; stroke: "#d4a017"; font-color: "#000"}}
 
 cmd -> mountcfg: "loads + validates"
 cmd -> mounter: "drives"
 mountcfg -> contract: "shape pinned by" {style.stroke-dash: 4; style.stroke: "#888"}
 mounter -> ocufs: "builds an Fs per mount"
 ocufs -> brokerrpc: "every op goes through here"
-brokerrpc -> socket: "dials" {style: {stroke: "#cf3b3b"; stroke-width: 3}}
+brokerrpc -> edge: "dials service_url over TLS" {style: {stroke: "#cf3b3b"; stroke-width: 3}}
 
 guards: "Guard packages (tests only — never in the binary):\ninternal/buildgraph asserts no object-store SDK is linked  •  internal/coverage enforces the coverage floor" {
   style: {fill: "#f7f7f7"; stroke: "#bbb"; font-size: 12; font-color: "#555"}
 }
 
 legend: |md
-  **Reading order:** entrypoint → config → mounter → backend → the single socket.
+  **Reading order:** entrypoint → config → mounter → backend → the single outbound HTTPS egress.
   Green = the rclone backend. Red = the one egress. Grey = test-time guards, not shipped.
 | {near: bottom-center; style: {fill: "#fafafa"; stroke: "#bbb"; font-size: 13}}

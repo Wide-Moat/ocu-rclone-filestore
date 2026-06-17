@@ -4,7 +4,7 @@
 // Package ocufs tests — client.go production adapter forwarding.
 //
 // These tests construct a REAL brokerClientAdapter over the in-process fake
-// broker bound to a temp unix socket (fakebroker_test.go) and drive every
+// broker served from an httptest TLS server (fakebroker_test.go) and drive every
 // adapter method end-to-end. Each adapter method is a single forwarding call
 // into *brokerrpc.Client; exercising it against the fake confirms the method
 // reaches the wire, builds the right route, and decodes the canned response —
@@ -21,12 +21,14 @@ import (
 )
 
 // newConfigMapForFake builds the configmap NewFs consumes for a fake-broker
-// mount: the per-session socket path, the session-scoped filesystem_id, and
-// the read-only flag. No auth_token is carried — the guest holds no credential.
-func newConfigMapForFake(socketPath, fsID string, readOnly bool) configmap.Simple {
+// mount: the broker's HTTPS service_url, the session-scoped filesystem_id, the
+// static session credential, the TLS trust anchor, and the read-only flag.
+func newConfigMapForFake(fb fakeBroker, fsID string, readOnly bool) configmap.Simple {
 	m := configmap.Simple{
-		"socket_path":   socketPath,
+		"service_url":   fb.url,
 		"filesystem_id": fsID,
+		"auth_token":    fakeBrokerAuthToken,
+		"ca_cert_pem":   string(fb.certPEM),
 	}
 	if readOnly {
 		m["read_only"] = "true"
@@ -35,14 +37,14 @@ func newConfigMapForFake(socketPath, fsID string, readOnly bool) configmap.Simpl
 }
 
 // newAdapterOverFakeBroker constructs a production brokerClientAdapter wired to
-// a real *brokerrpc.Client bound to the fake broker's temp unix socket. The
-// returned brokerClient is the exact production seam NewFs installs.
+// a real *brokerrpc.Client bound to the fake broker's HTTPS endpoint over TLS.
+// The returned brokerClient is the exact production seam NewFs installs.
 func newAdapterOverFakeBroker(t *testing.T) brokerClient {
 	t.Helper()
-	sock := startFakeBroker(t)
-	c, err := brokerrpc.New(sock, "fs-adapter-test")
+	fb := startFakeBroker(t)
+	c, err := brokerrpc.New(fb.url, "fs-adapter-test", fakeBrokerAuthToken, fb.certPEM)
 	if err != nil {
-		t.Fatalf("brokerrpc.New(%q): %v", sock, err)
+		t.Fatalf("brokerrpc.New(%q): %v", fb.url, err)
 	}
 	return newBrokerClientAdapter(c)
 }
@@ -134,10 +136,10 @@ func TestAdapterUploadForwards(t *testing.T) {
 // so a test can assert which path reached which wire slot for the two-path ops.
 func newCapturingAdapterOverFakeBroker(t *testing.T) (brokerClient, *capturingBroker) {
 	t.Helper()
-	sock, cap := startCapturingFakeBroker(t)
-	c, err := brokerrpc.New(sock, "fs-adapter-cap-test")
+	fb, cap := startCapturingFakeBroker(t)
+	c, err := brokerrpc.New(fb.url, "fs-adapter-cap-test", fakeBrokerAuthToken, fb.certPEM)
 	if err != nil {
-		t.Fatalf("brokerrpc.New(%q): %v", sock, err)
+		t.Fatalf("brokerrpc.New(%q): %v", fb.url, err)
 	}
 	return newBrokerClientAdapter(c), cap
 }
@@ -279,8 +281,10 @@ func TestAdapterMoveDirectoryForwards(t *testing.T) {
 // option parsing fails before any socket validation or broker dial.
 func TestNewFsParseOptionsError(t *testing.T) {
 	m := configmap.Simple{
-		"socket_path":   "/run/broker.sock",
+		"service_url":   "https://broker",
 		"filesystem_id": "fs-01",
+		"auth_token":    "t",
+		"ca_cert_pem":   "pem",
 		"read_only":     "not-a-bool", // unparseable as bool → configstruct.Set error
 	}
 	_, err := NewFs(context.Background(), "test", "/", m)
@@ -290,10 +294,10 @@ func TestNewFsParseOptionsError(t *testing.T) {
 }
 
 // TestNewFsReadOnlyMountWired exercises the read-only NewFs path: a read_only
-// mount produces an Fs whose readOnly flag is set, constructed over the socket.
+// mount produces an Fs whose readOnly flag is set, constructed over TLS.
 func TestNewFsReadOnlyMountWired(t *testing.T) {
-	sock := startFakeBroker(t)
-	m := newConfigMapForFake(sock, "fs-ro-test", true)
+	fb := startFakeBroker(t)
+	m := newConfigMapForFake(fb, "fs-ro-test", true)
 
 	fsAny, err := NewFs(context.Background(), "ocufs-ro", "/", m)
 	if err != nil {
@@ -308,14 +312,15 @@ func TestNewFsReadOnlyMountWired(t *testing.T) {
 	}
 }
 
-// TestNewFsConstructsAdapterOverSocket exercises the NewFs success path end to
-// end: a real config map (socket_path + filesystem_id) drives NewFs through
-// brokerrpc.New and installs the production brokerClientAdapter. A subsequent
-// List proves the constructed Fs actually reaches the fake broker over the
-// socket (NewFs does not dial synchronously; the first RPC does).
-func TestNewFsConstructsAdapterOverSocket(t *testing.T) {
-	sock := startFakeBroker(t)
-	m := newConfigMapForFake(sock, "fs-newfs-test", false)
+// TestNewFsConstructsAdapterOverService exercises the NewFs success path end to
+// end: a real config map (service_url + filesystem_id + auth_token + ca_cert_pem)
+// drives NewFs through brokerrpc.New and installs the production
+// brokerClientAdapter. A subsequent List proves the constructed Fs actually
+// reaches the fake broker over TLS (NewFs does not dial synchronously; the first
+// RPC does).
+func TestNewFsConstructsAdapterOverService(t *testing.T) {
+	fb := startFakeBroker(t)
+	m := newConfigMapForFake(fb, "fs-newfs-test", false)
 
 	fsAny, err := NewFs(context.Background(), "ocufs-newfs", "/", m)
 	if err != nil {

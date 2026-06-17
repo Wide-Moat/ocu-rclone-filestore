@@ -1,0 +1,29 @@
+{
+  "schema_version": "v1alpha",
+  "service_url": "https://broker.internal",
+  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+  "mounts": [
+    {
+      "destination": "/mnt/user-data/uploads/",
+      "auth_token": "tok.opaque.value.ro",
+      "filesystem_id": "session_01HXYZ_uploads",
+      "readonly": true,
+      "vfs_cache_mode": "minimal",
+      "cache_duration_s": 1,
+      "vfs_cache_max_size": "512M",
+      "dir_perms": "0555",
+      "file_perms": "0444"
+    },
+    {
+      "destination": "/mnt/user-data/outputs/",
+      "auth_token": "tok.opaque.value.rw",
+      "filesystem_id": "session_01HXYZ_outputs",
+      "readonly": false,
+      "vfs_cache_mode": "writes",
+      "cache_duration_s": 3600,
+      "vfs_cache_max_size": "1G",
+      "dir_perms": "0755",
+      "file_perms": "0644"
+    }
+  ]
+}

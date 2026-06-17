@@ -40,8 +40,9 @@ Install the linter with `go install github.com/golangci/golangci-lint/v2/cmd/gol
 `.golangci.yml`, so a local run reproduces CI exactly. Build it with Go 1.26 (a
 binary built with an older Go refuses to run against this go-1.26 module).
 
-The full end-to-end exercise needs a real `/dev/fuse` (a Linux kernel) and a
-running broker. On a non-Linux workstation, run it inside a Lima VM — see
+The full end-to-end exercise needs a real `/dev/fuse` (a Linux kernel) and the
+egress edge plus the harness peer graph. On a non-Linux workstation, run it
+inside a Lima VM — see
 [`docs/e2e-local.md`](./docs/e2e-local.md). The live exercise is gated behind
 `RCLONE_OCUFS_LIVE` and the compose harness under `deploy/compose/`.
 

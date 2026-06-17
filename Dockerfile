@@ -5,9 +5,9 @@
 # static CGO_ENABLED=0 binary (mount2/go-fuse is pure Go, so no libfuse and no
 # glibc are linked), and a minimal runtime that carries ONLY that binary. The
 # runtime image holds no object-store client, no network tool, and no second
-# transport (SEC-25): the broker unix socket bind-mounted at run time is the
-# sole external handle. The container needs /dev/fuse + SYS_ADMIN from the host
-# at run time; neither is baked into the image.
+# transport (SEC-25): the outbound HTTPS connection to the configured service_url
+# (the egress edge) is the sole external handle. The container needs /dev/fuse +
+# SYS_ADMIN from the host at run time; neither is baked into the image.
 
 # Builder. Pinned by digest; the tag comment records the human-readable
 # reference next to the digest. golang:1.26-bookworm.
@@ -37,12 +37,13 @@ RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
       -o /ocu-rclone-filestore \
       ./cmd/ocu-rclone-filestore
 
-# Stage the empty mount destination directories the guest config points at
-# (/workspace/out, /workspace/in). The distroless runtime has no shell and the
-# mount binary does not create destinations, so the mountpoints must exist in
-# the image; staged here and copied below so the runtime stage stays a plain
-# COPY. Root-owned, traversable by the root runtime user.
-RUN mkdir -p /staging/workspace/out /staging/workspace/in
+# Stage the empty mount destination directories the guest config points at,
+# under the canonical /mnt/user-data mount root (outputs and uploads). The
+# distroless runtime has no shell and the mount binary does not create
+# destinations, so the mountpoints must exist in the image; staged here and
+# copied below so the runtime stage stays a plain COPY. Root-owned, traversable
+# by the root runtime user.
+RUN mkdir -p /staging/mnt/user-data/outputs /staging/mnt/user-data/uploads
 
 # Runtime. Distroless static, pinned by digest; the tag comment records the
 # human-readable reference. gcr.io/distroless/static-debian12 ROOT variant:
@@ -55,13 +56,14 @@ FROM gcr.io/distroless/static-debian12@sha256:9c346e4be81b5ca7ff31a0d89eaeade58b
 
 # Only the static binary and the empty mountpoint directories cross into the
 # runtime image. No shell, no package manager, no extra tooling — the attack
-# surface is the one binary plus the bind-mounted socket.
+# surface is the one binary plus its outbound HTTPS connection to the egress edge.
 COPY --from=builder /staging/ /
 COPY --from=builder /ocu-rclone-filestore /ocu-rclone-filestore
 
-# The container is invoked as the mount binary; the host supplies --config,
-# --broker-socket (or OCU_BROKER_SOCKET), and --ready-file (or OCU_READY_FILE)
-# as args/env per the shipped entrypoint contract.
+# The container is invoked as the mount binary; the host supplies --config and
+# optionally --ready-file (or OCU_READY_FILE) as args/env per the shipped
+# entrypoint contract. The transport is config-derived (service_url + ca_cert_pem
+# + per-mount auth_token); there is no socket flag.
 #
 # Reviewed exception to the "last USER must not be root" rule: this guest MUST
 # run as root because the FUSE mount(2) syscall needs CAP_SYS_ADMIN in the

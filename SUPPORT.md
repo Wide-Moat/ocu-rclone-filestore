@@ -4,8 +4,8 @@
 # Support
 
 This repository, `ocu-rclone-filestore`, is the **guest-side mount binary** of
-Open Computer Use: an rclone-based FUSE mount whose backend speaks the storage
-broker's file-operation RPC. The broker, the storage architecture, and the
+Open Computer Use: an rclone-based FUSE mount whose backend reaches storage
+over HTTPS/REST via the egress edge. The storage architecture and the
 specifications it implements live in a **separate upstream repository**
 (`Wide-Moat/open-computer-use`). Routing your question to the right place gets
 you a faster answer.
@@ -23,7 +23,7 @@ you a faster answer.
 
 ### Architecture and design questions
 
-Questions about the storage broker, the file-operation RPC contract, mount
+Questions about the storage architecture, the file-operation contract, mount
 configuration semantics, or any cross-component design decision belong
 **upstream**, not here. Open them at
 [Wide-Moat/open-computer-use](https://github.com/Wide-Moat/open-computer-use).

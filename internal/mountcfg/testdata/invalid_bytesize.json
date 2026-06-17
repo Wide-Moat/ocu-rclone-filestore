@@ -1,11 +1,13 @@
 {
   "schema_version": "v1alpha",
   "service_url": "https://broker.internal",
+  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
   "mounts": [
     {
       "destination": "/workspace/out",
+      "auth_token": "tok.opaque.value",
       "filesystem_id": "session_01HXYZ_chat",
-      "writes": true,
+      "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
       "vfs_cache_max_size": "1GB",

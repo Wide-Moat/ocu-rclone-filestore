@@ -3,11 +3,12 @@
 
 // Package brokerrpc_test — security source-scan assertions.
 //
-// This file contains source-level assertions that enforce SEC-25 and SEC-73:
-// no Authorization/bearer/token header construction exists anywhere in the
-// non-test package source, and no code path sets downloadable to true. The
-// scan explicitly skips test files (files ending in _test.go) to avoid
-// self-tripping on the fixture strings used in these very assertions.
+// This file contains source-level assertions that enforce the credential and
+// confidentiality invariants: the ONLY credential header the guest constructs
+// is the static Authorization: Bearer header (no alternate credential-header
+// spellings), and no code path sets downloadable to true. The scan explicitly
+// skips test files (files ending in _test.go) to avoid self-tripping on the
+// fixture strings used in these very assertions.
 package brokerrpc_test
 
 import (
@@ -17,30 +18,24 @@ import (
 	"testing"
 )
 
-// TestNoAuthorizationHeaderInSource asserts that no non-test Go source file
-// in the brokerrpc package constructs an Authorization header (SEC-25). The
-// guest holds no credential and must never set an Authorization, bearer, or
-// token header.
-func TestNoAuthorizationHeaderInSource(t *testing.T) {
+// TestOnlyBearerCredentialHeaderInSource asserts that the only credential
+// header the non-test package source constructs is the standard Authorization
+// header — no alternate credential-header spellings (api-key, proxy-auth) and
+// no second credential transport. The guest's single credential is the static
+// session JWT carried as Authorization: Bearer; any OTHER credential-header
+// construction would indicate a divergent or duplicated credential path.
+func TestOnlyBearerCredentialHeaderInSource(t *testing.T) {
 	sources := nonTestSources(t)
 
-	// Patterns that would indicate an Authorization code path. The strings
-	// themselves appear here only as test fixtures; they must not appear in
-	// production source.
+	// Alternate credential-header spellings that must NOT appear: the guest
+	// carries exactly one credential, and only via the standard Authorization
+	// header set in client.go.
 	forbidden := []string{
-		`"Authorization"`,
-		`"authorization"`,
-		`bearer`,
-		`Bearer`,
-		// The doc promises the scan also catches token-bearing headers and the
-		// adjacent credential-header spellings; these patterns make the
-		// enforcement match the documentation (LO-02).
-		`auth_token`,
-		`authToken`,
-		`AuthToken`,
 		`"X-Api-Key"`,
 		`"X-API-Key"`,
 		`"Proxy-Authorization"`,
+		`"X-Auth-Token"`,
+		`"Cookie"`,
 	}
 
 	for _, path := range sources {
@@ -51,9 +46,30 @@ func TestNoAuthorizationHeaderInSource(t *testing.T) {
 		text := string(content)
 		for _, pat := range forbidden {
 			if strings.Contains(text, pat) {
-				t.Errorf("forbidden pattern %q found in non-test source %s (SEC-25: no Authorization code path)", pat, filepath.Base(path))
+				t.Errorf("forbidden alternate credential header %q found in non-test source %s (the only credential header is Authorization: Bearer)", pat, filepath.Base(path))
 			}
 		}
+	}
+}
+
+// TestBearerHeaderConstructedInClient asserts that the Authorization: Bearer
+// header construction is present — and ONLY — in client.go. This pins the
+// single credential code path: exactly one file sets the header, so a stray
+// second credential path elsewhere is caught.
+func TestBearerHeaderConstructedInClient(t *testing.T) {
+	sources := nonTestSources(t)
+	var withBearer []string
+	for _, path := range sources {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		if strings.Contains(string(content), `"Bearer "`) {
+			withBearer = append(withBearer, filepath.Base(path))
+		}
+	}
+	if len(withBearer) != 1 || withBearer[0] != "client.go" {
+		t.Errorf("Bearer header must be constructed in exactly client.go; found in %v", withBearer)
 	}
 }
 

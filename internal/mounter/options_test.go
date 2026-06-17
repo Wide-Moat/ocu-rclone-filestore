@@ -28,6 +28,7 @@ func ptrStr(v string) *string { return &v }
 func writableMount() mountcfg.Mount {
 	return mountcfg.Mount{
 		Destination:     "/mnt/work",
+		AuthToken:       "tok.session",
 		FilesystemID:    ptrStr("fs-123"),
 		VfsCacheMode:    "writes",
 		CacheDurationS:  ptrInt(300),
@@ -64,7 +65,7 @@ func TestBuildVFSOptionsReadOnly(t *testing.T) {
 		t.Fatalf("buildVFSOptions: %v", err)
 	}
 	if !opt.ReadOnly {
-		t.Errorf("ReadOnly = false; want true for a readonly_mounts entry")
+		t.Errorf("ReadOnly = false; want true for a readonly mount")
 	}
 }
 
@@ -194,12 +195,18 @@ func TestBuildMountOptionsAllowOther(t *testing.T) {
 
 func TestBuildOcufsConfigmap(t *testing.T) {
 	m := writableMount()
-	cm, err := buildOcufsConfigmap(m, false, "/run/x.sock")
+	cm, err := buildOcufsConfigmap(m, false, "https://broker.internal", "pem-bytes")
 	if err != nil {
 		t.Fatalf("buildOcufsConfigmap: %v", err)
 	}
-	if v, _ := cm.Get("socket_path"); v != "/run/x.sock" {
-		t.Errorf("socket_path = %q; want /run/x.sock", v)
+	if v, _ := cm.Get("service_url"); v != "https://broker.internal" {
+		t.Errorf("service_url = %q; want https://broker.internal", v)
+	}
+	if v, _ := cm.Get("auth_token"); v != "tok.session" {
+		t.Errorf("auth_token = %q; want tok.session (the per-mount token)", v)
+	}
+	if v, _ := cm.Get("ca_cert_pem"); v != "pem-bytes" {
+		t.Errorf("ca_cert_pem = %q; want pem-bytes", v)
 	}
 	if v, _ := cm.Get("filesystem_id"); v != "fs-123" {
 		t.Errorf("filesystem_id = %q; want fs-123", v)
@@ -207,8 +214,12 @@ func TestBuildOcufsConfigmap(t *testing.T) {
 	if v, _ := cm.Get("read_only"); v != "false" {
 		t.Errorf("read_only = %q; want false", v)
 	}
+	// The socket model is gone: no socket_path key must be emitted.
+	if _, ok := cm.Get("socket_path"); ok {
+		t.Error("socket_path present in configmap; want it absent under the transport model")
+	}
 
-	ro, err := buildOcufsConfigmap(m, true, "/run/x.sock")
+	ro, err := buildOcufsConfigmap(m, true, "https://broker.internal", "pem-bytes")
 	if err != nil {
 		t.Fatalf("buildOcufsConfigmap readonly: %v", err)
 	}
@@ -222,7 +233,7 @@ func TestBuildOcufsConfigmapMemoryStoreIsHardError(t *testing.T) {
 		Destination:   "/mnt/mem",
 		MemoryStoreID: ptrStr("mem-9"),
 	}
-	if _, err := buildOcufsConfigmap(m, true, "/run/x.sock"); err == nil {
+	if _, err := buildOcufsConfigmap(m, true, "https://broker.internal", "pem"); err == nil {
 		t.Fatalf("buildOcufsConfigmap with memory_store_id = nil error; want a hard error")
 	}
 }

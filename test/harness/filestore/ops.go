@@ -1,0 +1,381 @@
+// SPDX-License-Identifier: FSL-1.1-Apache-2.0
+// Copyright (c) 2025 Open Computer Use Contributors
+
+package filestore
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+// wireFile mirrors the guest's File/FilesystemFile response fields.
+type wireFile struct {
+	Path  string `json:"path,omitempty"`
+	Size  int64  `json:"size,omitempty"`
+	Mtime string `json:"mtime,omitempty"`
+	Mode  string `json:"mode,omitempty"`
+	MIME  string `json:"mime,omitempty"`
+	UUID  string `json:"uuid,omitempty"`
+}
+
+// wireDir mirrors the guest's Directory response fields.
+type wireDir struct {
+	Path  string `json:"path,omitempty"`
+	Mode  string `json:"mode,omitempty"`
+	Mtime string `json:"mtime,omitempty"`
+}
+
+// pathBody decodes the op-specific {path} field from the raw request body.
+type pathBody struct {
+	Path string `json:"path"`
+}
+
+// srcDstBody decodes the op-specific {source,destination,overwrite_existing}
+// fields, mirroring the guest's copy/move bodies.
+type srcDstBody struct {
+	Source            string `json:"source"`
+	Destination       string `json:"destination"`
+	OverwriteExisting bool   `json:"overwrite_existing"`
+}
+
+// pathFromBody decodes the {path} field from a request body.
+func pathFromBody(body commonBody) (string, error) {
+	var p pathBody
+	if err := json.Unmarshal(body.raw, &p); err != nil {
+		return "", err
+	}
+	return p.Path, nil
+}
+
+// writeMetaError maps a filesystem error from a metadata/path op to an HTTP
+// status. A missing target is 404; a traversal escape is 400; anything else is
+// a 500-class permanent error.
+func writeMetaError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		writeError(w, http.StatusNotFound, "not found")
+	case errors.Is(err, os.ErrExist):
+		writeError(w, http.StatusConflict, "already exists")
+	default:
+		writeError(w, http.StatusInternalServerError, "operation failed")
+	}
+}
+
+// handleCreateFile creates an empty file at the requested path and returns its
+// metadata.
+func (s *Server) handleCreateFile(w http.ResponseWriter, scope Scope, body commonBody) {
+	rel, err := pathFromBody(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed body")
+		return
+	}
+	abs, err := resolveUnder(scope.Root, rel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "path escapes scope")
+		return
+	}
+	if mkErr := os.MkdirAll(filepath.Dir(abs), 0o750); mkErr != nil {
+		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
+		return
+	}
+	f, err := os.OpenFile(abs, os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // G304: abs is traversal-guarded by resolveUnder, confined to the scope volume
+	if err != nil {
+		writeMetaError(w, err)
+		return
+	}
+	_ = f.Close()
+
+	size, mtime, mode, uuid, statErr := fileMeta(scope, rel, abs)
+	if statErr != nil {
+		writeMetaError(w, statErr)
+		return
+	}
+	writeJSON(w, struct {
+		File wireFile `json:"file"`
+	}{File: wireFile{Path: rel, Size: size, Mtime: mtime, Mode: mode, UUID: uuid}})
+}
+
+// handleReadFile is the unary readFile op: metadata-only, consistent with the
+// guest's current readFile (bulk bytes flow through fileDownload).
+func (s *Server) handleReadFile(w http.ResponseWriter, scope Scope, body commonBody) {
+	rel, err := pathFromBody(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed body")
+		return
+	}
+	abs, err := resolveUnder(scope.Root, rel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "path escapes scope")
+		return
+	}
+	size, mtime, mode, uuid, statErr := fileMeta(scope, rel, abs)
+	if statErr != nil {
+		writeMetaError(w, statErr)
+		return
+	}
+	writeJSON(w, struct {
+		File wireFile `json:"file"`
+	}{File: wireFile{Path: rel, Size: size, Mtime: mtime, Mode: mode, UUID: uuid}})
+}
+
+// handleReadMetadata stats the path and returns the file XOR directory arm.
+func (s *Server) handleReadMetadata(w http.ResponseWriter, scope Scope, body commonBody) {
+	rel, err := pathFromBody(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed body")
+		return
+	}
+	abs, err := resolveUnder(scope.Root, rel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "path escapes scope")
+		return
+	}
+	info, statErr := os.Stat(abs)
+	if statErr != nil {
+		writeMetaError(w, statErr)
+		return
+	}
+	resp := struct {
+		File      wireFile `json:"file"`
+		Directory wireDir  `json:"directory"`
+	}{}
+	if info.IsDir() {
+		resp.Directory = wireDir{
+			Path:  rel,
+			Mode:  info.Mode().String(),
+			Mtime: info.ModTime().UTC().Format(time.RFC3339Nano),
+		}
+	} else {
+		resp.File = wireFile{
+			Path:  rel,
+			Size:  info.Size(),
+			Mtime: info.ModTime().UTC().Format(time.RFC3339Nano),
+			Mode:  info.Mode().String(),
+			UUID:  uuidForRelPath(scope.FilesystemID, rel),
+		}
+	}
+	writeJSON(w, resp)
+}
+
+// listDirEntry mirrors the guest's union listDirectory entry.
+type listDirEntry struct {
+	File      *wireFile `json:"file,omitempty"`
+	Directory *wireDir  `json:"directory,omitempty"`
+}
+
+// handleListDirectory lists a single page of the directory at path, returning
+// the file/directory union entries.
+func (s *Server) handleListDirectory(w http.ResponseWriter, scope Scope, body commonBody) {
+	rel, err := pathFromBody(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed body")
+		return
+	}
+	abs, err := resolveUnder(scope.Root, rel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "path escapes scope")
+		return
+	}
+	entries, readErr := os.ReadDir(abs)
+	if readErr != nil {
+		writeMetaError(w, readErr)
+		return
+	}
+	out := struct {
+		Entries []listDirEntry `json:"entries"`
+	}{}
+	for _, e := range entries {
+		childRel := filepath.Join(rel, e.Name())
+		info, infoErr := e.Info()
+		if infoErr != nil {
+			continue
+		}
+		if e.IsDir() {
+			out.Entries = append(out.Entries, listDirEntry{Directory: &wireDir{
+				Path:  childRel,
+				Mode:  info.Mode().String(),
+				Mtime: info.ModTime().UTC().Format(time.RFC3339Nano),
+			}})
+			continue
+		}
+		out.Entries = append(out.Entries, listDirEntry{File: &wireFile{
+			Path:  childRel,
+			Size:  info.Size(),
+			Mtime: info.ModTime().UTC().Format(time.RFC3339Nano),
+			Mode:  info.Mode().String(),
+			UUID:  uuidForRelPath(scope.FilesystemID, childRel),
+		}})
+	}
+	writeJSON(w, out)
+}
+
+// handleMakeDirectory creates the directory at path. It is idempotent: an
+// already-present directory is a success.
+func (s *Server) handleMakeDirectory(w http.ResponseWriter, scope Scope, body commonBody) {
+	rel, err := pathFromBody(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed body")
+		return
+	}
+	abs, err := resolveUnder(scope.Root, rel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "path escapes scope")
+		return
+	}
+	if mkErr := os.MkdirAll(abs, 0o750); mkErr != nil {
+		writeMetaError(w, mkErr)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+// handleRemoveDirectory removes the directory at path.
+func (s *Server) handleRemoveDirectory(w http.ResponseWriter, scope Scope, body commonBody) {
+	rel, err := pathFromBody(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed body")
+		return
+	}
+	abs, err := resolveUnder(scope.Root, rel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "path escapes scope")
+		return
+	}
+	if rmErr := os.RemoveAll(abs); rmErr != nil {
+		writeMetaError(w, rmErr)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+// handleRemoveFile removes the file at path.
+func (s *Server) handleRemoveFile(w http.ResponseWriter, scope Scope, body commonBody) {
+	rel, err := pathFromBody(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed body")
+		return
+	}
+	abs, err := resolveUnder(scope.Root, rel)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "path escapes scope")
+		return
+	}
+	if rmErr := os.Remove(abs); rmErr != nil {
+		writeMetaError(w, rmErr)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+// srcDstFromBody decodes the {source,destination,overwrite_existing} fields.
+func srcDstFromBody(body commonBody) (srcDstBody, error) {
+	var sd srcDstBody
+	if err := json.Unmarshal(body.raw, &sd); err != nil {
+		return srcDstBody{}, err
+	}
+	return sd, nil
+}
+
+// resolveSrcDst resolves and validates the source and destination paths under
+// the scope root.
+func resolveSrcDst(scope Scope, sd srcDstBody) (srcAbs, dstAbs string, status int, msg string) {
+	srcAbs, err := resolveUnder(scope.Root, sd.Source)
+	if err != nil {
+		return "", "", http.StatusBadRequest, "source escapes scope"
+	}
+	dstAbs, err = resolveUnder(scope.Root, sd.Destination)
+	if err != nil {
+		return "", "", http.StatusBadRequest, "destination escapes scope"
+	}
+	return srcAbs, dstAbs, 0, ""
+}
+
+// handleCopyFile copies source to destination, honouring overwrite_existing.
+func (s *Server) handleCopyFile(w http.ResponseWriter, scope Scope, body commonBody) {
+	sd, err := srcDstFromBody(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed body")
+		return
+	}
+	srcAbs, dstAbs, status, msg := resolveSrcDst(scope, sd)
+	if status != 0 {
+		writeError(w, status, msg)
+		return
+	}
+	if !sd.OverwriteExisting {
+		if _, statErr := os.Stat(dstAbs); statErr == nil {
+			writeError(w, http.StatusConflict, "destination exists")
+			return
+		}
+	}
+	data, readErr := os.ReadFile(srcAbs) //nolint:gosec // G304: srcAbs is traversal-guarded by resolveSrcDst, confined to the scope volume
+	if readErr != nil {
+		writeMetaError(w, readErr)
+		return
+	}
+	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o750); mkErr != nil {
+		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
+		return
+	}
+	if wErr := os.WriteFile(dstAbs, data, 0o600); wErr != nil { //nolint:gosec // G703/G304: dstAbs is traversal-guarded by resolveSrcDst, confined to the scope volume
+		writeMetaError(w, wErr)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+// handleMoveFile moves source to destination, honouring overwrite_existing.
+func (s *Server) handleMoveFile(w http.ResponseWriter, scope Scope, body commonBody) {
+	sd, err := srcDstFromBody(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed body")
+		return
+	}
+	srcAbs, dstAbs, status, msg := resolveSrcDst(scope, sd)
+	if status != 0 {
+		writeError(w, status, msg)
+		return
+	}
+	if !sd.OverwriteExisting {
+		if _, statErr := os.Stat(dstAbs); statErr == nil {
+			writeError(w, http.StatusConflict, "destination exists")
+			return
+		}
+	}
+	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o750); mkErr != nil {
+		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
+		return
+	}
+	if rErr := os.Rename(srcAbs, dstAbs); rErr != nil {
+		writeMetaError(w, rErr)
+		return
+	}
+	writeJSON(w, struct{}{})
+}
+
+// handleMoveDirectory moves the directory at source to destination.
+func (s *Server) handleMoveDirectory(w http.ResponseWriter, scope Scope, body commonBody) {
+	sd, err := srcDstFromBody(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "malformed body")
+		return
+	}
+	srcAbs, dstAbs, status, msg := resolveSrcDst(scope, sd)
+	if status != 0 {
+		writeError(w, status, msg)
+		return
+	}
+	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o750); mkErr != nil {
+		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
+		return
+	}
+	if rErr := os.Rename(srcAbs, dstAbs); rErr != nil {
+		writeMetaError(w, rErr)
+		return
+	}
+	writeJSON(w, struct{}{})
+}

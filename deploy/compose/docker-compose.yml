@@ -1,287 +1,259 @@
 # SPDX-License-Identifier: FSL-1.1-Apache-2.0
 # Copyright (c) 2025 Open Computer Use Contributors
 #
-# Compose harness for the real end-to-end exercise. Two real broker instances
-# (one per filesystem scope — the broker binds exactly one session socket per
-# filesystem_id, named <filesystem_id>.sock under its session socket
-# directory) share a socket volume with the mount service: each broker creates
-# its socket, the mount derives the per-mount socket from the shared directory
-# (--broker-socket-dir) and dials it. The mount service gets ONLY the socket
-# volume, a read-only guest config, and the workspace bind for the runner — no
-# network path to any object store, no credential env, no second transport
-# (SEC-25). Every service runs with no network stack at all; the unix sockets
-# on the shared volume are the sole channel. Real /dev/fuse needs a Linux
-# kernel; run this under Lima locally (see ../../docs/e2e-local.md).
+# Network-topology compose harness for the real end-to-end exercise. The guest
+# mount dials its HTTPS service_url OUTBOUND to the storage egress edge; the edge
+# validates the weak session JWT, strips it, exchanges it for the real filestore
+# credential keyed on filesystem_id, injects that credential, and routes to the
+# REST filestore. The control-plane mints the weak JWTs and publishes the JWKS;
+# the exchange peer performs the RFC-8693 trade.
+#
+# THE ENVOY-ONLY-HOP INVARIANT (load-bearing): two networks split the graph. The
+# mount-facing network carries the mount, the test-runner, the conformance-runner
+# and the edge; the edge-backend network carries the edge, the filestore, the
+# control-plane and the exchange. The filestore (and control-plane and exchange)
+# sit on edge-backend ONLY, so the guest container has no L3 route to them — the
+# edge is the only reachable storage hop. This deliberately relaxes the old
+# network_mode:none guarantee; confidentiality now rests on TLS-at-edge + the
+# filestore's scope-validation (foreign-scope 403) + this single-hop property,
+# which test/e2e/envoy_only_hop_test.go ASSERTS rather than assumes.
+#
+# Real /dev/fuse needs a Linux kernel; run this under Lima locally (see
+# ../../docs/e2e-local.md). The guest holds no backend credential: the per-mount
+# auth_token is a weak session JWT the control-plane mints; the real filestore
+# credential never reaches the guest (it lives only between the edge and the
+# filestore, post-exchange).
 
-# Both broker services build the same image from the clone-at-ref builder
-# (broker.Dockerfile): the sibling PUBLIC broker repo pinned at BROKER_REF
-# (default v0.1.0-rc.4, a fully-signed broker release tag with the per-directory
-# socket-dir flock removed so the four broker scopes (fsrw/fsro/fsthrottle/
-# fsconf) coexist in one shared /sock: the fileDownload data path, the
-# ops-per-second / ops-burst throttle flags this gate exercises, the
-# whole-object download fix so a no-range Open() returns the full object rather
-# than zero bytes — load-bearing for the conformance suite's cold read-backs —
-# the download engine-error fix, and the full audit fix-wave. The tag carries
-# published, cosign-signed artifacts + SBOM + SLSA provenance.) The shared image
-# name makes the later services' builds pure cache hits.
-x-broker-build: &broker-build
-  context: .
-  dockerfile: broker.Dockerfile
-  args:
-    BROKER_REF: ${BROKER_REF:-v0.1.0-rc.4}
+# Every peer/edge image builds from the one peer.Dockerfile, selecting its cmd
+# main via the CMD_PKG build arg, so the layer cache is shared across services.
+x-peer-build: &peer-build
+  context: ../..
+  dockerfile: deploy/compose/peer.Dockerfile
 
 services:
   # ---------------------------------------------------------------------------
-  # Brokers — one instance per filesystem scope. The broker requires
-  # -engine-root, -audit-sink and -broker-max-file-size or it exits before
-  # binding; -profile trusted_operator and -tenancy single-tenant are the
-  # defaults and are left implicit. The containers run uid 0 (image default)
-  # because the broker accepts a unix-socket peer only with the SAME uid, and
-  # the mount container must be root for FUSE mount(2).
-  #
-  # Workspace seeding: none. The exercise writes everything it later reads via
-  # the rw mount, so the rw workspace starts empty by design; the ro mount is
-  # only ever stat'ed and written-to-fail (the deny is the assertion), so the
-  # ro workspace stays empty too.
+  # Bringup keystone: generate the CA + per-service leaf certs, the stable
+  # control-plane signing key, the per-scope weak JWTs, and the rendered guest
+  # config into the shared volume. Runs ONCE and exits; every other service
+  # waits on its successful completion so the trust graph and the fixture exist
+  # before any peer starts.
   # ---------------------------------------------------------------------------
-  broker-rw:
-    build: *broker-build
-    image: ocu-filestored:${BROKER_REF:-v0.1.0-rc.4}
-    network_mode: "none"
+  harness-init:
+    build:
+      <<: *peer-build
+      args:
+        CMD_PKG: ./test/harness/cmd/harness-init
     command:
-      - -filesystem-id
-      - fsrw
-      - -granted-intents
-      - read,write
-      - -engine
-      - local-volume
-      - -engine-root
-      - /workspace
-      - -audit-sink
-      - /audit/audit.log
-      - -broker-max-file-size
-      - "67108864"
-      # SEC-73 is broker-resolved and default-deny: a path is downloadable
-      # (and so cold-readable / cold-listable) only when it lies UNDER an
-      # explicitly enumerated prefix on a path boundary. The bare root "/" is a
-      # sentinel that authorizes ONLY itself, not the tree beneath it, so two
-      # entries are needed: "/" makes the root directory itself listable (the
-      # parent-directory lookup the exercise's top-level mkdir triggers), and
-      # "/e2e" makes the working subtree the exercise confines its objects to
-      # cold-readable and cold-listable. The mount never enforces this and never
-      # sends a downloadable flag (the wire flag is always false); enumerating
-      # the prefixes at broker launch is the intended posture for a readable
-      # scope.
-      - -downloadable-prefixes
-      - /,/e2e
-      - -south-socket-dir
-      - /sock
+      - -out
+      - /shared
+      - -edge-host
+      - edge
+      - -edge-port
+      - "8450"
+      - -fixture-template
+      - /fixtures/guest-config.json
     volumes:
-      - broker-socket:/sock
-      - broker-rw-workspace:/workspace
-      - broker-rw-audit:/audit
+      - shared:/shared
+      - ./fixtures/guest-config.json:/fixtures/guest-config.json:ro
+    networks:
+      - edge-backend
 
-  broker-ro:
-    build: *broker-build
-    image: ocu-filestored:${BROKER_REF:-v0.1.0-rc.4}
-    network_mode: "none"
+  # ---------------------------------------------------------------------------
+  # Control-plane: mint + JWKS over TLS on :8443, edge-backend only. Signs with
+  # the stable key harness-init generated so the fixture's weak JWTs verify
+  # against the JWKS this process serves.
+  # ---------------------------------------------------------------------------
+  control-plane:
+    build:
+      <<: *peer-build
+      args:
+        CMD_PKG: ./test/harness/cmd/controlplane
     command:
-      - -filesystem-id
-      - fsro
-      - -granted-intents
-      - read
-      - -engine
-      - local-volume
-      - -engine-root
-      - /workspace
-      - -audit-sink
-      - /audit/audit.log
-      - -broker-max-file-size
-      - "67108864"
-      # The read-only mount is only ever listed at its root and written-to-fail.
-      # Enumerating the literal root "/" makes that root listing authorized so
-      # the read-only write is denied at the intent gate (surfacing EROFS/EACCES
-      # through FUSE) instead of failing at the parent-directory lookup. The
-      # sentinel root authorizes only itself, so no file content under it
-      # becomes downloadable — the ro scope stays non-egressable.
-      - -downloadable-prefixes
-      - /
-      - -south-socket-dir
-      - /sock
+      - -addr
+      - ":8443"
+      - -cert
+      - /shared/control-plane.cert.pem
+      - -key
+      - /shared/control-plane.key.pem
+      - -signing-key
+      - /shared/control-plane.signing.key.pem
+    depends_on:
+      harness-init:
+        condition: service_completed_successfully
     volumes:
-      - broker-socket:/sock
-      - broker-ro-workspace:/workspace
-      - broker-ro-audit:/audit
+      - shared:/shared:ro
+    networks:
+      - edge-backend
 
-  # A third broker scope (fsthrottle) configured with a per-second token bucket
-  # at -ops-per-second 2 / -ops-burst 2 so a SETUP mkdir (and its parent-dir
-  # list) fits inside the burst budget and succeeds, while a rapid BURST of
-  # several separate file writes drives the broker over budget and it returns
-  # resource_exhausted (deny_class throttle) on the over-budget ops. Each
-  # client-streaming fileUpload is ONE throttled op at dispatch stage 0 (not one
-  # op per chunk frame), so the over-budget pressure comes from issuing many
-  # SEPARATE write ops in well under a second, not from a single chunked file.
-  # The value is the smallest burst that lets the one-mkdir-plus-list setup pass
-  # while still being exceeded by a 6-write burst: a burst of 1 would throttle
-  # the setup mkdir itself (which VFS does NOT retry, surfacing EIO), and a
-  # larger burst would swallow the whole 6-write burst without ever throttling.
-  # The flags are per broker process and channel-scope (stage-0 token bucket),
-  # so a dedicated broker is the clean way to throttle exactly one scope without
-  # starving the rw/ro exercise. Everything else mirrors broker-rw: same image,
-  # read,write intents, local-volume engine rooted at /workspace, audit sink,
-  # the file-size ceiling, and the SEC-73 downloadable prefixes (/ for the root
-  # listing, /e2e for the working subtree). It shares the broker-socket volume
-  # so the mount derives and dials fsthrottle.sock.
-  broker-throttle:
-    build: *broker-build
-    image: ocu-filestored:${BROKER_REF:-v0.1.0-rc.4}
-    network_mode: "none"
+  # ---------------------------------------------------------------------------
+  # Exchange: RFC-8693 token endpoint + credential JWKS over TLS on :8447,
+  # edge-backend only. Validates the weak JWT against the control-plane JWKS and
+  # issues the real filestore credential as a second JWT bound to the scope.
+  # ---------------------------------------------------------------------------
+  exchange:
+    build:
+      <<: *peer-build
+      args:
+        CMD_PKG: ./test/harness/cmd/exchange
     command:
-      - -filesystem-id
-      - fsthrottle
-      - -granted-intents
-      - read,write
-      - -engine
-      - local-volume
-      - -engine-root
-      - /workspace
-      - -audit-sink
-      - /audit/audit.log
-      - -broker-max-file-size
-      - "67108864"
-      - -downloadable-prefixes
-      - /,/e2e
-      - -south-socket-dir
-      - /sock
-      # SEC-46 throttling is broker-side: a two-token-per-second bucket with a
-      # burst of two. The single setup mkdir (plus its parent-dir list) fits the
-      # burst budget and succeeds; a rapid burst of several separate write ops in
-      # the same second then exhausts the bucket and the broker returns
-      # resource_exhausted on the over-budget ops. The guest pacer retries with
-      # backoff and every write still lands byte-identical (SC2 no-data-loss).
-      - -ops-per-second
-      - "2"
-      - -ops-burst
-      - "2"
+      - -addr
+      - ":8447"
+      - -cert
+      - /shared/exchange.cert.pem
+      - -key
+      - /shared/exchange.key.pem
+      - -ca
+      - /shared/ca.pem
+      - -control-plane-jwks
+      - https://control-plane:8443/.well-known/jwks.json
+    depends_on:
+      harness-init:
+        condition: service_completed_successfully
+      control-plane:
+        condition: service_started
     volumes:
-      - broker-socket:/sock
-      - broker-throttle-workspace:/workspace
-      - broker-throttle-audit:/audit
+      - shared:/shared:ro
+    networks:
+      - edge-backend
 
-  # A fourth broker scope (fsconf) dedicated to the rclone standard backend
-  # conformance suite (fstests.Run), kept separate from the rw/ro/throttle
-  # exercise scopes so the conformance round-trips never perturb them. It
-  # mirrors broker-rw: read,write intents, local-volume engine, audit sink,
-  # file-size ceiling, and the SEC-73 downloadable prefixes (/ for the root
-  # listing, /e2e for the working subtree). The conformance suite roots itself
-  # under /e2e: the conformance-runner creates /e2e THROUGH the broker (a real
-  # makeDirectory op) at bootstrap, then fstests writes /e2e/rclone-test-<random>
-  # beneath it. Downloadable-prefix matching is segment-boundary, so /e2e matches
-  # every child segment under it and the suite's cold read-backs are authorized
-  # (SEC-73). It shares the broker-socket volume so the runner dials fsconf.sock.
-  broker-conformance:
-    build: *broker-build
-    image: ocu-filestored:${BROKER_REF:-v0.1.0-rc.4}
-    network_mode: "none"
+  # ---------------------------------------------------------------------------
+  # REST filestore: four local-volume scopes over TLS on :8444, edge-backend
+  # ONLY (NOT mount-facing — the single-hop invariant). Validates the injected
+  # post-exchange credential against the exchange's credential JWKS. The
+  # fsthrottle scope carries the per-op token bucket (SC2). Objects are stored
+  # FLAT under each scope root, so the broker-persistence assertions map the
+  # mount-relative path 1:1.
+  # ---------------------------------------------------------------------------
+  filestore:
+    build:
+      <<: *peer-build
+      args:
+        CMD_PKG: ./test/harness/cmd/filestored
     command:
-      - -filesystem-id
-      - fsconf
-      - -granted-intents
-      - read,write
-      - -engine
-      - local-volume
-      - -engine-root
+      - -addr
+      - ":8444"
+      - -cert
+      - /shared/filestore.cert.pem
+      - -key
+      - /shared/filestore.key.pem
+      - -ca
+      - /shared/ca.pem
+      - -credential-jwks
+      - https://exchange:8447/credential-jwks
+      - -root
       - /workspace
-      - -audit-sink
-      - /audit/audit.log
-      - -broker-max-file-size
-      - "67108864"
-      - -downloadable-prefixes
-      - /,/e2e
-      - -south-socket-dir
-      - /sock
+    depends_on:
+      harness-init:
+        condition: service_completed_successfully
+      exchange:
+        condition: service_started
     volumes:
-      - broker-socket:/sock
-      - broker-conformance-workspace:/workspace
-      - broker-conformance-audit:/audit
+      - shared:/shared:ro
+      - filestore-workspace:/workspace
+    networks:
+      - edge-backend
 
+  # ---------------------------------------------------------------------------
+  # Live storage egress edge: validate -> strip -> keyed exchange -> inject ->
+  # route, over TLS on :8450. On BOTH networks — the guest dials it inbound on
+  # mount-facing, and it dials the peers on edge-backend. This dual membership
+  # is what makes the edge the only hop.
+  # ---------------------------------------------------------------------------
+  edge:
+    build:
+      <<: *peer-build
+      args:
+        CMD_PKG: ./test/harness/cmd/edge
+    command:
+      - -addr
+      - ":8450"
+      - -cert
+      - /shared/edge.cert.pem
+      - -key
+      - /shared/edge.key.pem
+      - -ca
+      - /shared/ca.pem
+      - -control-plane-jwks
+      - https://control-plane:8443/.well-known/jwks.json
+      - -exchange-url
+      - https://exchange:8447/token
+      - -upstream-url
+      - https://filestore:8444
+    depends_on:
+      harness-init:
+        condition: service_completed_successfully
+      control-plane:
+        condition: service_started
+      exchange:
+        condition: service_started
+      filestore:
+        condition: service_started
+    volumes:
+      - shared:/shared:ro
+    networks:
+      - mount-facing
+      - edge-backend
+
+  # ---------------------------------------------------------------------------
+  # The guest mount. Unlike the old graph it has a REAL network stack: it is on
+  # the mount-facing network ONLY and dials its HTTPS service_url (the edge)
+  # outbound. No edge-backend membership, so no direct route to the filestore.
+  # FUSE needs the device node and the mount capability; the rshared bind
+  # propagates the mounts out to the host path and into the runner.
+  # ---------------------------------------------------------------------------
   mount:
-    # Built from the repo-root Dockerfile (the static mount image).
     build:
       context: ../..
       dockerfile: Dockerfile
     depends_on:
-      - broker-rw
-      - broker-ro
-      - broker-throttle
-    # FUSE needs the device node and the mount capability from the host. No
-    # other capabilities, no privileged: true.
+      harness-init:
+        condition: service_completed_successfully
+      edge:
+        condition: service_started
     devices:
       - /dev/fuse
     cap_add:
       - SYS_ADMIN
-    # FUSE's mount(2) needs the AppArmor mount restriction lifted:
-    # CAP_SYS_ADMIN alone is insufficient under the default container
-    # AppArmor profile, which denies the mount syscall outright. A tailored
-    # profile allowing 'mount fstype=fuse.*' is the stricter alternative.
-    # Only this service mounts; the brokers stay confined.
+    # FUSE's mount(2) needs the AppArmor mount restriction lifted: CAP_SYS_ADMIN
+    # alone is insufficient under the default container AppArmor profile. Only
+    # this service mounts.
     security_opt:
       - apparmor=unconfined
-    # SEC-25 made structural: the mount container has NO network stack at all —
-    # not merely no route to an object store. The broker unix sockets on the
-    # shared volume are the sole channel; a unix socket needs no network.
-    network_mode: "none"
     # Shared (host) PID namespace, mirrored by the test-runner: the runner
     # signals the REAL mount process for the graceful-teardown step and must
-    # survive that process's exit to finish its assertions. Joining the mount
-    # container's own namespace (pid: "service:mount") cannot work: the mount
-    # binary is that namespace's init, and when it exits on SIGTERM the kernel
-    # kills every process in the namespace — the runner would die before the
-    # teardown assertions run. The host namespace is the shared namespace that
-    # survives. Harness-only posture; the production guest does not share a
-    # PID namespace with anything.
+    # survive that process's exit to finish its assertions.
     pid: "host"
-    # SEC-25: ONLY the read-only guest config, the shared socket volume, the
-    # ready-file volume and the workspace bind cross into the mount container.
-    # No object-store network alias, no credential env, no second transport.
+    networks:
+      - mount-facing
     volumes:
-      - ./fixtures/guest-config.json:/etc/ocu/guest-config.json:ro
-      - broker-socket:/sock
+      # The rendered guest config from harness-init (service_url -> edge,
+      # auth_token -> weak JWT, ca_cert_pem -> the CA the edge leaf chains to).
+      - shared:/shared:ro
       - mount-shared:/run/ocu
       # The mount destinations are a host BIND with rshared propagation so the
-      # FUSE mounts the entrypoint creates INSIDE this container propagate out
-      # to the host path and from there into the test-runner's rslave bind —
-      # a named volume does not propagate mounts created after container
-      # start. Create out/ and in/ under this path on the Docker host before
-      # `up` (see docs/e2e-local.md).
+      # FUSE mounts created INSIDE this container propagate out to the host path
+      # and from there into the test-runner's rslave bind. The canonical mount
+      # root is /mnt/user-data; create outputs/ uploads/ outputs2/ throttle/
+      # under the host path before `up` (see docs/e2e-local.md).
       - type: bind
-        source: /tmp/ocu-e2e-workspace
-        target: /workspace
+        source: /tmp/ocu-e2e-mountroot
+        target: /mnt/user-data
         bind:
           propagation: rshared
-    # The shipped entrypoint contract: --config (required), --broker-socket-dir
-    # (each mount derives <filesystem_id>.sock in it: fsrw.sock / fsro.sock on
-    # the shared socket volume), --ready-file (created once all mounts are up).
+    # The shipped entrypoint contract: --config (required), --ready-file. No
+    # socket flags (removed in the HTTPS/REST pivot); the transport flows in the
+    # config.
     command:
       - --config
-      - /etc/ocu/guest-config.json
-      - --broker-socket-dir
-      - /sock
+      - /shared/guest-config.json
       - --ready-file
       - /run/ocu/mount-ready
-    # Readiness is the ready-file at /run/ocu/mount-ready: the entrypoint
-    # creates it once every mount is up and removes it on teardown. The minimal
-    # runtime image has no shell, so readiness is observed from the SHARED
-    # VOLUME (the e2e runner polls that file before starting the exercise).
 
   # ---------------------------------------------------------------------------
-  # Test runner — the live e2e gate (profile "test": started explicitly via
-  # `docker compose run --rm test-runner`, never by a plain `up`). It runs the
-  # gated exercise binary against the FUSE mountpoints, which exist only where
-  # the mount service's rshared bind propagates them. The runner shares the
-  # HOST PID namespace with the mount service so the graceful-teardown step
-  # signals the real mount process and the runner survives that process's
-  # exit (see the pid note on the mount service).
+  # Test runner — the live e2e gate (profile "test"). Runs the gated exercise
+  # against the FUSE mountpoints. On mount-facing ONLY (it drives FUSE and needs
+  # no peer access). Mounts the filestore scope volume READ-ONLY for the
+  # broker-persistence assertions; objects are stored flat under each scope root.
   # ---------------------------------------------------------------------------
   test-runner:
     profiles: ["test"]
@@ -289,80 +261,50 @@ services:
       context: ../..
       dockerfile: deploy/compose/runner.Dockerfile
     depends_on:
-      - mount
-    network_mode: "none"
+      mount:
+        condition: service_started
     pid: "host"
-    # The graceful-teardown step (step 10) signals the real mount process,
-    # which runs under apparmor=unconfined (mount(2) needs it). Under the
-    # default docker profile the runner's signal to an unconfined peer is
-    # denied (apparmor "DENIED" operation="signal"), so SIGTERM never reaches
-    # the mount and the teardown assertions cannot run. Lifting the runner's
-    # profile lets the signal through. A tailored profile allowing
-    # 'signal peer=unconfined' is the stricter alternative; only the runner
-    # and the mount carry this, the brokers stay confined.
+    networks:
+      - mount-facing
+    # The graceful-teardown step signals the real mount process, which runs
+    # under apparmor=unconfined; lifting the runner's profile lets the signal
+    # through.
     security_opt:
       - apparmor=unconfined
     environment:
-      # The live gate: the exercise runs for real in this service.
       RCLONE_OCUFS_LIVE: "1"
-      OCU_E2E_RW_MOUNT: /workspace/out
-      OCU_E2E_RO_MOUNT: /workspace/in
+      OCU_E2E_RW_MOUNT: /mnt/user-data/outputs
+      OCU_E2E_RO_MOUNT: /mnt/user-data/uploads
       OCU_E2E_READY_FILE: /run/ocu/mount-ready
-      # A SECOND rw mount of the SAME scope (fsrw) at a distinct destination.
-      # The orchestrator builds an independent VFS cache per mount entry, so
-      # this mount never holds the object the cold-read step writes through the
-      # first mount: a read here must traverse the broker fileDownload path, not
-      # a warm write-back cache. That is the load-bearing proof of the read data
-      # path (stronger than poking vfs/forget).
-      OCU_E2E_RW_MOUNT2: /workspace/out2
-      # A THIRD rw mount on the throttled scope (fsthrottle). A burst of separate
-      # write ops here drives the broker's two-per-second bucket over budget; the
-      # throttled writes must still land byte-identical (SC2 no-data-loss).
-      OCU_E2E_THROTTLE_MOUNT: /workspace/throttle
-      # The broker-rw engine-root SCOPE directory, mounted read-only below. The
-      # local-volume engine nests each filesystem's objects under a
-      # <filesystem_id>/ subdirectory of the engine root, so the rw scope (fsrw)
-      # lands at /broker-rw-workspace/fsrw. The write steps hash the bytes the
-      # broker actually persisted here (not the FUSE read-back, which the local
-      # cache can serve), so the gate proves the broker data path, not the cache.
-      OCU_E2E_BROKER_RW_WORKSPACE: /broker-rw-workspace/fsrw
-      # The broker-throttle engine-root SCOPE directory, mounted read-only
-      # below. As with the rw scope, the local-volume engine nests the scope's
-      # objects under a <filesystem_id>/ subdirectory of the engine root, so the
-      # fsthrottle scope lands at /broker-throttle-workspace/fsthrottle. The SC2
-      # throttle step hashes the bytes the broker actually persisted here after
-      # the pacer's retries, proving the throttled write landed without loss.
-      OCU_E2E_BROKER_THROTTLE_WORKSPACE: /broker-throttle-workspace/fsthrottle
-      # OCU_E2E_MOUNT_PID is resolved by the command below from the shared
-      # (host) PID namespace, not hardcoded here.
-      #
-      # Throttle: SEC-46 throttling is broker-side; the guest never simulates
-      # it. The broker drives it via daemon flags (-ops-per-second / -ops-burst
-      # on broker-throttle), needing no coordination file — so the old
-      # OCU_E2E_THROTTLE_FILE affordance is retired. The SC2 step now bursts ops
-      # against the throttle mount and asserts the retried write lands
-      # byte-identical broker-side; it stays FAIL-CLOSED on a missing throttle
-      # mount/workspace unless the operator explicitly opts into a partial run
-      # with OCU_E2E_ALLOW_PARTIAL=1. Do not cut a release on a partial run.
+      # A SECOND rw mount of the SAME scope (fsrw): its independent VFS cache is
+      # cold, so a read there proves the broker fileDownload path (cold-read).
+      OCU_E2E_RW_MOUNT2: /mnt/user-data/outputs2
+      # The throttled scope (fsthrottle): a burst drives the filestore's per-op
+      # bucket over budget; refused ops surface as EIO and recover on backoff.
+      OCU_E2E_THROTTLE_MOUNT: /mnt/user-data/throttle
+      # The filestore scope dirs, mounted read-only below. Objects are FLAT
+      # under each scope root (no <fsid>/ nesting), so the mount-relative path
+      # maps 1:1 — NO /fsrw suffix.
+      OCU_E2E_BROKER_RW_WORKSPACE: /filestore-workspace/fsrw
+      OCU_E2E_BROKER_THROTTLE_WORKSPACE: /filestore-workspace/fsthrottle
+      # The Envoy-only-hop assertion targets: the edge-backend peers must be
+      # UNREACHABLE from mount-facing, the edge REACHABLE.
+      OCU_E2E_FILESTORE_ADDR: filestore:8444
+      OCU_E2E_CONTROL_PLANE_ADDR: control-plane:8443
+      OCU_E2E_EXCHANGE_ADDR: exchange:8447
+      OCU_E2E_EDGE_ADDR: edge:8450
       OCU_E2E_ALLOW_PARTIAL: ${OCU_E2E_ALLOW_PARTIAL:-}
     volumes:
       - mount-shared:/run/ocu
-      # rslave: receive the FUSE mounts the mount service propagates out
-      # through its rshared bind; never propagate anything back.
       - type: bind
-        source: /tmp/ocu-e2e-workspace
-        target: /workspace
+        source: /tmp/ocu-e2e-mountroot
+        target: /mnt/user-data
         bind:
           propagation: rslave
-      # The broker-rw engine-root workspace, READ-ONLY: the write steps hash
-      # the bytes the broker actually persisted here to prove the upload
-      # reached the broker, not just the local VFS cache (BL-G5 de-vacuum).
-      # Read-only so the assertion can never itself write the bytes it checks.
-      - broker-rw-workspace:/broker-rw-workspace:ro
-      # The broker-throttle engine-root workspace, READ-ONLY: the SC2 throttle
-      # step hashes the bytes the throttled broker persisted here after the
-      # pacer's retries to prove no data loss. Read-only for the same reason.
-      - broker-throttle-workspace:/broker-throttle-workspace:ro
+      # The filestore engine-root workspace, READ-ONLY: the write/throttle steps
+      # hash the bytes the filestore actually persisted to prove the upload
+      # reached the backend, not just the local VFS cache.
+      - filestore-workspace:/filestore-workspace:ro
     command:
       - sh
       - -c
@@ -382,87 +324,66 @@ services:
           exit 1
         fi
         export OCU_E2E_MOUNT_PID
+        /e2e.test -test.v -test.run '^TestEnvoyOnlyHop$$' -test.count=1 || exit 1
         exec /e2e.test -test.v -test.run '^TestE2EExercise$$' -test.count=1
 
   # ---------------------------------------------------------------------------
-  # Conformance runner — the rclone standard backend test suite (fstests.Run
-  # via TestFstestsLiveBroker) run DIRECTLY against the dedicated broker-conformance
-  # session socket through its own ocufs remote. profile "test": started explicitly
-  # via `docker compose run --rm conformance-runner`, never by a plain `up`.
-  #
-  # SEPARATION from the e2e test-runner: a distinct image (conformance.Dockerfile
-  # → /conformance.test), a distinct env var (OCU_FSTESTS_REMOTE, a remote NAME),
-  # a distinct broker scope (fsconf), and a distinct, UNPRIVILEGED process (no
-  # pid:host, no apparmor=unconfined — it never signals the mount and never joins
-  # the FUSE mountpoint). It shares no env var and no binary with the exercise
-  # runner, so the remote-name and the exercise runner's RCLONE_OCUFS_LIVE boolean
-  # can never collide.
-  #
-  # COLD-READ GUARANTEE (structural): this binary constructs its own *Fs that
-  # dials /sock/fsconf.sock directly. It does not mount the FUSE share and has no
-  # rclone VFS cache on its path, so every fstests write→read-back traverses the
-  # broker fileDownload path by construction — there is no warm cache to defeat.
-  # It depends only on broker-conformance, not on the mount service.
-  #
-  # The test itself creates the /e2e working prefix THROUGH the broker (a
-  # makeDirectory op, idempotent) before fstests.Run, so the suite's
-  # /e2e/rclone-test-<random> root finds its parent and /e2e segment-matches the
-  # downloadable prefix for the cold read-backs. No disk seeding — the broker owns
-  # the namespace.
+  # Conformance runner — the rclone standard backend suite (TestFstestsLiveBroker)
+  # run THROUGH the edge for full-path parity (profile "test"). It renders its
+  # ocufs remote at bringup via conformance-bootstrap (service_url + minted
+  # fsconf weak JWT + CA PEM), then runs the suite. On mount-facing so it reaches
+  # the edge; it never touches the FUSE mount (its own *Fs dials the edge), so
+  # every write/read-back is broker-cold by construction.
+  # ---------------------------------------------------------------------------
   conformance-runner:
     profiles: ["test"]
     build:
       context: ../..
       dockerfile: deploy/compose/conformance.Dockerfile
     depends_on:
-      - broker-conformance
-    network_mode: "none"
+      harness-init:
+        condition: service_completed_successfully
+      edge:
+        condition: service_started
+    networks:
+      - mount-facing
     environment:
-      # A remote NAME rooted under the broker's downloadable /e2e prefix, NOT a
-      # boolean. The conformance test creates /e2e through the broker at bootstrap;
-      # fstests then writes /e2e/rclone-test-<random> beneath it, and /e2e
-      # segment-matches those children so the cold reads/lists are downloadable
-      # (SEC-73). Read only by TestFstestsLiveBroker; never shared with the
-      # exercise runner's RCLONE_OCUFS_LIVE boolean.
+      # A remote NAME (fsconf) rooted under /e2e; the suite creates /e2e through
+      # the edge at bootstrap and writes beneath it. Distinct from the exercise
+      # runner's RCLONE_OCUFS_LIVE boolean. RCLONE_CONFIG is deliberately UNSET:
+      # the remote is configured via RCLONE_CONFIG_FSCONF_* env overrides the
+      # bootstrap emits (so the multi-line CA PEM survives — rclone's file parser
+      # does not round-trip a bare multi-line value, but the env overrides do).
       OCU_FSTESTS_REMOTE: "fsconf:e2e"
-      # Point rclone at the ocufs remote definition (type/socket_path/
-      # filesystem_id/read_only) for the conformance run.
-      RCLONE_CONFIG: /etc/ocu/conformance-rclone.conf
     volumes:
-      # The session-socket directory the brokers create their <filesystem_id>.sock
-      # in. The conformance remote dials the socket FILE /sock/fsconf.sock directly
-      # — this is the sole channel (SEC-25 holds; the service stays network_mode
-      # none, no second transport, no credential).
-      - broker-socket:/sock
-      - ./fixtures/conformance-rclone.conf:/etc/ocu/conformance-rclone.conf:ro
+      - shared:/shared:ro
     command:
       - sh
       - -c
       - |
-        i=0
-        while [ ! -S /sock/fsconf.sock ]; do
-          i=$$((i+1))
-          if [ "$$i" -gt 120 ]; then
-            echo "broker-conformance socket /sock/fsconf.sock never appeared within 120s" >&2
-            exit 1
-          fi
-          sleep 1
-        done
+        /conformance-bootstrap \
+          -remote fsconf \
+          -out /tmp/conformance-env.sh \
+          -service-url https://edge:8450 \
+          -filesystem-id fsconf \
+          -ca /shared/ca.pem \
+          -tokens /shared/weak-tokens.json
+        . /tmp/conformance-env.sh
         exec /conformance.test -test.v -test.run '^TestFstestsLiveBroker$$' -test.count=1
 
+networks:
+  # The guest-facing network: the mount, the runners, and the edge. The
+  # filestore and its backend peers are deliberately ABSENT here.
+  mount-facing:
+  # The backend network: the edge plus the filestore, control-plane, and
+  # exchange. The guest never joins this network.
+  edge-backend:
+
 volumes:
-  # Shared session-socket directory. Each broker creates its own
-  # <filesystem_id>.sock here; the mount derives and dials them. The sole
-  # channel between the brokers and the mount.
-  broker-socket:
+  # Bringup artifacts (CA, leaf certs, signing key, weak tokens, rendered guest
+  # config) the init step writes and the peers read.
+  shared:
   # Ready-file handoff between the mount and the test runner.
   mount-shared:
-  # Per-broker engine roots (the workspace each broker serves) and audit sinks.
-  broker-rw-workspace:
-  broker-ro-workspace:
-  broker-throttle-workspace:
-  broker-conformance-workspace:
-  broker-rw-audit:
-  broker-ro-audit:
-  broker-throttle-audit:
-  broker-conformance-audit:
+  # The filestore engine root (all scopes live in subdirectories of it).
+  filestore-workspace:

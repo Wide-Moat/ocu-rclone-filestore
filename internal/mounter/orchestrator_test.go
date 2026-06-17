@@ -89,14 +89,25 @@ func (f *fakePointMounter) mountCount() int {
 	return len(f.mountCalls)
 }
 
-// socketPathByDest returns the socket path each started spec carried, keyed by
-// destination, so the per-mount socket derivation is assertable.
-func (f *fakePointMounter) socketPathByDest() map[string]string {
+// specTransport is the transport triplet each started spec carried.
+type specTransport struct {
+	serviceURL string
+	caCertPEM  string
+	authToken  string
+}
+
+// transportByDest returns the transport values each started spec carried, keyed
+// by destination, so the config→spec threading is assertable.
+func (f *fakePointMounter) transportByDest() map[string]specTransport {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := make(map[string]string, len(f.mountSpecs))
+	out := make(map[string]specTransport, len(f.mountSpecs))
 	for _, s := range f.mountSpecs {
-		out[s.mount.Destination] = s.socketPath
+		out[s.mount.Destination] = specTransport{
+			serviceURL: s.serviceURL,
+			caCertPEM:  s.caCertPEM,
+			authToken:  s.mount.AuthToken,
+		}
 	}
 	return out
 }
@@ -104,10 +115,14 @@ func (f *fakePointMounter) socketPathByDest() map[string]string {
 // writableEntry / readonlyEntry build minimal valid config mounts for the
 // orchestrator tests (the scope split is enforced by the loader; here we only
 // need fields the orchestrator threads through).
+func ptrBool(v bool) *bool { return &v }
+
 func writableEntry(dest string) mountcfg.Mount {
 	return mountcfg.Mount{
 		Destination:     dest,
+		AuthToken:       "tok-" + dest,
 		FilesystemID:    ptrStr("fs-" + dest),
+		Readonly:        ptrBool(false),
 		VfsCacheMode:    "writes",
 		CacheDurationS:  ptrInt(60),
 		VfsCacheMaxSize: "0",
@@ -118,6 +133,7 @@ func writableEntry(dest string) mountcfg.Mount {
 
 func readonlyEntry(dest string) mountcfg.Mount {
 	m := writableEntry(dest)
+	m.Readonly = ptrBool(true)
 	return m
 }
 
@@ -127,15 +143,15 @@ func TestOrchestratorFanOutAndSignalTeardown(t *testing.T) {
 	readyFile := filepath.Join(t.TempDir(), "ready")
 
 	cfg := &mountcfg.Config{
-		Mounts:         []mountcfg.Mount{writableEntry("/mnt/w")},
-		ReadonlyMounts: []mountcfg.Mount{readonlyEntry("/mnt/r")},
+		Mounts: []mountcfg.Mount{writableEntry("/mnt/w"), readonlyEntry("/mnt/r")},
 	}
 
 	o := &orchestrator{
-		seam:             fake,
-		readiness:        ReadinessConfig{ReadyFilePath: readyFile},
-		signals:          sig,
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		readiness:  ReadinessConfig{ReadyFilePath: readyFile},
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 
 	done := make(chan error, 1)
@@ -175,10 +191,11 @@ func TestOrchestratorFailFastSecondPoint(t *testing.T) {
 	}
 
 	o := &orchestrator{
-		seam:             fake,
-		readiness:        ReadinessConfig{ReadyFilePath: readyFile},
-		signals:          sig,
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		readiness:  ReadinessConfig{ReadyFilePath: readyFile},
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 
 	err := o.run(context.Background(), cfg)
@@ -208,10 +225,11 @@ func TestOrchestratorReadinessOrdering(t *testing.T) {
 	}
 
 	o := &orchestrator{
-		seam:             fake,
-		readiness:        ReadinessConfig{ReadyFilePath: readyFile},
-		signals:          sig,
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		readiness:  ReadinessConfig{ReadyFilePath: readyFile},
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 
 	done := make(chan error, 1)
@@ -244,9 +262,10 @@ func TestOrchestratorSpontaneousPointError(t *testing.T) {
 	}
 
 	o := &orchestrator{
-		seam:             fake,
-		signals:          sig,
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 
 	done := make(chan error, 1)
@@ -294,10 +313,11 @@ func TestOrchestratorSignalDuringFanOut(t *testing.T) {
 	}
 
 	o := &orchestrator{
-		seam:             fake,
-		readiness:        ReadinessConfig{ReadyFilePath: readyFile},
-		signals:          sig,
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		readiness:  ReadinessConfig{ReadyFilePath: readyFile},
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 
 	err := o.run(context.Background(), cfg)
@@ -318,16 +338,17 @@ func TestOrchestratorSignalDuringFanOut(t *testing.T) {
 func TestOrchestratorMemoryStoreHardError(t *testing.T) {
 	fake := newFake()
 	cfg := &mountcfg.Config{
-		Mounts: []mountcfg.Mount{},
-		ReadonlyMounts: []mountcfg.Mount{{
+		Mounts: []mountcfg.Mount{{
 			Destination:   "/mnt/mem",
 			MemoryStoreID: ptrStr("mem-1"),
+			Readonly:      ptrBool(true),
 		}},
 	}
 	o := &orchestrator{
-		seam:             fake,
-		signals:          make(chan os.Signal, 1),
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		signals:    make(chan os.Signal, 1),
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 	err := o.run(context.Background(), cfg)
 	if err == nil {
@@ -343,10 +364,11 @@ func TestOrchestratorZeroMounts(t *testing.T) {
 	readyFile := filepath.Join(t.TempDir(), "ready")
 	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{}}
 	o := &orchestrator{
-		seam:             fake,
-		readiness:        ReadinessConfig{ReadyFilePath: readyFile},
-		signals:          make(chan os.Signal, 1),
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		readiness:  ReadinessConfig{ReadyFilePath: readyFile},
+		signals:    make(chan os.Signal, 1),
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 	if err := o.run(context.Background(), cfg); err != nil {
 		t.Fatalf("run = %v; want nil for zero mounts", err)
@@ -359,46 +381,27 @@ func TestOrchestratorZeroMounts(t *testing.T) {
 	}
 }
 
-func TestOrchestratorEmptyBrokerSocketIsHardError(t *testing.T) {
-	fake := newFake()
-	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{writableEntry("/mnt/w")}}
-	o := &orchestrator{
-		seam:             fake,
-		signals:          make(chan os.Signal, 1),
-		brokerSocketPath: "",
-	}
-	err := o.run(context.Background(), cfg)
-	if err == nil {
-		t.Fatal("run = nil; want a hard error for an empty broker socket path")
-	}
-	if fake.mountCount() != 0 {
-		t.Errorf("mountCount = %d; want 0 (no spec started)", fake.mountCount())
-	}
-}
-
-// TestOrchestratorSocketDirDerivesPerMountSocket asserts the socket-dir mode:
-// with brokerSocketDirPath set, every spec derives its own socket path as
-// <dir>/<filesystem_id>.sock — the broker provisions exactly one session socket
-// per filesystem scope under that directory, so a multi-filesystem config dials
-// one broker instance per scope instead of forcing one per-process socket onto
-// every mount.
-func TestOrchestratorSocketDirDerivesPerMountSocket(t *testing.T) {
+// TestOrchestratorThreadsTransportToSpec asserts the config→spec transport
+// threading: each started spec carries the orchestrator's top-level service_url
+// + ca_cert_pem and the per-mount auth_token from its mount. Mutation guard:
+// dropping the threading in buildSpecs leaves the captured values empty.
+func TestOrchestratorThreadsTransportToSpec(t *testing.T) {
 	fake := newFake()
 	sig := make(chan os.Signal, 1)
 
 	rw := writableEntry("/mnt/w")
-	rw.FilesystemID = ptrStr("fsrw")
+	rw.AuthToken = "tok.rw"
 	ro := readonlyEntry("/mnt/r")
-	ro.FilesystemID = ptrStr("fsro")
+	ro.AuthToken = "tok.ro"
 	cfg := &mountcfg.Config{
-		Mounts:         []mountcfg.Mount{rw},
-		ReadonlyMounts: []mountcfg.Mount{ro},
+		Mounts: []mountcfg.Mount{rw, ro},
 	}
 
 	o := &orchestrator{
-		seam:                fake,
-		signals:             sig,
-		brokerSocketDirPath: "/run/sockets",
+		seam:       fake,
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem-anchor",
 	}
 
 	done := make(chan error, 1)
@@ -412,14 +415,14 @@ func TestOrchestratorSocketDirDerivesPerMountSocket(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	want := map[string]string{
-		"/mnt/w": filepath.Join("/run/sockets", "fsrw.sock"),
-		"/mnt/r": filepath.Join("/run/sockets", "fsro.sock"),
+	want := map[string]specTransport{
+		"/mnt/w": {serviceURL: "https://broker.example", caCertPEM: "pem-anchor", authToken: "tok.rw"},
+		"/mnt/r": {serviceURL: "https://broker.example", caCertPEM: "pem-anchor", authToken: "tok.ro"},
 	}
-	got := fake.socketPathByDest()
-	for dest, wantSock := range want {
-		if got[dest] != wantSock {
-			t.Errorf("socket for %q = %q; want %q", dest, got[dest], wantSock)
+	got := fake.transportByDest()
+	for dest, wantT := range want {
+		if got[dest] != wantT {
+			t.Errorf("transport for %q = %+v; want %+v", dest, got[dest], wantT)
 		}
 	}
 
@@ -431,71 +434,6 @@ func TestOrchestratorSocketDirDerivesPerMountSocket(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("run did not return after signal")
-	}
-}
-
-// TestOrchestratorSocketPathAndDirMutuallyExclusive asserts that supplying BOTH
-// the single socket path and the socket directory is a hard error before any
-// mount starts: an ambiguous socket input must never silently pick one.
-func TestOrchestratorSocketPathAndDirMutuallyExclusive(t *testing.T) {
-	fake := newFake()
-	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{writableEntry("/mnt/w")}}
-	o := &orchestrator{
-		seam:                fake,
-		signals:             make(chan os.Signal, 1),
-		brokerSocketPath:    "/run/x.sock",
-		brokerSocketDirPath: "/run/sockets",
-	}
-	err := o.run(context.Background(), cfg)
-	if err == nil {
-		t.Fatal("run = nil; want a hard error when both socket inputs are set")
-	}
-	if !strings.Contains(err.Error(), "mutually exclusive") {
-		t.Fatalf("run error = %q; want the mutual-exclusion hard error", err.Error())
-	}
-	if fake.mountCount() != 0 {
-		t.Errorf("mountCount = %d; want 0 (no spec started)", fake.mountCount())
-	}
-}
-
-// TestNewMountSocketDirOptionReachesOrchestrator asserts the WithBrokerSocketDir
-// option threads through New().Mount: with ONLY the dir set the run proceeds
-// past both socket-input checks. The zero-mount config keeps the test off any
-// real mount; the only error a platform may surface is the fail-closed seam
-// constructor (on an unsupported platform/arch), never a socket-input error.
-func TestNewMountSocketDirOptionReachesOrchestrator(t *testing.T) {
-	err := New(WithBrokerSocketDir("/run/sockets")).Mount(&mountcfg.Config{
-		ServiceURL: "https://broker.example",
-		Mounts:     []mountcfg.Mount{},
-	})
-	if err != nil {
-		if strings.Contains(err.Error(), "broker socket path not provided") ||
-			strings.Contains(err.Error(), "mutually exclusive") {
-			t.Fatalf("New(WithBrokerSocketDir).Mount = %v; the socket check must accept dir-only input", err)
-		}
-		// Any other error is the platform seam failing closed on an unsupported
-		// platform/arch — out of scope for this option-threading assertion.
-	}
-}
-
-// TestNewMountEmptyBrokerSocketHardErrorWinsOverSeam asserts that New() with no
-// WithBrokerSocket option reaches the orchestrator's empty-broker-socket hard
-// error BEFORE the production seam is constructed (W6 error precedence). This
-// holds on every platform: on a mount2-supported host the real seam would
-// construct fine but is never reached; on an unsupported host the fail-closed
-// seam error is likewise pre-empted by the socket check. Either way the error
-// names the broker-socket gap, not a mount-method error — proving the check
-// runs first and no /dev/fuse is touched.
-func TestNewMountEmptyBrokerSocketHardErrorWinsOverSeam(t *testing.T) {
-	err := New().Mount(&mountcfg.Config{
-		ServiceURL: "https://broker.example",
-		Mounts:     []mountcfg.Mount{writableEntry("/mnt/w")},
-	})
-	if err == nil {
-		t.Fatal("New().Mount with no broker socket = nil; want the empty-broker-socket hard error")
-	}
-	if !strings.Contains(err.Error(), "broker socket path not provided") {
-		t.Fatalf("New().Mount error = %q; want the empty-broker-socket hard error to win over the seam", err.Error())
 	}
 }
 
@@ -515,10 +453,11 @@ func TestOrchestratorStaleReadyFileRemovedAndRetracted(t *testing.T) {
 
 	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{writableEntry("/mnt/w")}}
 	o := &orchestrator{
-		seam:             fake,
-		readiness:        ReadinessConfig{ReadyFilePath: readyFile},
-		signals:          sig,
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		readiness:  ReadinessConfig{ReadyFilePath: readyFile},
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 
 	done := make(chan error, 1)
@@ -558,18 +497,18 @@ func TestOrchestratorStaleReadyFileRemovedAndRetracted(t *testing.T) {
 }
 
 // TestOrchestratorDuplicateDestinationHardError is the ME-02 regression: a
-// destination repeated across mounts/readonly_mounts must be a hard error before
+// destination repeated within the mounts array must be a hard error before
 // any point starts, not a silent shadow.
 func TestOrchestratorDuplicateDestinationHardError(t *testing.T) {
 	fake := newFake()
 	cfg := &mountcfg.Config{
-		Mounts:         []mountcfg.Mount{writableEntry("/mnt/dup")},
-		ReadonlyMounts: []mountcfg.Mount{readonlyEntry("/mnt/dup")},
+		Mounts: []mountcfg.Mount{writableEntry("/mnt/dup"), readonlyEntry("/mnt/dup")},
 	}
 	o := &orchestrator{
-		seam:             fake,
-		signals:          make(chan os.Signal, 1),
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		signals:    make(chan os.Signal, 1),
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 	err := o.run(context.Background(), cfg)
 	if err == nil {
@@ -598,10 +537,11 @@ func TestOrchestratorSignalReadyFileError(t *testing.T) {
 
 	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{writableEntry("/mnt/w")}}
 	o := &orchestrator{
-		seam:             fake,
-		readiness:        ReadinessConfig{ReadyFilePath: readyFile},
-		signals:          sig,
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		readiness:  ReadinessConfig{ReadyFilePath: readyFile},
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 
 	err := o.run(context.Background(), cfg)
@@ -642,10 +582,11 @@ func TestOrchestratorStaleRemoveError(t *testing.T) {
 
 	cfg := &mountcfg.Config{Mounts: []mountcfg.Mount{writableEntry("/mnt/w")}}
 	o := &orchestrator{
-		seam:             fake,
-		readiness:        ReadinessConfig{ReadyFilePath: readyDir},
-		signals:          sig,
-		brokerSocketPath: "/run/x.sock",
+		seam:       fake,
+		readiness:  ReadinessConfig{ReadyFilePath: readyDir},
+		signals:    sig,
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
 	}
 
 	err := o.run(context.Background(), cfg)

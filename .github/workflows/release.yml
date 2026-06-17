@@ -23,22 +23,22 @@ permissions:
   contents: read
 
 jobs:
-  # The e2e gate — LIVE since wave 05-02: the compose harness brings up the
-  # real brokers (clone-at-ref, pinned BROKER_REF) and the mount with
-  # /dev/fuse + SYS_ADMIN, and the test-runner service drives the full gated
-  # exercise with RCLONE_OCUFS_LIVE set. The job fails hard when the runner
-  # host does not provide /dev/fuse (probe below): the gate then runs on a
-  # self-hosted runner or a Lima host instead (docs/ci-fuse-decision.md).
-  # NO continue-on-error and NO manual bypass anywhere in this job: a red e2e
-  # must block publish (SC3 / WARNING-A).
+  # The e2e gate — LIVE: the compose harness brings up the network-topology
+  # graph (the harness peers + the live edge) and the mount with /dev/fuse +
+  # SYS_ADMIN, and the test-runner service drives the full gated exercise with
+  # RCLONE_OCUFS_LIVE set, including the Envoy-only-hop assertion. The job fails
+  # hard when the runner host does not provide /dev/fuse (probe below): the gate
+  # then runs on a self-hosted runner or a Lima host instead
+  # (docs/ci-fuse-decision.md). NO continue-on-error and NO manual bypass
+  # anywhere in this job: a red e2e must block publish (SC3 / WARNING-A).
   #
   # Fail-closed by design: OCU_E2E_ALLOW_PARTIAL is deliberately NOT set here,
   # so every data-path proof — broker-side persistence, the cold read through a
   # second fresh mount, and the SC2 throttle retry-no-loss — must run and pass.
-  # The broker drives the SC2 throttle itself via the broker-throttle service's
-  # -ops-per-second/-ops-burst flags (no guest simulation); a missing or skipped
-  # assertion fails this job, so a release can never publish with a data-path
-  # proof silently skipped.
+  # The filestore drives the SC2 throttle via its per-op token bucket on the
+  # throttle scope (no guest simulation); a missing or skipped assertion fails
+  # this job, so a release can never publish with a data-path proof silently
+  # skipped.
   e2e:
     name: e2e gate
     runs-on: ubuntu-latest
@@ -57,15 +57,16 @@ jobs:
             exit 1
           fi
           echo "/dev/fuse present"
-      # The mount destinations are a host bind with rshared propagation (see
+      # The mount destinations are a host bind at the canonical /mnt/user-data
+      # mount root with rshared propagation (see
       # deploy/compose/docker-compose.yml); every destination subdirectory must
       # exist before the harness starts (the mount binary does not create them).
-      # out = rw scope, in = ro scope, out2 = the cold-read second mount of the
-      # rw scope, throttle = the SC2 throttle scope.
-      - name: Prepare the workspace bind
-        run: mkdir -p /tmp/ocu-e2e-workspace/out /tmp/ocu-e2e-workspace/in /tmp/ocu-e2e-workspace/out2 /tmp/ocu-e2e-workspace/throttle
-      - name: Bring up the harness (real brokers + mount)
-        run: docker compose -f deploy/compose/docker-compose.yml up --build -d broker-rw broker-ro broker-throttle broker-conformance mount
+      # outputs = rw scope, uploads = ro scope, outputs2 = the cold-read second
+      # mount of the rw scope, throttle = the SC2 throttle scope.
+      - name: Prepare the mount-root bind
+        run: mkdir -p /tmp/ocu-e2e-mountroot/outputs /tmp/ocu-e2e-mountroot/uploads /tmp/ocu-e2e-mountroot/outputs2 /tmp/ocu-e2e-mountroot/throttle
+      - name: Bring up the harness (peers + edge + mount)
+        run: docker compose -f deploy/compose/docker-compose.yml up --build -d harness-init control-plane exchange filestore edge mount
       - name: Run the live exercise (test-runner service)
         run: docker compose -f deploy/compose/docker-compose.yml run --rm --build test-runner
       - name: Run the backend conformance round-trip (conformance-runner service)

@@ -40,7 +40,7 @@
 <!--
 Describe any trust-boundary effect of this change, even if you believe there is
 none ("no boundary effect" is a valid answer). Call out anything touching the
-broker RPC client, mount options, credential handling, or the network surface.
+HTTPS/REST transport client, mount options, credential handling, or the network surface.
 If this change has a security impact that should not be public, stop and follow
 SECURITY.md (private vulnerability reporting) instead of describing it here.
 -->

@@ -9,16 +9,17 @@ building this binary. The canon wins on any conflict.
 
 ## What the binary is
 
-An rclone fork whose backend speaks the broker's file-operation RPC instead
-of any object-store protocol. It mounts one or more per-session filesystems
-into the guest tree and translates VFS operations into RPC calls. Mount
-verbs only — it serves nothing, proxies nothing, exposes no HTTP/S3 facade.
+A thin wrapper module over rclone whose backend reaches storage over
+HTTPS/REST via the egress edge instead of any object-store protocol. It mounts
+one or more per-session filesystems into the guest tree and translates VFS
+operations into file-operation requests. Mount verbs only — it serves nothing,
+proxies nothing, exposes no HTTP/S3 facade.
 
 ## Invariants (build targets)
 
 | # | Rule | Source |
 |---|---|---|
-| 1 | The guest-side mount config carries no credential: scope handle (`filesystem_id`) only; provision-side secrets never reach the guest config or environment | mount-config contract; NFR-SEC-25 |
+| 1 | The guest-side mount config carries a per-mount `auth_token` — a scoped, short-lived session JWT the guest presents at the egress hop — and the scope handle (`filesystem_id`); it carries no BACKEND/object-store key. The JWT is an edge-only assertion the Envoy edge validates and exchanges for the real storage credential, so no backend secret ever reaches the guest config or environment | mount-config contract; NFR-SEC-25 |
 | 2 | Exactly one of `filesystem_id` / `memory_store_id` is set per mount (XOR); both or neither is a hard config error | mount-config contract |
 | 3 | The backend speaks only the file-ops RPC to the broker; no direct network path to any object store, no second transport | NFR-SEC-25 / SEC-16 |
 | 4 | Guest-supplied ids in RPC calls are hints; the broker attributes by host-derived identity — the mount must not depend on its self-asserted id being trusted | NFR-SEC-43 |

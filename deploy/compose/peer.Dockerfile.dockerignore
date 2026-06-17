@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Per-Dockerfile ignore for peer.Dockerfile (BuildKit picks this over the root
+# .dockerignore for this build). The harness peer mains under test/harness MUST
+# enter this context; everything else follows the root narrowing: version
+# control, planning notes, local-only study material, docs, markdown and build
+# outputs never enter the build.
+
+.git
+.github
+.planning
+# Local-only study material (a dot-prefixed, version-control-ignored directory)
+# never belongs in the build context; matched by glob so this ignore file holds
+# no studied-source token.
+.ref*
+test/e2e
+docs
+deploy
+dist
+cover.out
+**/*.md
+Dockerfile
+.dockerignore

@@ -1,83 +1,99 @@
 <!-- SPDX-License-Identifier: FSL-1.1-Apache-2.0 -->
 <!-- Copyright (c) 2025 Open Computer Use Contributors -->
 
-# Compose harness — real end-to-end exercise
+# Compose harness — network-topology end-to-end exercise
 
-This harness brings up the mount binary against two real broker instances over
-shared per-session unix sockets, so the end-to-end exercise drives ordinary
-file operations through the FUSE mount path.
+This harness brings up the mount binary against the network-topology graph: the
+guest dials its HTTPS `service_url` outbound to a storage egress edge, and the
+edge validates the weak session JWT, strips it, exchanges it for the real
+filestore credential keyed on `filesystem_id`, injects that credential, and
+routes to the REST filestore. The end-to-end exercise drives ordinary file
+operations through the FUSE mount path across that whole chain.
+
+## The Envoy-only-hop invariant
+
+Two networks split the graph. The **mount-facing** network carries the mount,
+the runners, and the edge; the **edge-backend** network carries the edge plus
+the filestore, control-plane, and exchange. The filestore (and control-plane and
+exchange) sit on edge-backend **only**, so the guest has no direct route to
+them — the edge is the only reachable storage hop. This deliberately relaxes the
+old `network_mode: none` posture; confidentiality now rests on TLS-at-edge, the
+filestore's scope validation (foreign-scope 403), and this single-hop property,
+which `test/e2e/envoy_only_hop_test.go` asserts rather than assumes.
 
 ## Services
 
-- **broker-rw / broker-ro** — the real broker daemon (`ocu-filestored`) from
-  the sibling public repo
-  [github.com/Wide-Moat/ocu-filestore](https://github.com/Wide-Moat/ocu-filestore),
-  built by `broker.Dockerfile` via a clone-at-ref builder pinned by the
-  `BROKER_REF` build-arg (default `v0.1.0-rc.4`, a fully-signed broker release
-  tag — published cosign-signed artifacts, SBOM, and SLSA provenance — with the
-  per-directory socket-dir flock removed so multiple broker scopes coexist in
-  one shared socket directory). The broker binds exactly one
-  session socket per filesystem scope, named `<filesystem_id>.sock` under its
-  session socket directory, so the harness runs one instance per filesystem:
-  `broker-rw` serves `fsrw` with `read,write` intents; `broker-ro` serves
-  `fsro` with `read` only. Each gets its own engine-root workspace volume and
-  audit-sink volume; both run uid 0 because the broker accepts a unix-socket
-  peer only from the SAME uid and the mount container must be root for FUSE.
-  No workspace seeding: the exercise writes everything it reads via the rw
-  mount, and the ro mount is only stat'ed and written-to-fail.
-- **mount** — built from the repo-root `Dockerfile` (the static mount image).
-  It is granted `/dev/fuse` and the `SYS_ADMIN` capability (FUSE needs both),
-  the read-only guest config fixture at `fixtures/guest-config.json`, the
-  shared socket volume, and the workspace bind. It is invoked with
-  `--broker-socket-dir /sock`: each configured mount derives its own socket
-  path `<filesystem_id>.sock` in that directory (`fsrw.sock` for the rw mount,
-  `fsro.sock` for the ro mount) — matching the brokers' one-socket-per-
-  filesystem provisioning. Nothing else crosses into the container: no
-  object-store network path, no credential env, no second transport (SEC-25).
-
-- **test-runner** — the live e2e gate (profile `test`; started explicitly via
-  `docker compose run --rm test-runner`). `runner.Dockerfile` compiles the
-  gated exercise package (`test/e2e`, build tag `e2e`) into a standalone test
-  binary on a busybox base. The service presets the live gate
-  (`RCLONE_OCUFS_LIVE`) and the mountpoint/ready-file env, polls the
-  ready-file, resolves the mount process PID from the shared PID namespace,
-  and runs the exercise. It receives the FUSE mounts through an `rslave` bind
-  and shares the HOST PID namespace with the mount service: the
-  graceful-teardown step signals the real mount process, and the runner
-  survives that process's exit to finish its assertions (joining the mount
-  container's own namespace would not survive it — the mount binary is that
-  namespace's init, and its exit kills every process in the namespace).
-
-Every service runs `network_mode: "none"`: the unix sockets on the shared
-volume are the sole channel, and a unix socket needs no network stack.
+- **harness-init** — the bringup keystone (profile-less, runs once and exits).
+  Generates the local CA and a leaf serving cert per service, the stable
+  control-plane signing key, the per-scope weak session JWTs, and the rendered
+  `guest-config.json` (with `service_url` pointed at the edge, `ca_cert_pem` set
+  to the CA, and each mount's `auth_token` set to its weak JWT) into the shared
+  volume. Every other service waits on its successful completion, so the trust
+  graph and the fixture exist before any peer starts. It is idempotent: a re-run
+  leaves existing artifacts in place so the CA never rotates out from under a
+  running peer.
+- **control-plane** — mints the weak session JWTs and publishes the JWKS the
+  edge validates them against, over TLS. Signs with the stable key
+  `harness-init` generated.
+- **exchange** — the RFC-8693 token-exchange peer, over TLS. Validates the weak
+  JWT against the control-plane JWKS and issues the real filestore credential as
+  a second JWT bound to the scope; publishes that credential JWKS so the
+  filestore can verify it with no shared map.
+- **filestore** — the REST filestore peer, over TLS, on edge-backend only. Hosts
+  the `fsrw`/`fsro`/`fsthrottle`/`fsconf` scopes on local-volume roots, validates
+  the injected post-exchange credential against the exchange's credential JWKS,
+  and applies the per-op token bucket on the throttle scope (SC2).
+- **edge** — the live storage egress edge, over TLS, on both networks. Runs
+  validate → strip → keyed-exchange → inject → route for every request — the
+  live realisation of the chain the `envoy/envoy.yaml` deployment artifact
+  expresses (kept in the tree as the validated artifact; the live F harness
+  serves the equivalent chain in-repo pending real-Envoy keyed-injector
+  resolution).
+- **mount** — built from the repo-root `Dockerfile`. Granted `/dev/fuse` and
+  `SYS_ADMIN` (FUSE needs both), the rendered guest config, and the workspace
+  bind. Unlike the old graph it has a real network stack (mount-facing only) and
+  dials its `service_url` (the edge) outbound; it has no edge-backend membership,
+  so no direct route to the filestore. The guest holds no backend credential:
+  the per-mount `auth_token` is the weak JWT, and the real filestore credential
+  never reaches it (it lives only between the edge and the filestore).
+- **test-runner** — the live e2e gate (profile `test`; `docker compose run --rm
+  test-runner`). Asserts `TestEnvoyOnlyHop` (the single-hop topology) then drives
+  `TestE2EExercise`. Shares the HOST PID namespace with the mount so the
+  graceful-teardown step signals the real mount process, and receives the FUSE
+  mounts through an `rslave` bind.
+- **conformance-runner** — the rclone standard backend suite
+  (`TestFstestsLiveBroker`) run through the edge (profile `test`). Renders its
+  ocufs remote at bringup via `conformance-bootstrap` (as `RCLONE_CONFIG_*` env
+  overrides carrying the minted weak JWT and the CA PEM), then runs the suite. It
+  never touches the FUSE mount, so every write/read-back is cold by construction.
 
 ## Shared volumes
 
-- `broker-socket` (mounted at `/sock` everywhere) — each broker creates its
-  `<filesystem_id>.sock` here; the mount derives and dials them.
-- `mount-shared` (at `/run/ocu`) — carries the ready-file from the mount to
-  the test runner.
-- `broker-{rw,ro}-workspace`, `broker-{rw,ro}-audit` — per-broker engine
-  roots and audit sinks (the broker refuses to start without an engine root,
-  an audit sink and an upload ceiling).
-- `/tmp/ocu-e2e-workspace` (host bind at `/workspace`, `rshared`) — the FUSE
-  mount destinations. A bind with rshared propagation is required so the
-  mounts created inside the mount container propagate to the host and into
-  the test-runner's rslave bind; a named volume does not propagate mounts
-  created after container start. Create `out/` and `in/` under it before
-  `up` (see [`../../docs/e2e-local.md`](../../docs/e2e-local.md)).
+- `shared` (at `/shared`) — the CA, leaf certs, signing key, weak tokens, and
+  rendered guest config the init step writes and the peers read.
+- `mount-shared` (at `/run/ocu`) — carries the ready-file from the mount to the
+  test runner.
+- `filestore-workspace` — the filestore engine root; each scope lives in a
+  subdirectory of it. The runner mounts it read-only to assert the bytes the
+  filestore persisted (objects are stored flat under each scope root, so the
+  mount-relative path maps 1:1).
+- `/tmp/ocu-e2e-mountroot` (host bind at `/mnt/user-data`, `rshared`) — the FUSE
+  mount destinations under the canonical mount root. A bind with rshared
+  propagation is required so mounts created inside the mount container propagate
+  to the host and into the test-runner's rslave bind. Create `outputs/`,
+  `uploads/`, `outputs2/` and `throttle/` under it before `up` (see
+  [`../../docs/e2e-local.md`](../../docs/e2e-local.md)).
 
 ## Readiness
 
-The mount entrypoint creates the ready-file at `/run/ocu/mount-ready` once
-every mount is up and removes it on teardown. The minimal runtime image
-carries no shell, so readiness is observed from the shared volume (the e2e
-runner polls that file before starting the exercise), not via a container
-healthcheck.
+The mount entrypoint creates the ready-file at `/run/ocu/mount-ready` once every
+mount is up and removes it on teardown. The minimal runtime image carries no
+shell, so readiness is observed from the shared volume (the e2e runner polls that
+file before starting the exercise), not via a container healthcheck.
 
 ## Running it
 
 Real `/dev/fuse` needs a Linux kernel. On a non-Linux workstation, run the
 harness inside a Lima VM that provides a real kernel and the FUSE device — see
-[`../../docs/e2e-local.md`](../../docs/e2e-local.md) for the up → run →
-teardown steps.
+[`../../docs/e2e-local.md`](../../docs/e2e-local.md) for the up → run → teardown
+steps.

@@ -3,38 +3,40 @@
 
 # `internal/brokerrpc` — the broker file-operations client
 
-This is the one package in the mount that opens a socket. Every other guest
-component reaches the broker through a `Client`, and a `Client` reaches nothing
-else. It is bound at construction to a single per-session AF_UNIX socket path
-and a single `filesystem_id`, and those two values are its entire view of the
-world: no backend credential, no object-store client, no second transport, no
-fallback host (SEC-25). `New` rejects an empty socket path or empty
-`filesystem_id` rather than dialing a shared default.
+This is the one package in the mount that opens an outbound connection. Every
+other guest component reaches the broker through a `Client`, and a `Client`
+reaches nothing else. It is bound at construction to the broker's HTTPS
+`service_url`, a single `filesystem_id`, a static session JWT, and the PEM trust
+anchor for the inspecting edge (`ca_cert_pem`). Those four values are its entire
+view of the world: no backend credential, no object-store client, no second
+transport, no fallback host (SEC-25). `New` rejects an empty or non-`https://`
+`service_url`, an empty `filesystem_id`, an empty `authToken`, or an empty
+`caCertPEM` rather than dialing a shared default.
 
-The package owns the call path (unary Connect-JSON, plus the two streaming
-transports), the op→intent stamp applied to every request, and the closed-code
-error mapper that hands callers a typed Go error with a correct retry posture.
-The exhaustive wire-level map — every request and response body, the frame
-arithmetic, field-level divergences — lives in the
+The package owns the call path (unary REST-JSON, plus the multipart upload and
+chunked download transports), the op→intent stamp applied to every request, and
+the HTTP-status error mapper that hands callers a typed Go error with a correct
+retry posture. The exhaustive wire-level map — every request and response body,
+the multipart and chunk shapes, field-level divergences — lives in the
 [wire reference](./07-wire-reference.md); this document stays at the level a
 caller needs to use the client and reason about its guarantees.
 
-## The single socket
+## The single outbound connection
 
-`unixTransport` builds an `*http.Transport` whose `DialContext` ignores the
-network and address the HTTP layer hands it and always dials the per-session
-socket. There is no TLS on this path and compression is disabled. Two clients
-built from two configs dial two different sockets; nothing in the package
-reaches a shared constant. Unary requests POST to
-`/ocu.filestore.v1alpha.FilesystemService/<op>` with a placeholder
-`http://broker` host (the transport discards it) and the
-`Connect-Protocol-Version: 1` header.
+`httpsTransport` builds an `*http.Transport` whose TLS config trusts only the
+edge CA parsed from `ca_cert_pem` — never the system roots. There is no second
+transport and no fallback host. Two clients built from two configs reach two
+different `service_url`s; nothing in the package reaches a shared constant. Unary
+requests POST `application/json` to `<service_url>/v1/filestore/fs/<op>` with a
+static `Authorization: Bearer <session JWT>` header. The JWT is read once at
+construction and never refreshed: an expired token yields a clean, non-retryable
+permission error, with no re-mint and no loop.
 
 ## Op → intent
 
-There are 18 operations, each an `Op` constant whose value is the camelCase
-method name in the route path. `opIntentTable` is the single authoritative
-map from op to its authorization intent: the six read-class ops (`listDirectory`,
+There are 18 operations, each an `Op` constant whose value is the final path
+segment of the REST route. `opIntentTable` is the single authoritative map from
+op to its authorization intent: the six read-class ops (`listDirectory`,
 `readFile`, `readMetadata`, `getFileMetadata`, `listFiles`, `fileDownload`)
 resolve to `read`; the twelve mutate-class ops resolve to `write`. `IntentFor`
 reads that table and treats an op missing from it as an implementation error,
@@ -51,86 +53,77 @@ broker-minted handle, and the guest never derives scope from it.
 
 The unary methods on `Client` are thin: each stamps its op, fills the
 op-specific request fields, and runs the shared `call` helper. `call` marshals
-the request, POSTs it, and on a 2xx decodes the response; response structs
-decode tolerantly so a future broker field does not break an existing decoder.
+the request, POSTs it over HTTPS with the static Bearer header, and on a 2xx
+decodes the response; response structs decode tolerantly so a future broker
+field does not break an existing decoder.
 
-Code: `client.go` (`New`, `call`, `stamp`), `dialer.go` (`unixTransport`), `intent.go` (`opIntentTable`, `IntentFor`, `StampAuthMeta`).
+Code: `client.go` (`New`, `call`, `stamp`, `setAuthHeader`), `transport.go` (`httpsTransport`), `intent.go` (`opIntentTable`, `IntentFor`, `StampAuthMeta`).
 
 ## Deny → error, and the retry posture
 
-A non-2xx unary body or an error trailer on a stream is a `ConnectError`
-(a closed code plus a message). `MapConnectError` keys **on the Connect code**
-and turns it into one of the package's typed sentinels, which callers match with
-`errors.Is`:
+A non-2xx response is mapped by `MapHTTPStatus`, which keys **on the HTTP
+status** and turns it into one of the package's typed sentinels, which callers
+match with `errors.Is`:
 
-| Connect code | Sentinel | Retry |
+| HTTP status | Sentinel | Retry |
 | --- | --- | --- |
-| `permission_denied`, `unauthenticated` | `ErrPermissionDenied` | no |
-| `invalid_argument` | `ErrInvalidArgument` | no |
-| `not_found` | `ErrNotFound` | no |
-| `already_exists` | `ErrAlreadyExists` | no |
-| `resource_exhausted` | retryable (rclone retry error) | yes, with backoff |
-| `unavailable` | retryable (rclone retry error) | yes, with backoff |
-| `aborted` and any code not listed | `ErrPermanentOther` | no |
+| `401` (token expiry), `403` (foreign scope) | `ErrPermissionDenied` | no |
+| `400`, `422` | `ErrInvalidArgument` | no |
+| `404` | `ErrNotFound` | no |
+| `409` | `ErrAlreadyExists` | no |
+| `429` (too many requests) | retryable (rclone retry error) | yes, with backoff |
+| `503` (unavailable) | retryable (rclone retry error) | yes, with backoff |
+| any other non-2xx status | `ErrPermanentOther` | no |
 
-The default arm is deliberately permanent. `aborted` and any code outside the
-closed set fall through to no-retry, because a wrong retryable default could
-loop a write forever. Only `resource_exhausted` and `unavailable` are
-retryable — the two backpressure-class codes (SEC-46) — and the mount must
-tolerate that throttling rather than treat it as a hard failure.
+The default arm is deliberately permanent. Any status outside the mapped set
+falls through to no-retry, because a wrong retryable default could loop a write
+forever. Only `429` and `503` are retryable — the two backpressure-class
+statuses (SEC-46) — and the mount must tolerate that throttling rather than treat
+it as a hard failure.
 
-The `x-deny-reason` response header (`scope_mismatch`, `intent_denied`,
-`not_downloadable`, `lease_expired`) is informational only; it never drives the
-mapping. The code decides the posture, the header explains it. A
-`resource_exhausted` reply may carry a `Retry-After` header: when present and
-within a sane bound it becomes a retry-after deadline the upstream pacer can
-honour; a non-positive, non-finite, or absurd value is dropped so a malformed
-header degrades to "retryable, no deadline" rather than a garbage sleep.
+The `401`/`403` collapse is one-way: a token that simply expires yields the same
+clean, non-retryable EACCES as a foreign-scope denial, with no `401→unauth` /
+`403→permission` split. The response body is carried into the wrapped error
+message for diagnostics only; it never drives the mapping. A `429` reply may
+carry a `Retry-After` header: when present and within a sane bound it becomes a
+retry-after deadline the upstream pacer can honour; a non-positive, non-finite,
+or absurd value is dropped so a malformed header degrades to "retryable, no
+deadline" rather than a garbage sleep.
 
-Code: `errors.go` (`MapConnectError`, `maxRetryAfterSeconds`), `stream.go` (`ConnectError`).
+Code: `errors.go` (`MapHTTPStatus`, `maxRetryAfterSeconds`).
 
-## Streaming and pagination
+## Upload, download, and pagination
 
-Two ops are not unary, and one read shape spans multiple responses. All three
-share one rule worth stating up front: for a streaming op the **HTTP status is
-always 200**, and success or failure lives only in the `EndStreamResponse`
-trailer (frame flag `0x02`). A caller that trusts the status code instead of
-reading the trailer is reading the wrong signal. Frames are a 5-byte prefix
-(flag byte plus a big-endian length) followed by a JSON payload; `readFrame`
-caps the length it will allocate so a corrupt or desynced length field cannot
-turn 4 wire bytes into a multi-gigabyte allocation on the least-provisioned
-party in the system.
+**`Upload` (`fileUpload`).** The op is a `multipart/form-data` POST. The first
+form field, `params`, is the JSON params object (destination path,
+`declared_size_bytes` = the total source size, optional `overwrite_existing`, and
+the auth stamp); the file part streams the source bytes in ceiling-bounded reads
+so a single write stays under the message ceiling (default 256 KiB). The
+multipart body is built over a pipe so the writer and the HTTP sender run
+concurrently and the full payload is never buffered. Because the body is rebuilt
+from the same source on each attempt, a `429` retry replays byte-identical
+content (the SC2 invariant).
 
-**`Upload` (client-streaming `fileUpload`).** The first frame is the params
-(destination path, `declared_size_bytes` = the total source size, the auth
-stamp); the following data frames each carry one base64 chunk sized so the
-*encoded* frame stays strictly under the message ceiling (default 256 KiB) —
-sizing by raw bytes would push every frame to ~4/3 of the ceiling and draw
-`resource_exhausted`. An explicit end-stream frame, not a bare body half-close,
-tells the broker the upload is complete; without it the broker keeps waiting and
-then aborts the already-assembled object as malformed. The frame writer and the
-HTTP sender run concurrently over a pipe so the full payload is never buffered.
-
-The result handling here carries the subtlety. When the broker ends the stream
-early — a throttle, a frame over the ceiling, a permission failure — it replies
-without draining the request body, the pipe closes, and the writer goroutine
-fails with a pipe-closure error. That local error must **not** mask a parseable
-error trailer, or the retryable backpressure posture is lost; `Upload` reads and
-prefers the trailer verdict first, and only surfaces a genuine write fault when
-there is no authoritative trailer. The `overwrite` argument distinguishes a
+Success or failure is the **HTTP status**. The result handling carries the
+subtlety. When the broker ends the request early — a throttle, a permission
+failure — it replies without draining the request body, the pipe closes, and the
+writer goroutine fails with a pipe-closure error. That local error must **not**
+mask the retryable backpressure verdict the status carries; `Upload` prefers the
+non-2xx status first, and surfaces a genuine write fault only on a 2xx where the
+write error is not a pipe closure. The `overwrite` argument distinguishes a
 create-new write (the common path, which serialises no overwrite key at all)
 from an overwrite-in-place write.
 
-**`Download` / `DownloadRange` (server-streaming `fileDownload`).** The request
-is a single params frame addressing the object by UUID; the response is a run of
-content frames (each `{data: <base64>}`) terminated by the trailer. `Download`
-concatenates every frame into the full object. `DownloadRange` sends an
-`{offset, length}` window so the broker streams only those bytes, then clamps
-the result to `length` as a defensive trim against a broker that over-delivers.
-A frame that fails to decode is a **hard** error: on a FUSE-backed mount,
-silently dropping a frame would surface as file corruption, so truncated content
-is never returned as success. A stream that ends before the trailer is likewise
-an error, not an empty success.
+**`Download` / `DownloadRange` (`fileDownload`).** The request is a JSON POST
+addressing the object by UUID; on a 2xx the broker streams the object bytes as a
+chunked `application/octet-stream` body, read to completion. The read is bounded
+by a download cap (16 GiB) so a runaway stream cannot OOM the least-provisioned
+party in the system: a body over the cap is a hard error, never a truncated
+success. `Download` returns the full object. `DownloadRange` sends an
+`{offset, length}` window so the broker streams only those bytes, then clamps the
+result to `length` as a defensive trim against a broker that over-delivers; it
+rejects a negative offset or length up front. A non-2xx maps through
+`MapHTTPStatus`.
 
 **Cursor pagination.** Listing is paged. `ListDirectory` and `ListFiles` each
 return one page plus a continuation token (`Cursor` and `AfterUUID`
@@ -143,12 +136,12 @@ Both loops guard against a token that repeats unchanged: a non-advancing cursor
 aborts rather than spinning forever with unbounded memory growth inside the
 mount.
 
-Code: `stream.go` (`readFrame`, `endStreamFlag`, `maxInboundFrame`), `upload.go` (`Upload`, `sourceChunkSize`), `download.go` (`Download`, `DownloadRange`), `cursor.go` (`ListDirectoryAll`, `ListFilesAll`, `OpaqueCursor`).
+Code: `upload.go` (`Upload`, `isPipeClosure`, `sourceChunkSize`), `download.go` (`Download`, `DownloadRange`, `doDownload`), `cursor.go` (`ListDirectoryAll`, `ListFilesAll`, `OpaqueCursor`).
 
 ## See also
 
 - [`07-wire-reference.md`](./07-wire-reference.md) — the authoritative
   message-by-message and field-by-field map: every request/response body, the
-  frame envelope arithmetic, and the full code-to-error mapping.
+  multipart and chunk shapes, and the full status-to-error mapping.
 - [`05-ocufs-backend.md`](./05-ocufs-backend.md) — the rclone backend that calls
   this client; where the read-only gate and path canonicalization live.

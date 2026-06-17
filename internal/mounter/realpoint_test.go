@@ -91,6 +91,7 @@ func TestMountAndWaitReadyAssemblesOptions(t *testing.T) {
 	spec := mountSpec{
 		mount: mountcfg.Mount{
 			Destination:     t.TempDir(),
+			AuthToken:       "tok",
 			FilesystemID:    fsID("session_unit_fs"),
 			VfsCacheMode:    "writes",
 			VfsCacheMaxSize: "256M",
@@ -98,7 +99,8 @@ func TestMountAndWaitReadyAssemblesOptions(t *testing.T) {
 			FilePerms:       "0644",
 		},
 		readOnly:   false,
-		socketPath: "/tmp/ocufs-unit-not-dialed.sock",
+		serviceURL: "https://broker.internal",
+		caCertPEM:  validCAPEM(t),
 	}
 
 	p, err := r.mountAndWaitReady(context.Background(), spec)
@@ -158,6 +160,7 @@ func TestMountIdentityIsPerMount(t *testing.T) {
 		return mountSpec{
 			mount: mountcfg.Mount{
 				Destination:     dest,
+				AuthToken:       "tok",
 				FilesystemID:    fsID(fsid),
 				VfsCacheMode:    "writes",
 				VfsCacheMaxSize: "256M",
@@ -165,7 +168,8 @@ func TestMountIdentityIsPerMount(t *testing.T) {
 				FilePerms:       "0644",
 			},
 			readOnly:   false,
-			socketPath: "/tmp/ocufs-unit-not-dialed.sock",
+			serviceURL: "https://broker.internal",
+			caCertPEM:  validCAPEM(t),
 		}
 	}
 
@@ -220,7 +224,9 @@ func TestRealPointDoUnmountOnce(t *testing.T) {
 		t.Fatalf("ocufs backend not registered: %v", err)
 	}
 	cm := configmap.Simple{}
-	cm.Set("socket_path", "/tmp/ocufs-unit-not-dialed.sock")
+	cm.Set("service_url", "https://broker.internal")
+	cm.Set("auth_token", "tok")
+	cm.Set("ca_cert_pem", validCAPEM(t))
 	cm.Set("filesystem_id", "session_unit_fs")
 	cm.Set("read_only", "false")
 	fsObj, err := info.NewFs(context.Background(), "ocufs-wr01", "", cm)
@@ -275,7 +281,9 @@ func TestDoUnmountBoundsTheDetach(t *testing.T) {
 		t.Fatalf("ocufs backend not registered: %v", err)
 	}
 	cm := configmap.Simple{}
-	cm.Set("socket_path", "/tmp/ocufs-unit-not-dialed.sock")
+	cm.Set("service_url", "https://broker.internal")
+	cm.Set("auth_token", "tok")
+	cm.Set("ca_cert_pem", validCAPEM(t))
 	cm.Set("filesystem_id", "session_unit_fs")
 	cm.Set("read_only", "false")
 	fsObj, err := info.NewFs(context.Background(), "ocufs-detach", "", cm)
@@ -362,7 +370,9 @@ func TestRealPointDestinationAndWait(t *testing.T) {
 		t.Fatalf("ocufs backend not registered: %v", err)
 	}
 	cm := configmap.Simple{}
-	cm.Set("socket_path", "/tmp/ocufs-unit-not-dialed.sock")
+	cm.Set("service_url", "https://broker.internal")
+	cm.Set("auth_token", "tok")
+	cm.Set("ca_cert_pem", validCAPEM(t))
 	cm.Set("filesystem_id", "session_unit_fs")
 	cm.Set("read_only", "false")
 	fsObj, err := info.NewFs(context.Background(), "ocufs-destwait", "", cm)

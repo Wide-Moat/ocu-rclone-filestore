@@ -7,14 +7,18 @@
 
 The guest-side mount binary of Open Computer Use: it mounts the per-session
 filestore into the guest filesystem tree and translates file operations into
-the broker's file-operation RPC. Built on [rclone](https://github.com/rclone/rclone)
+HTTPS/REST requests sent through the egress edge. Built on [rclone](https://github.com/rclone/rclone)
 (MIT): rclone supplies the mount machinery; this repo adds a backend that
-speaks the broker RPC instead of any object-store protocol.
+reaches storage over HTTPS/REST via the egress edge instead of any object-store
+protocol.
 
-The guest holds **no backend credential and no object-store client** — only a
-session-scoped mount handle (`filesystem_id`). Every byte goes through the
-broker ([`ocu-filestore`](https://github.com/Wide-Moat/ocu-filestore)), which
-custodies the one backend credential and resolves authorization per request.
+The guest holds **no backend credential and no object-store client**. It dials
+an outbound HTTPS `service_url`, trusting only the inspecting edge's CA, and
+presents a static session JWT — an edge-only assertion. An Envoy egress edge
+validates that JWT, strips it, and exchanges it (RFC 8693) for the real storage
+credential keyed on `filesystem_id` before the request reaches the broker
+([`ocu-filestore`](https://github.com/Wide-Moat/ocu-filestore)), which custodies
+the one backend credential and resolves authorization per request.
 
 The architecture and specifications live in
 [`Wide-Moat/open-computer-use`](https://github.com/Wide-Moat/open-computer-use):
@@ -26,15 +30,16 @@ the host-side credential seam, the end-to-end data path of a file operation,
 and what each package in this repo is responsible for — see
 [`docs/architecture.md`](./docs/architecture.md).
 
-![The big picture: the guest sandbox talks to this binary, which talks only to the broker over one unix socket; the broker holds the credential and reaches the backend storage.](./docs/diagrams/01-big-picture.svg)
+![The big picture: the guest sandbox talks to this binary, which dials outbound over HTTPS to the Envoy egress edge; the edge exchanges the guest's session JWT for the real credential before the broker, which holds the credential and reaches the backend storage.](./docs/diagrams/01-big-picture.svg)
 
 ## Quickstart
 
-You need **Go 1.26+** (see `go.mod`) and a running broker that exposes a
-per-session AF_UNIX socket. An actual mount needs Linux with `/dev/fuse`; on
-macOS, run it inside the Lima harness (see [`docs/e2e-local.md`](./docs/e2e-local.md)).
+You need **Go 1.26+** (see `go.mod`) and an HTTPS `service_url` reachable via the
+egress edge (in the local harness, the Envoy edge in the compose graph). An
+actual mount needs Linux with `/dev/fuse`; on macOS, run it inside the Lima
+harness (see [`docs/e2e-local.md`](./docs/e2e-local.md)).
 
-![The four steps: have the prerequisites, build the binary, write a mount config, run it against the broker socket.](./docs/diagrams/04-setup.svg)
+![The four steps: have the prerequisites, build the binary, write a mount config, run it.](./docs/diagrams/04-setup.svg)
 
 **Build:**
 
@@ -43,18 +48,35 @@ go build -o ocu-rclone-filestore ./cmd/ocu-rclone-filestore
 ./ocu-rclone-filestore --version
 ```
 
-**Write a minimal mount config** (`mount.json`). One read-write mount of one
-session scope — note there is no `auth_token`: the guest holds no credential.
+**Write a mount config** (`mount.json`). The config is single-shape: a
+top-level `service_url` + `ca_cert_pem` (the edge's trust anchor) and a `mounts`
+array. Each mount carries its own `auth_token` — the static session JWT, an
+edge-only assertion, not a backend key — its `filesystem_id` scope, and its own
+`readonly` posture. The two canonical mounts are the read-only inputs at
+`/mnt/user-data/uploads/` and the read-write sink at `/mnt/user-data/outputs/`:
 
 ```json
 {
   "schema_version": "v1alpha",
-  "service_url": "https://broker.internal",
+  "service_url": "https://edge.internal",
+  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
   "mounts": [
     {
-      "destination": "/workspace/out",
+      "destination": "/mnt/user-data/uploads",
+      "filesystem_id": "session_01HXYZ_inputs",
+      "auth_token": "eyJhbGciOi...inputs-session-jwt...",
+      "readonly": true,
+      "vfs_cache_mode": "minimal",
+      "cache_duration_s": 3,
+      "vfs_cache_max_size": "512M",
+      "dir_perms": "0755",
+      "file_perms": "0644"
+    },
+    {
+      "destination": "/mnt/user-data/outputs",
       "filesystem_id": "session_01HXYZ_chat",
-      "writes": true,
+      "auth_token": "eyJhbGciOi...outputs-session-jwt...",
+      "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
       "vfs_cache_max_size": "1G",
@@ -65,36 +87,41 @@ session scope — note there is no `auth_token`: the guest holds no credential.
 }
 ```
 
-`destination` must be an absolute path (not bare `/`). `filesystem_id` is the
-session scope; the broker resolves authorization from it.
+`destination` must be an absolute path (not bare `/`). `readonly` is
+host-enforced — the agent cannot flip it. `filesystem_id` is the session scope;
+the edge attests it from the validated JWT and the broker resolves authorization
+from it. The read-only inputs mount uses a short `cache_duration_s` so
+externally-written user data appears promptly, while the read-write outputs sink
+uses a long window since the agent is the writer.
 
-**Run** it against the broker's socket:
+**Run** it:
 
 ```sh
-./ocu-rclone-filestore --config mount.json --broker-socket /run/ocu/session.sock
+./ocu-rclone-filestore --config mount.json
 ```
 
-The flags:
+The transport is config-derived — there is no socket flag. The flags:
 
 | Flag | Env | Meaning |
 | --- | --- | --- |
 | `--config` | — | path to the mount config (required) |
-| `--broker-socket` | `OCU_BROKER_SOCKET` | the per-session broker socket path |
-| `--broker-socket-dir` | `OCU_BROKER_SOCKET_DIR` | a directory; each mount dials `<dir>/<filesystem_id>.sock` (mutually exclusive with `--broker-socket`) |
 | `--ready-file` | `OCU_READY_FILE` | optional path touched once every mount is up |
 | `--version` | — | print the version and exit |
 
-`/workspace/out` is now a live filesystem backed by the broker. Any failure to
-bring up a mount is a hard, non-zero exit — never a silently missing directory.
-For a full local run with real brokers, see [`docs/e2e-local.md`](./docs/e2e-local.md).
+`/mnt/user-data/uploads` and `/mnt/user-data/outputs` are now live filesystems
+served over HTTPS/REST through the egress edge. Any failure to bring up a mount
+is a hard, non-zero exit — never a silently missing directory. For a full local
+run of the network topology, see [`docs/e2e-local.md`](./docs/e2e-local.md).
 
 ## Status
 
 Prerelease, tracking the broker toward a joint `v0.1.0`. The full data path is
-implemented — multi-mount, chunked upload, ranged read and whole-object
+implemented — multi-mount, multipart upload, ranged read and whole-object
 download, the read-only double-gate, and the broker deny/throttle mapping — and
-every release is gated by a live end-to-end exercise that drives real broker
-instances and asserts the bytes reach the broker's own workspace (not just the
+every release is gated by a live end-to-end exercise that drives the guest
+outbound through the Envoy egress edge to the REST filestore on a Lima
+network-topology graph, positively asserts the edge is the only reachable hop,
+and proves the bytes reach the broker's own store via a cold read (not just the
 local cache). Supply-chain hardening is in place: keyless Sigstore signing, a
 per-archive SBOM, and a SLSA build-provenance attestation, with the publish step
 fail-closed behind the e2e gate (see [Verifying a release](#verifying-a-release)).

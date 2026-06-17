@@ -1,23 +1,24 @@
 {
   "schema_version": "v1alpha",
   "service_url": "https://broker.internal",
+  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
   "mounts": [
     {
       "destination": "/workspace/out",
+      "auth_token": "tok.opaque.rw",
       "filesystem_id": "session_01HXYZ_chat",
-      "writes": true,
+      "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
       "vfs_cache_max_size": "1G",
       "dir_perms": "0755",
       "file_perms": "0644"
-    }
-  ],
-  "readonly_mounts": [
+    },
     {
       "destination": "/workspace/in",
+      "auth_token": "tok.opaque.ro",
       "filesystem_id": "session_01HXYZ_inputs",
-      "writes": false,
+      "readonly": true,
       "vfs_cache_mode": "minimal",
       "cache_duration_s": 3,
       "vfs_cache_max_size": "512M",

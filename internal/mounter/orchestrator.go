@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"reflect"
 	"syscall"
 
@@ -32,12 +31,14 @@ type point interface {
 }
 
 // mountSpec is one ordered unit of work: the config mount, its read-only
-// posture (derived from which array it came from), and the broker socket path
-// the seam threads into the ocufs configmap.
+// posture (derived from the mount's readonly key), and the top-level transport
+// values (service_url + ca_cert_pem) the seam threads into the ocufs configmap.
+// The per-mount auth_token rides on mount.AuthToken.
 type mountSpec struct {
 	mount      mountcfg.Mount
 	readOnly   bool
-	socketPath string
+	serviceURL string
+	caCertPEM  string
 }
 
 // pointMounter is the testability fulcrum. The orchestration depends ONLY on
@@ -65,54 +66,38 @@ type ReadinessConfig struct {
 // best-effort cleanup, signals readiness exactly once after all are up, and
 // tears down every point on a termination signal.
 //
-// The broker socket path is an explicit runtime input (a flag/env supplied by
-// the entrypoint), NOT derived from the frozen service_url: the loader forbids
-// non-https service_urls, so the per-session socket path cannot come from the
-// validated config (D2). An empty value is a hard error before any mount.
+// Transport is config-derived: the top-level service_url (loader-checked,
+// ^https://) and ca_cert_pem from the validated config thread to each spec; the
+// per-mount auth_token comes from the mount. There is no runtime socket input.
 type orchestrator struct {
-	// seam is the live pointMounter, constructed lazily by run via newSeam AFTER
-	// the empty-broker-socket check so the socket hard error wins over an
-	// unsupported-platform seam error.
+	// seam is the live pointMounter, constructed lazily by run via newSeam.
 	seam pointMounter
-	// newSeam constructs the production seam. run builds it only after the
-	// broker-socket check passes; the fake-driven tests set seam directly and
-	// leave this nil.
-	newSeam          func() (pointMounter, error)
-	readiness        ReadinessConfig
-	signals          <-chan os.Signal
-	brokerSocketPath string
-	// brokerSocketDirPath is the per-session socket DIRECTORY alternative to
-	// brokerSocketPath: when set, each mount derives its own socket path as
-	// <dir>/<filesystem_id>.sock. The broker side provisions exactly one unix
-	// socket per filesystem scope under its session socket directory using that
-	// filename convention, so a config with N mounts (N filesystem scopes) needs
-	// N distinct sockets — a single per-process socket path cannot serve them.
-	// Exactly one of brokerSocketPath / brokerSocketDirPath must be set.
-	brokerSocketDirPath string
+	// newSeam constructs the production seam. The fake-driven tests set seam
+	// directly and leave this nil.
+	newSeam   func() (pointMounter, error)
+	readiness ReadinessConfig
+	signals   <-chan os.Signal
+	// serviceURL and caCertPEM are the top-level transport values from the
+	// validated config (service_url ^https://, ca_cert_pem non-empty). They are
+	// constant across mounts and thread onto each spec so realpoint's configmap
+	// build is self-contained.
+	serviceURL string
+	caCertPEM  string
 }
 
 // run realizes every mount in cfg and blocks until teardown.
 //
-// It rejects an empty broker socket path up front, builds the ordered specs
-// (writable mounts then read-only mounts), rejects any memory-store spec as a
-// hard error before starting anything, starts each spec sequentially for
-// deterministic error attribution, best-effort-unmounts already-started points
-// on the first start error and returns an aggregated error naming the failed
-// destination, signals readiness exactly once after all are up, then blocks on
-// the signal channel and the per-point exits. On a signal it unmounts all
-// points and returns nil; on a spontaneous point error it unmounts the rest and
-// returns that error.
+// It builds the ordered specs (one per mount, RW/RO from each mount's readonly
+// key), rejects any memory-store spec as a hard error before starting anything,
+// starts each spec sequentially for deterministic error attribution,
+// best-effort-unmounts already-started points on the first start error and
+// returns an aggregated error naming the failed destination, signals readiness
+// exactly once after all are up, then blocks on the signal channel and the
+// per-point exits. On a signal it unmounts all points and returns nil; on a
+// spontaneous point error it unmounts the rest and returns that error.
 func (o *orchestrator) run(ctx context.Context, cfg *mountcfg.Config) error {
-	if o.brokerSocketPath == "" && o.brokerSocketDirPath == "" {
-		return errors.New("broker socket path not provided: pass the per-session socket path (--broker-socket) or the per-session socket directory (--broker-socket-dir); it is a runtime input (D2), not the frozen service_url")
-	}
-	if o.brokerSocketPath != "" && o.brokerSocketDirPath != "" {
-		return errors.New("broker socket path and broker socket directory are mutually exclusive: pass exactly one of --broker-socket / --broker-socket-dir")
-	}
-
-	// Construct the production seam only after the broker-socket check so the
-	// socket hard error wins over an unsupported-platform seam error. The
-	// fake-driven tests inject o.seam directly and leave o.newSeam nil.
+	// Construct the production seam. The fake-driven tests inject o.seam
+	// directly and leave o.newSeam nil.
 	if o.seam == nil {
 		if o.newSeam == nil {
 			return errors.New("orchestrator: no mount seam configured")
@@ -233,48 +218,27 @@ func (o *orchestrator) shutdownDuringStartup(started []point) error {
 	return errors.Join(cleanupErrs...)
 }
 
-// buildSpecs orders the writable mounts before the read-only mounts and stamps
-// each with its broker socket path. A memory-store mount is a hard error here,
-// before any point is started, so it is never silently skipped. A destination
-// that repeats across Mounts ∪ ReadonlyMounts is likewise a hard error (ME-02):
-// two specs targeting the same path would have the second silently shadow the
-// first, violating the never-silently-mis-mounted discipline.
-//
-// Socket resolution: in single-socket mode every spec carries the one
-// per-process brokerSocketPath. In socket-dir mode each spec derives
-// <dir>/<filesystem_id>.sock — the broker provisions one session socket per
-// filesystem scope under that directory with exactly that filename, so the
-// filesystem_id is the natural per-mount socket axis. The id is guaranteed
-// non-empty by the loader's scope XOR; it is re-checked here so a hand-built
-// config can never derive a directory-shaped socket path.
+// buildSpecs makes one spec per mount, deriving RW/RO from each mount's
+// readonly key, and stamps each with the top-level transport values
+// (service_url + ca_cert_pem); the per-mount auth_token rides on the mount. A
+// memory-store mount is a hard error here, before any point is started, so it is
+// never silently skipped. A destination that repeats across the mounts array is
+// likewise a hard error (ME-02): two specs targeting the same path would have
+// the second silently shadow the first, violating the never-silently-
+// mis-mounted discipline.
 func (o *orchestrator) buildSpecs(cfg *mountcfg.Config) ([]mountSpec, error) {
-	specs := make([]mountSpec, 0, len(cfg.Mounts)+len(cfg.ReadonlyMounts))
+	specs := make([]mountSpec, 0, len(cfg.Mounts))
 	seen := make(map[string]struct{}, cap(specs))
-	add := func(mounts []mountcfg.Mount, readOnly bool) error {
-		for _, m := range mounts {
-			if m.MemoryStoreID != nil {
-				return fmt.Errorf("mount %q: memory-store mounts are not yet supported (no memory scope axis)", m.Destination)
-			}
-			if _, dup := seen[m.Destination]; dup {
-				return fmt.Errorf("mount %q: duplicate destination across mounts/readonly_mounts (a second mount would silently shadow the first)", m.Destination)
-			}
-			seen[m.Destination] = struct{}{}
-			socketPath := o.brokerSocketPath
-			if o.brokerSocketDirPath != "" {
-				if m.FilesystemID == nil || *m.FilesystemID == "" {
-					return fmt.Errorf("mount %q: filesystem_id is required to derive the per-mount socket from the socket directory", m.Destination)
-				}
-				socketPath = filepath.Join(o.brokerSocketDirPath, *m.FilesystemID+".sock")
-			}
-			specs = append(specs, mountSpec{mount: m, readOnly: readOnly, socketPath: socketPath})
+	for _, m := range cfg.Mounts {
+		readOnly := m.Readonly != nil && *m.Readonly
+		if m.MemoryStoreID != nil {
+			return nil, fmt.Errorf("mount %q: memory-store mounts are not yet supported (no memory scope axis)", m.Destination)
 		}
-		return nil
-	}
-	if err := add(cfg.Mounts, false); err != nil {
-		return nil, err
-	}
-	if err := add(cfg.ReadonlyMounts, true); err != nil {
-		return nil, err
+		if _, dup := seen[m.Destination]; dup {
+			return nil, fmt.Errorf("mount %q: duplicate destination across mounts (a second mount would silently shadow the first)", m.Destination)
+		}
+		seen[m.Destination] = struct{}{}
+		specs = append(specs, mountSpec{mount: m, readOnly: readOnly, serviceURL: o.serviceURL, caCertPEM: o.caCertPEM})
 	}
 	return specs, nil
 }

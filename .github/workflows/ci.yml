@@ -199,10 +199,11 @@ jobs:
           echo "container_fuse=${container_fuse}" >> "${GITHUB_OUTPUT}"
 
   # Live e2e gate on pull requests. It runs the SAME real harness as the
-  # release-path e2e (real brokers at BROKER_REF + the mount with /dev/fuse +
-  # SYS_ADMIN + the test-runner driving the full gated exercise, including the
-  # cold read through a second fresh mount and the SC2 throttle), so a PR that
-  # touches the data path is verified live before merge — not only at release.
+  # release-path e2e (the network-topology graph — harness peers + the live edge
+  # + the mount with /dev/fuse + SYS_ADMIN + the test-runner driving the full
+  # gated exercise, including the Envoy-only-hop assertion, the cold read through
+  # a second fresh mount and the SC2 throttle), so a PR that touches the data
+  # path is verified live before merge — not only at release.
   #
   # It runs ONLY when the fuse-probe above confirms the hosted runner can mount
   # FUSE in a container; otherwise it skips cleanly (a skipped required check is
@@ -220,14 +221,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-      # Every mount destination is a host bind with rshared propagation; the
-      # subdirectories must exist before the harness starts (the mount binary
-      # does not create them). out = rw scope, in = ro scope, out2 = the
-      # cold-read second mount of the rw scope, throttle = the SC2 throttle scope.
-      - name: Prepare the workspace bind
-        run: mkdir -p /tmp/ocu-e2e-workspace/out /tmp/ocu-e2e-workspace/in /tmp/ocu-e2e-workspace/out2 /tmp/ocu-e2e-workspace/throttle
-      - name: Bring up the harness (real brokers + mount)
-        run: docker compose -f deploy/compose/docker-compose.yml up --build -d broker-rw broker-ro broker-throttle broker-conformance mount
+      # Every mount destination is a host bind (at the canonical /mnt/user-data
+      # mount root) with rshared propagation; the subdirectories must exist
+      # before the harness starts (the mount binary does not create them).
+      # outputs = rw scope, uploads = ro scope, outputs2 = the cold-read second
+      # mount of the rw scope, throttle = the SC2 throttle scope.
+      - name: Prepare the mount-root bind
+        run: mkdir -p /tmp/ocu-e2e-mountroot/outputs /tmp/ocu-e2e-mountroot/uploads /tmp/ocu-e2e-mountroot/outputs2 /tmp/ocu-e2e-mountroot/throttle
+      - name: Bring up the harness (peers + edge + mount)
+        run: docker compose -f deploy/compose/docker-compose.yml up --build -d harness-init control-plane exchange filestore edge mount
       - name: Run the live exercise (test-runner service)
         run: docker compose -f deploy/compose/docker-compose.yml run --rm --build test-runner
       - name: Run the backend conformance round-trip (conformance-runner service)

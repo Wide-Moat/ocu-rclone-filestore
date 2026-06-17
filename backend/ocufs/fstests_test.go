@@ -8,7 +8,7 @@ package ocufs
 // What runs unconditionally (Phase 3):
 //   - TestFakeBrokerConstruction: a real *Fs is constructed via the rclone
 //     registry → NewFs → brokerrpc.New against the in-process fake broker
-//     socket. This proves the registry path and the socket-based wiring work
+//     over TLS. This proves the registry path and the HTTPS wiring work
 //     with NO production test-hook.
 //   - TestFakeBrokerListUnion: a List call against the fake broker returns the
 //     pinned listDirectory union (one file arm + one directory arm) with a
@@ -58,21 +58,25 @@ const testRemoteName = "ocufstest"
 // NewFs path. This exercises the full production wiring (no test-hook).
 //
 // The returned Fs is rooted at "/" on the fake broker's filesystem.
-func newFsOverFakeBroker(t *testing.T) (fs.Fs, string) {
+func newFsOverFakeBroker(t *testing.T) (fs.Fs, fakeBroker) {
 	t.Helper()
 
-	sockPath := startFakeBroker(t)
+	fb := startFakeBroker(t)
 
 	// Register the test remote in the rclone in-memory config so that
 	// fs.NewFs can look it up by name.
 	config.FileSetValue(testRemoteName, "type", "ocufs")
-	config.FileSetValue(testRemoteName, "socket_path", sockPath)
+	config.FileSetValue(testRemoteName, "service_url", fb.url)
 	config.FileSetValue(testRemoteName, "filesystem_id", testFsID)
+	config.FileSetValue(testRemoteName, "auth_token", fakeBrokerAuthToken)
+	config.FileSetValue(testRemoteName, "ca_cert_pem", string(fb.certPEM))
 	config.FileSetValue(testRemoteName, "read_only", "false")
 	t.Cleanup(func() {
 		config.FileDeleteKey(testRemoteName, "type")
-		config.FileDeleteKey(testRemoteName, "socket_path")
+		config.FileDeleteKey(testRemoteName, "service_url")
 		config.FileDeleteKey(testRemoteName, "filesystem_id")
+		config.FileDeleteKey(testRemoteName, "auth_token")
+		config.FileDeleteKey(testRemoteName, "ca_cert_pem")
 		config.FileDeleteKey(testRemoteName, "read_only")
 	})
 
@@ -81,7 +85,7 @@ func newFsOverFakeBroker(t *testing.T) (fs.Fs, string) {
 	if err != nil {
 		t.Fatalf("newFsOverFakeBroker: fs.NewFs(%q): %v", remote, err)
 	}
-	return f, sockPath
+	return f, fb
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +94,7 @@ func newFsOverFakeBroker(t *testing.T) (fs.Fs, string) {
 
 // TestFakeBrokerConstruction verifies that the rclone registry → NewFs →
 // brokerrpc.New path successfully constructs a real *Fs over the in-process
-// fake broker socket. This uses NO production test-hook; the socket is real.
+// fake broker. This uses NO production test-hook; the TLS endpoint is real.
 func TestFakeBrokerConstruction(t *testing.T) {
 	f, _ := newFsOverFakeBroker(t)
 	if f == nil {
@@ -129,7 +133,7 @@ func TestFakeBrokerConstruction(t *testing.T) {
 //   - one directory arm → fs.Directory with non-zero mtime
 //
 // This exercises the real adapter's widened decoder and the backend's direct
-// List classification end-to-end over a real socket.
+// List classification end-to-end over the real TLS endpoint.
 func TestFakeBrokerListUnion(t *testing.T) {
 	f, _ := newFsOverFakeBroker(t)
 
@@ -169,8 +173,8 @@ func TestFakeBrokerListUnion(t *testing.T) {
 }
 
 // TestFakeBrokerDownloadRoundTrip verifies that Download against the fake
-// broker returns the canned bytes. This exercises the real streaming transport
-// (5-byte frame envelope, end-stream flag 0x02) over the unix socket.
+// broker returns the canned bytes. This exercises the real chunked octet-stream
+// transport over the TLS endpoint.
 func TestFakeBrokerDownloadRoundTrip(t *testing.T) {
 	f, _ := newFsOverFakeBroker(t)
 
@@ -288,7 +292,7 @@ func TestFakeBrokerNilObject(t *testing.T) {
 // cannot be a green gate while the metadata ops are unimplemented.
 //
 // This test therefore gates on the standard round-trip the IMPLEMENTED ops DO
-// support, exercised against the real broker over the session socket (the same
+// support, exercised against the real broker over the session endpoint (the same
 // data path the suite would use): Mkdir, Put (chunked upload), List (the D6
 // union returns fully-populated Objects, so the listing IS the read-back
 // handle — no NewObject needed), Open (ranged read via fileDownload), Copy,

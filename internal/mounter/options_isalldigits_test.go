@@ -87,12 +87,12 @@ func TestBuildVFSOptionsBadFilePerms(t *testing.T) {
 // fails rather than building an unscoped mount.
 func TestBuildOcufsConfigmapMissingFilesystemID(t *testing.T) {
 	m := mountcfg.Mount{Destination: "/mnt/w"} // no FilesystemID, no MemoryStoreID
-	if _, err := buildOcufsConfigmap(m, false, "/run/x.sock"); err == nil {
+	if _, err := buildOcufsConfigmap(m, false, "https://broker.internal", "pem"); err == nil {
 		t.Fatal("buildOcufsConfigmap with no filesystem_id = nil error; want the required-id hard error")
 	}
 
 	empty := mountcfg.Mount{Destination: "/mnt/w", FilesystemID: ptrStr("")}
-	if _, err := buildOcufsConfigmap(empty, false, "/run/x.sock"); err == nil {
+	if _, err := buildOcufsConfigmap(empty, false, "https://broker.internal", "pem"); err == nil {
 		t.Fatal("buildOcufsConfigmap with empty filesystem_id = nil error; want the required-id hard error")
 	}
 }

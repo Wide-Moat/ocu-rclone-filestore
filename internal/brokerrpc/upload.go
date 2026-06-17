@@ -1,28 +1,24 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 // Copyright (c) 2025 Open Computer Use Contributors
 
-// Package brokerrpc — client-streaming fileUpload transport.
+// Package brokerrpc — REST fileUpload transport.
 //
-// The fileUpload op follows the Connect client-streaming protocol:
+// The fileUpload op is a multipart/form-data POST to
+// <service_url>/v1/filestore/fs/fileUpload:
 //
-//  1. POST /ocu.filestore.v1alpha.FilesystemService/fileUpload
-//     Content-Type: application/connect+json
-//     Connect-Protocol-Version: 1
+//  1. One form field named "params" carrying the JSON params object:
+//     declared_size_bytes (required, = total source size), filesystem_id, path,
+//     optional overwrite_existing, and authorization_metadata{intent:write,
+//     downloadable:false}.
 //
-//  2. Frame 1 (data flag 0x00): the params JSON object including
-//     declared_size_bytes (required, = total source size), filesystem_id,
-//     and authorization_metadata{intent:write, downloadable:false}.
+//  2. One file part streaming the source bytes. The source is read in
+//     ceiling-bounded chunks so a single read never exceeds the message
+//     ceiling; the SC2 invariant (byte-identical content under a 429 retry)
+//     holds because the multipart body is rebuilt from the same source on each
+//     attempt.
 //
-//  3. Frames 2…N (data flag 0x00): {chunk: <base64 bytes>} frames, each sized
-//     so the ENCODED frame payload stays strictly under MessageCeiling.
-//
-//  4. A terminating end-stream frame (flag 0x02) carrying an empty
-//     EndStreamResponse {} signals completion. The body half-close alone is
-//     not the completion signal: without this frame the broker keeps waiting
-//     and then aborts the (already-assembled) stream as malformed.
-//
-//  5. The broker replies with HTTP 200 and an EndStreamResponse trailer frame
-//     (flag 0x02). The caller must read this trailer for success/failure.
+// Success or failure is the HTTP status: a non-2xx response maps through
+// MapHTTPStatus (429 → retryable, honouring Retry-After); a 2xx is success.
 
 package brokerrpc
 
@@ -32,23 +28,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 )
 
-// uploadParamsFrame is the JSON body for the first frame in a fileUpload
-// client-streaming request. OverwriteExisting selects whether an existing
-// destination is replaced in place (true) or the upload fails on a present
-// path (false): a create-new write (Put) leaves it false so a colliding path
-// is a conflict, while an overwrite-in-place write (Update) sets it true so the
-// broker replaces the object atomically rather than the guest staging a
+// uploadParamsFrame is the JSON body of the multipart "params" form field for a
+// fileUpload request. OverwriteExisting selects whether an existing destination
+// is replaced in place (true) or the upload fails on a present path (false): a
+// create-new write (Put) leaves it false so a colliding path is a conflict,
+// while an overwrite-in-place write (Update) sets it true so the broker
+// replaces the object atomically rather than the guest staging a
 // remove-then-upload with a non-atomic window between the two.
 //
 // The field is omitempty: a create-new upload (the overwhelmingly common path)
-// serialises NO overwrite_existing key at all. The upload params frame is
-// strict-decoded broker-side, so a broker build that predates the upload
-// overwrite knob accepts the create-new frame unchanged; only the
-// overwrite-in-place upload carries the key, and that path depends on a broker
-// build that reads it.
+// serialises NO overwrite_existing key at all.
 type uploadParamsFrame struct {
 	FilesystemID          string                `json:"filesystem_id"`
 	Path                  string                `json:"path"`
@@ -57,103 +50,103 @@ type uploadParamsFrame struct {
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
-// uploadChunkFrame is the JSON body for subsequent data frames.
-type uploadChunkFrame struct {
-	Chunk []byte `json:"chunk"`
-}
-
-// Upload performs the fileUpload client-streaming op. It reads all bytes from
-// src and sends them as ceiling-sized chunk frames preceded by a params frame
-// that carries the total source size as declared_size_bytes. The broker
-// assembles the object only when the streamed total matches declared_size_bytes;
-// a mismatch in either direction (over- or under-send) results in an
-// invalid_argument error from the broker, which the mapper returns as a
-// permanent no-retry error. path is the filesystem-relative destination path.
-// overwrite selects whether an existing destination is replaced in place
-// (true, the overwrite-in-place write) or the upload fails on a present path
-// (false, the create-new write).
+// Upload performs the fileUpload op. It reads all bytes from src and sends them
+// as the file part of a multipart/form-data body, preceded by a "params" field
+// carrying the total source size as declared_size_bytes. The broker assembles
+// the object only when the streamed total matches declared_size_bytes; a
+// mismatch in either direction results in a 400/422 from the broker, which the
+// mapper returns as a permanent no-retry error. path is the filesystem-relative
+// destination path. overwrite selects whether an existing destination is
+// replaced in place (true, the overwrite-in-place write) or the upload fails on
+// a present path (false, the create-new write).
 func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBytes int64, overwrite bool) error {
 	fsID, am, err := c.stamp(OpFileUpload)
 	if err != nil {
 		return err
 	}
 
-	// Build the streaming request body as a pipe so the frame writer and the
-	// HTTP sender run concurrently without buffering the full payload.
+	// Build the multipart body as a pipe so the writer and the HTTP sender run
+	// concurrently without buffering the full payload.
 	pr, pw := io.Pipe()
+	mw := multipart.NewWriter(pw)
 
-	// errCh carries the frame-writing error so the goroutine result is
+	// errCh carries the body-writing error so the goroutine result is
 	// propagated back to the caller.
 	errCh := make(chan error, 1)
 	go func() {
-		defer pw.Close() //nolint:errcheck
-		errCh <- writeUploadFrames(pw, fsID, path, totalBytes, overwrite, am, src, c.messageCeiling)
+		err := writeUploadMultipart(mw, fsID, path, totalBytes, overwrite, am, src, c.messageCeiling)
+		// Close the multipart writer (emits the closing boundary) before closing
+		// the pipe so a well-formed body is flushed on the success path.
+		if cerr := mw.Close(); err == nil {
+			err = cerr
+		}
+		// CloseWithError(nil) is equivalent to Close: it surfaces io.EOF to the
+		// reader, ending the request body cleanly.
+		_ = pw.CloseWithError(err)
+		errCh <- err
 	}()
 
-	url := streamingURL(OpFileUpload)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, pr)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opURL(OpFileUpload), pr)
 	if err != nil {
 		return fmt.Errorf("brokerrpc: build upload request: %w", err)
 	}
-	httpReq.Header.Set("Content-Type", "application/connect+json")
-	httpReq.Header.Set("Connect-Protocol-Version", "1")
+	httpReq.Header.Set("Content-Type", mw.FormDataContentType())
+	c.setAuthHeader(httpReq)
 
 	httpResp, err := c.http.Do(httpReq)
 	if err != nil {
+		// The transport failed (dial/TLS/etc.). Drain the writer goroutine so it
+		// does not leak, then surface the transport error.
+		<-errCh
 		return fmt.Errorf("brokerrpc: fileUpload: %w", err)
 	}
-	defer httpResp.Body.Close() //nolint:errcheck
+	defer func() { _ = httpResp.Body.Close() }()
 
-	// Collect the frame-writing result (blocks until the goroutine finishes).
+	respBody, readErr := io.ReadAll(httpResp.Body)
+
+	// Collect the body-writing result (blocks until the goroutine finishes).
 	writeErr := <-errCh
 
-	// Success/failure for streaming ops lives ONLY in the EndStreamResponse
-	// trailer (the HTTP status is always 200 for streams). The trailer verdict
-	// is authoritative and MUST be read and preferred before the writer-pipe
-	// error is considered. When the broker terminates the stream early — the
-	// SEC-46 resource_exhausted throttle case, a frame over the ceiling, or a
-	// permission failure — it replies without draining the request body, the
-	// transport closes the pipe, and the writer goroutine fails with
-	// io.ErrClosedPipe. A parseable error trailer must never be masked by that
-	// pipe-closure error, or the contractually retryable backpressure posture
-	// (D4/SEC-46) is destroyed.
-	// readUploadResult tolerates an optional response message frame (flag 0x00)
-	// before the trailer, the standard Connect client-streaming success shape;
-	// reading readEndStream directly would hard-fail on that leading frame.
-	esr, trailerErr := readUploadResult(httpResp.Body)
-	if trailerErr == nil && esr.Error != nil {
-		retryAfterRaw := httpResp.Header.Get("Retry-After")
-		return MapConnectError(esr.Error, retryAfterRaw)
+	// Success/failure is the HTTP status. A non-2xx is authoritative and must be
+	// preferred over a writer-pipe error: when the broker terminates early — the
+	// SEC-46 429 throttle case, a permission failure — it replies without
+	// draining the request body, the transport closes the pipe, and the writer
+	// goroutine fails with io.ErrClosedPipe. That pipe-closure error must never
+	// mask the retryable backpressure verdict the status carries.
+	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
+		return MapHTTPStatus(httpResp.StatusCode, respBody, httpResp.Header.Get("Retry-After"))
 	}
 
-	// No authoritative error trailer. A genuine frame-writing failure now
-	// surfaces — except a pipe closure, which is the expected symptom of the
-	// broker ending the stream early rather than a real local write fault.
-	if writeErr != nil && !errors.Is(writeErr, io.ErrClosedPipe) {
-		return fmt.Errorf("brokerrpc: fileUpload write frames: %w", writeErr)
+	// 2xx but the body read failed: surface it.
+	if readErr != nil {
+		return fmt.Errorf("brokerrpc: fileUpload read response body: %w", readErr)
 	}
 
-	// Trailer read failed and there is no clear write fault to report.
-	if trailerErr != nil {
-		return fmt.Errorf("brokerrpc: fileUpload read EndStreamResponse: %w", trailerErr)
+	// 2xx with a genuine write fault that is NOT a pipe closure surfaces as a
+	// local error (the broker accepted, but the source could not be read).
+	if writeErr != nil && !isPipeClosure(writeErr) {
+		return fmt.Errorf("brokerrpc: fileUpload write body: %w", writeErr)
 	}
 
-	// Parseable success trailer ({}); the upload completed.
 	return nil
 }
 
-// jsonEnvelopeOverhead is the byte cost of the {"chunk":""} JSON wrapper around
-// the base64 chunk payload, plus one byte of safety margin so the encoded frame
-// payload stays strictly below the ceiling rather than equal to it.
+// isPipeClosure reports whether err is the io.ErrClosedPipe symptom of the
+// broker ending the request early, which must not be treated as a real local
+// fault when the HTTP status already carried the verdict.
+func isPipeClosure(err error) bool {
+	return errors.Is(err, io.ErrClosedPipe)
+}
+
+// jsonEnvelopeOverhead is retained for the chunk-size arithmetic below. It
+// reflects the byte cost of the previous chunk envelope plus a safety margin;
+// the multipart file part now streams raw bytes, so the chunker only bounds how
+// many source bytes are read per Write call.
 const jsonEnvelopeOverhead = len(`{"chunk":""}`) + 1
 
 // sourceChunkSize returns the number of raw source bytes to read per chunk so
-// that the encoded {"chunk":"<base64>"} frame payload stays strictly under
-// ceiling. Base64 encodes N source bytes (a multiple of 3) into 4*N/3
-// characters with no padding, so the frame payload is
-// jsonEnvelopeOverhead + 4*N/3. Solving 4*N/3 < ceiling-jsonEnvelopeOverhead
-// and rounding N down to a multiple of 3 yields the value below. The result is
-// always at least 3 so progress is guaranteed even for a tiny ceiling.
+// that a single write stays comfortably under the message ceiling. The result
+// is always at least 3 so progress is guaranteed even for a tiny ceiling.
 func sourceChunkSize(ceiling int) int {
 	budget := ceiling - jsonEnvelopeOverhead
 	n := 3 * (budget / 4)
@@ -163,12 +156,12 @@ func sourceChunkSize(ceiling int) int {
 	return n
 }
 
-// writeUploadFrames sends the params frame followed by ceiling-sized chunk
-// frames to w, reading from src until EOF. It sends exactly totalBytes bytes
-// across the chunk frames (the caller is responsible for supplying a src that
-// yields exactly that many bytes; a mismatch will be detected broker-side).
-func writeUploadFrames(
-	w io.Writer,
+// writeUploadMultipart writes the "params" form field followed by the file part
+// streamed from src in ceiling-bounded reads. It writes exactly totalBytes
+// bytes across the file part (the caller supplies a src that yields exactly that
+// many bytes; a mismatch is detected broker-side).
+func writeUploadMultipart(
+	mw *multipart.Writer,
 	fsID, path string,
 	totalBytes int64,
 	overwrite bool,
@@ -176,7 +169,7 @@ func writeUploadFrames(
 	src io.Reader,
 	ceiling int,
 ) error {
-	// Frame 1: params.
+	// Field 1: params (JSON).
 	params := uploadParamsFrame{
 		FilesystemID:          fsID,
 		Path:                  path,
@@ -186,31 +179,30 @@ func writeUploadFrames(
 	}
 	payload, err := json.Marshal(params)
 	if err != nil {
-		return fmt.Errorf("marshal params frame: %w", err)
+		return fmt.Errorf("marshal params: %w", err)
 	}
-	if err := writeFrame(w, 0x00, payload); err != nil {
-		return err
+	pf, err := mw.CreateFormField("params")
+	if err != nil {
+		return fmt.Errorf("create params field: %w", err)
+	}
+	if _, err := pf.Write(payload); err != nil {
+		return fmt.Errorf("write params field: %w", err)
 	}
 
-	// Subsequent frames: read source in chunks sized so the ENCODED frame
-	// payload stays strictly under the message ceiling. The chunk bytes are
-	// JSON-encoded as base64 via Go's standard []byte marshalling: N source
-	// bytes (a multiple of 3, so no base64 padding) become 4*N/3 base64
-	// characters wrapped in the {"chunk":"..."} envelope. Sizing the read by
-	// raw source bytes would push every full frame to ~4/3 of the ceiling and
-	// deterministically draw resource_exhausted from the broker (D4).
+	// Field 2: the file part, streamed in ceiling-bounded chunks. Sizing each
+	// read keeps a single Write bounded so the message ceiling still governs the
+	// per-write payload; the file part as a whole carries the exact source bytes.
+	fp, err := mw.CreateFormFile("file", "upload")
+	if err != nil {
+		return fmt.Errorf("create file part: %w", err)
+	}
 	srcChunk := sourceChunkSize(ceiling)
 	buf := make([]byte, srcChunk)
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {
-			chunk := uploadChunkFrame{Chunk: buf[:n]}
-			payload, err = json.Marshal(chunk)
-			if err != nil {
-				return fmt.Errorf("marshal chunk frame: %w", err)
-			}
-			if err := writeFrame(w, 0x00, payload); err != nil {
-				return err
+			if _, werr := fp.Write(buf[:n]); werr != nil {
+				return fmt.Errorf("write file chunk: %w", werr)
 			}
 		}
 		if readErr == io.EOF {
@@ -219,17 +211,6 @@ func writeUploadFrames(
 		if readErr != nil {
 			return fmt.Errorf("read source: %w", readErr)
 		}
-	}
-
-	// Terminating frame: the Connect client-streaming protocol closes a request
-	// with an explicit end-stream frame (flag 0x02) carrying an empty
-	// EndStreamResponse {}, not a bare body half-close. Omitting it leaves the
-	// broker waiting on a frame that never arrives; after it has already
-	// assembled the object from the data frames it then aborts the stream as a
-	// malformed inbound frame, and the retry sees the object as already present.
-	// The end-stream frame is what tells the broker the upload is complete.
-	if err := writeEndStream(w, nil); err != nil {
-		return err
 	}
 	return nil
 }

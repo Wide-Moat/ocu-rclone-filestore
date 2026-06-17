@@ -1,94 +1,79 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 // Copyright (c) 2025 Open Computer Use Contributors
 
-// Fuzz target for the closed-code error mapper.
+// Fuzz target for the HTTP-status error mapper.
 //
-// MapConnectError consumes broker-controlled code/message strings plus the raw
-// Retry-After header string. The strconv.ParseFloat + time.Duration math on the
-// Retry-After path is the designated malformed-header defense: "inf", "1e300",
-// negatives and NaN must never produce a garbage Duration nor make a
-// non-retryable code retryable. MapConnectError is exported, but the target is
-// kept white-box with its siblings (package brokerrpc).
+// MapHTTPStatus consumes a broker-controlled status, an arbitrary body, and the
+// raw Retry-After header string. The strconv.ParseFloat + time.Duration math on
+// the Retry-After path is the designated malformed-header defense: "inf",
+// "1e300", negatives and NaN must never produce a garbage Duration nor make a
+// non-retryable status retryable.
 
 package brokerrpc
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
 	"github.com/rclone/rclone/fs/fserrors"
 )
 
-// retryableCodes is the closed set of codes that MapConnectError must classify
-// as retryable; every other code (including the empty string and unknowns) is
-// permanent.
-var retryableCodes = map[string]struct{}{
-	"resource_exhausted": {},
-	"unavailable":        {},
+// retryableStatuses is the closed set of statuses MapHTTPStatus must classify as
+// retryable; every other non-2xx status is permanent.
+var retryableStatuses = map[int]struct{}{
+	http.StatusTooManyRequests:    {},
+	http.StatusServiceUnavailable: {},
 }
 
-// FuzzMapConnectError drives the mapper over arbitrary (code, message,
-// retryAfter) triples.
+// FuzzMapHTTPStatus drives the mapper over arbitrary (status, body, retryAfter)
+// triples.
 //
 // Invariants (no panic on any triple is the baseline):
-//   - The result is never nil for a non-nil ConnectError.
-//   - retryability depends ONLY on the code, never on the Retry-After string: a
-//     non-retryable code stays non-retryable for ANY header value, and a
-//     retryable code stays retryable for ANY header value. A malformed header
-//     can never flip the posture.
-//   - When a RetryAfter deadline IS produced, it is strictly in the future and
-//     bounded by maxRetryAfterSeconds — never a garbage/overflowed Duration.
-//   - An unknown/empty code maps to the permanent default (ErrPermanentOther,
-//     non-retryable).
-func FuzzMapConnectError(f *testing.F) {
-	f.Add("resource_exhausted", "throttled", "1.5")
-	f.Add("resource_exhausted", "throttled", "inf")
-	f.Add("resource_exhausted", "throttled", "1e300")
-	f.Add("resource_exhausted", "throttled", "-5")
-	f.Add("resource_exhausted", "throttled", "NaN")
-	f.Add("resource_exhausted", "throttled", "0")
-	f.Add("resource_exhausted", "throttled", "3600")
-	f.Add("resource_exhausted", "throttled", "")
-	f.Add("unavailable", "audit down", "10")
-	f.Add("permission_denied", "denied", "100")
-	f.Add("invalid_argument", "bad", "")
-	f.Add("not_found", "missing", "")
-	f.Add("already_exists", "collision", "")
-	f.Add("aborted", "conflict", "5")
-	f.Add("totally_unknown_code", "?", "5")
-	f.Add("", "", "")
+//   - The result is never nil.
+//   - Retryability depends ONLY on the status, never on the Retry-After string.
+//   - When a RetryAfter deadline IS produced, it is bounded by
+//     maxRetryAfterSeconds — never a garbage/overflowed Duration — and only on a
+//     retryable status.
+func FuzzMapHTTPStatus(f *testing.F) {
+	f.Add(429, "throttled", "1.5")
+	f.Add(429, "throttled", "inf")
+	f.Add(429, "throttled", "1e300")
+	f.Add(429, "throttled", "-5")
+	f.Add(429, "throttled", "NaN")
+	f.Add(429, "throttled", "0")
+	f.Add(429, "throttled", "3600")
+	f.Add(429, "throttled", "")
+	f.Add(503, "audit down", "10")
+	f.Add(403, "denied", "100")
+	f.Add(400, "bad", "")
+	f.Add(404, "missing", "")
+	f.Add(409, "collision", "")
+	f.Add(418, "teapot", "5")
+	f.Add(500, "boom", "5")
+	f.Add(200, "", "")
 
-	f.Fuzz(func(t *testing.T, code, message, retryAfter string) {
-		ce := &ConnectError{Code: code, Message: message}
-		err := MapConnectError(ce, retryAfter)
+	f.Fuzz(func(t *testing.T, status int, body, retryAfter string) {
+		err := MapHTTPStatus(status, []byte(body), retryAfter)
 		if err == nil {
-			t.Fatalf("MapConnectError returned nil for a non-nil ConnectError (code=%q)", code)
+			t.Fatalf("MapHTTPStatus returned nil for status=%d", status)
 		}
 
-		_, wantRetryable := retryableCodes[code]
+		_, wantRetryable := retryableStatuses[status]
 		gotRetryable := fserrors.IsRetryError(err)
 		if gotRetryable != wantRetryable {
-			t.Fatalf("code=%q retryAfter=%q: retryable=%v, want %v (header must not change posture)",
-				code, retryAfter, gotRetryable, wantRetryable)
+			t.Fatalf("status=%d retryAfter=%q: retryable=%v, want %v (header must not change posture)",
+				status, retryAfter, gotRetryable, wantRetryable)
 		}
 
-		// A RetryAfter deadline, when present, must be bounded by
-		// maxRetryAfterSeconds: that is the malformed-header guard (it rejects
-		// "inf"/"1e300"/negatives/NaN before they become a garbage Duration).
-		// We deliberately do NOT assert the deadline is still in the future: the
-		// mapper legitimately accepts arbitrarily small positive hints (e.g.
-		// "1e-7" -> 100ns), whose deadline can elapse within this test before the
-		// time.Until call. That elapsing is correct behaviour, not a defect, so
-		// only the upper bound is a real invariant. The bound is checked against
-		// the same instant the deadline was computed (now), with a small slack
-		// for the construction latency.
 		if fserrors.IsRetryAfterError(err) {
 			if !wantRetryable {
-				t.Fatalf("code=%q: produced a RetryAfter on a non-retryable code", code)
+				t.Fatalf("status=%d: produced a RetryAfter on a non-retryable status", status)
 			}
 			remaining := time.Until(fserrors.RetryAfterErrorTime(err))
 			if remaining > maxRetryAfterSeconds*time.Second {
-				t.Fatalf("code=%q retryAfter=%q: RetryAfter %v exceeds bound %ds", code, retryAfter, remaining, maxRetryAfterSeconds)
+				t.Fatalf("status=%d retryAfter=%q: RetryAfter %v exceeds bound %ds",
+					status, retryAfter, remaining, maxRetryAfterSeconds)
 			}
 		}
 	})

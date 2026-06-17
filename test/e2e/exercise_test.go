@@ -20,9 +20,10 @@ import (
 	"time"
 )
 
-// Environment contract the live harness exports. The mountpoints and socket are
-// resolved here so 05-02 only sets these variables and flips the gate; the
-// assertions below stay frozen.
+// Environment contract the live harness exports. The mountpoints are resolved
+// here so the live wave only sets these variables and flips the gate; the
+// guest's outbound HTTPS service_url is configured in the compose graph, not
+// passed to the test. The assertions below stay frozen.
 const (
 	// envGate is the master gate. Unset -> the whole exercise skips clean.
 	envGate = "RCLONE_OCUFS_LIVE"
@@ -140,8 +141,8 @@ type liveEnv struct {
 func requireLive(t *testing.T) liveEnv {
 	t.Helper()
 	if os.Getenv(envGate) == "" {
-		t.Skipf("%s not set — the live broker harness is wired in wave 05-02 "+
-			"(compose up with /dev/fuse + SYS_ADMIN against the broker socket); "+
+		t.Skipf("%s not set — the live broker harness is wired in the live wave "+
+			"(compose up with /dev/fuse + SYS_ADMIN, the guest dialing the egress edge over HTTPS); "+
 			"this exercise skips clean until then", envGate)
 	}
 

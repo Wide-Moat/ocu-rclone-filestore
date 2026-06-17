@@ -1,0 +1,185 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Egress edge for the storage leg. This is the deployment artifact that
+# expresses, in stock Envoy filters, the validate -> strip -> exchange ->
+# inject chain the guest's weak session token must pass through before any
+# request reaches the filestore upstream. The chain has three load-bearing
+# stages, in order, on a single HTTP connection-manager filter chain:
+#
+#   1. envoy.filters.http.jwt_authn validates the inbound WEAK session JWT.
+#      The verification key set is fetched from the control-plane's published
+#      JWKS via remote_jwks (no key material is baked into this config). The
+#      issuer and audiences are pinned; a missing or invalid token draws 401
+#      before any later filter runs. forward is false, so the weak JWT is
+#      STRIPPED from the request after validation: nothing downstream — and in
+#      particular the filestore upstream — ever sees it.
+#
+#   2. envoy.filters.http.credential_injector performs the RFC-8693 token
+#      exchange and injects the resulting REAL filestore credential on the
+#      Authorization header in place of the stripped weak JWT. The exchange is
+#      keyed on the validated filesystem_id (ratified decision #3:
+#      credential_injector with a per-filesystem_id keyed lookup, NOT
+#      ext_proc). The keyed mapping is OCU configuration/code driving the
+#      injector's credential source; Envoy itself stays stock.
+#
+#   3. envoy.filters.http.router routes the now-credentialled request to the
+#      filestore upstream cluster.
+#
+# Envoy is stock throughout. The only OCU-authored content is configuration:
+# the issuer/audience pins, the JWKS and exchange/filestore cluster wiring,
+# and the keyed credential source the injector reads. Real-Envoy validation of
+# this file is performed with `envoy --mode validate`; the live serving run is
+# deferred to the Phase F harness.
+
+node:
+  id: storage-egress-edge
+  cluster: ocu-storage-edge
+
+static_resources:
+  listeners:
+    - name: storage_edge_listener
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 10000
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: storage_edge
+                codec_type: AUTO
+                route_config:
+                  name: storage_routes
+                  virtual_hosts:
+                    - name: filestore_backend
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: "/v1/filestore/"
+                          route:
+                            cluster: filestore_upstream
+                http_filters:
+                  # ---------------------------------------------------------
+                  # Stage 1 — validate the inbound weak session JWT against
+                  # the control-plane JWKS, then STRIP it (forward: false).
+                  # ---------------------------------------------------------
+                  - name: envoy.filters.http.jwt_authn
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+                      providers:
+                        control_plane:
+                          issuer: "https://control-plane.test"
+                          audiences:
+                            - "filestore-edge"
+                          # The validated claims (in particular filesystem_id)
+                          # are published to dynamic metadata so the keyed
+                          # credential lookup downstream can read the scope the
+                          # token was validated for.
+                          payload_in_metadata: jwt_payload
+                          # forward: false STRIPS the weak JWT after a
+                          # successful validation. The Authorization header it
+                          # rode in on is removed before any later filter runs,
+                          # so the filestore upstream can never observe it.
+                          forward: false
+                          from_headers:
+                            - name: Authorization
+                              value_prefix: "Bearer "
+                          remote_jwks:
+                            http_uri:
+                              uri: "https://control-plane.test/.well-known/jwks.json"
+                              cluster: control_plane_jwks
+                              timeout: 5s
+                            cache_duration: 300s
+                      rules:
+                        # Every storage request must carry a valid weak JWT;
+                        # a missing or invalid token draws 401 here, before the
+                        # exchange or the route is ever reached.
+                        - match:
+                            prefix: "/v1/filestore/"
+                          requires:
+                            provider_name: control_plane
+                  # ---------------------------------------------------------
+                  # Stage 2 — exchange the validated weak JWT for the real
+                  # filestore credential (RFC-8693) keyed on the validated
+                  # filesystem_id, and inject it on Authorization in place of
+                  # the stripped weak JWT. The credential source is the OCU
+                  # keyed lookup driven by the edge exchange glue; overwrite is
+                  # true so the injected credential replaces any inbound value.
+                  # ---------------------------------------------------------
+                  - name: envoy.filters.http.credential_injector
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.credential_injector.v3.CredentialInjector
+                      overwrite: true
+                      # A request that produces no exchanged credential is
+                      # refused rather than forwarded uncredentialled, so a
+                      # scope with no mapping can never reach the upstream
+                      # anonymously.
+                      allow_request_without_credential: false
+                      credential:
+                        name: envoy.http.injected_credentials.generic
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.injected_credentials.generic.v3.Generic
+                          header: "Authorization"
+                          # The injected credential is the real, post-exchange
+                          # filestore credential resolved per validated
+                          # filesystem_id. The SDS secret named here is supplied
+                          # by the OCU keyed credential source (the edge
+                          # exchange glue), NOT a static literal in this file.
+                          credential:
+                            name: filestore_exchanged_credential
+                  # ---------------------------------------------------------
+                  # Stage 3 — route to the filestore upstream.
+                  # ---------------------------------------------------------
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    # The control-plane JWKS endpoint the jwt_authn filter fetches the
+    # verification key set from via remote_jwks.
+    - name: control_plane_jwks
+      type: STRICT_DNS
+      connect_timeout: 5s
+      load_assignment:
+        cluster_name: control_plane_jwks
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: control-plane
+                      port_value: 8443
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+
+    # The filestore REST upstream the credentialled request is routed to.
+    - name: filestore_upstream
+      type: STRICT_DNS
+      connect_timeout: 5s
+      load_assignment:
+        cluster_name: filestore_upstream
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: filestore
+                      port_value: 8444
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+
+# The named credential the injector reads is supplied as an SDS secret by the
+# OCU keyed credential source (the edge exchange glue), resolved per validated
+# filesystem_id. It is declared here as a dynamic secret rather than an inline
+# literal so no credential material lives in this file.
+admin:
+  address:
+    socket_address:
+      address: 127.0.0.1
+      port_value: 9901

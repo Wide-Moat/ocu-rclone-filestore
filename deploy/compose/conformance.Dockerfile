@@ -3,12 +3,13 @@
 #
 # Conformance-runner image. Compiles the rclone standard backend test suite
 # (backend/ocufs, TestFstestsLiveBroker) into a standalone static test binary
-# on a minimal busybox base. The binary configures its OWN ocufs remote and
-# dials the broker session socket DIRECTLY — it never touches the FUSE mount
-# or its VFS cache, so every fstests write/read-back round-trip is inherently
-# broker-cold (the read can only be served by the broker's fileDownload path).
-# It holds no broker credential (SEC-25): socket_path + filesystem_id are the
-# only handles, supplied through the rclone config.
+# on a minimal busybox base, plus the conformance-bootstrap step. The binary
+# configures its OWN ocufs remote (rendered at bringup by conformance-bootstrap
+# as RCLONE_CONFIG_* env overrides) dialing the edge over TLS — it never touches
+# the FUSE mount or its VFS cache, so every fstests write/read-back round-trip is
+# inherently cold (the read can only be served by the filestore download path
+# through the edge). The guest credential is the minted weak JWT; the real
+# filestore credential never reaches the runner (the edge exchanges it).
 #
 # Build context: the repository root (see docker-compose.yml). The sibling
 # conformance.Dockerfile.dockerignore replaces the root .dockerignore for THIS
@@ -31,11 +32,16 @@ COPY . .
 ENV CGO_ENABLED=0
 RUN go test -c -trimpath -o /conformance.test ./backend/ocufs/
 
+# Also build the conformance-bootstrap step that renders the rclone remote at
+# bringup (service_url + minted weak JWT + CA PEM through the new transport).
+RUN go build -trimpath -o /conformance-bootstrap ./test/harness/cmd/conformance-bootstrap
+
 # Runtime. busybox 1.37.0-glibc pinned by digest (the static test binary needs
-# no libc; the shell drives the broker-socket readiness poll).
+# no libc; the shell sources the rendered rclone env overrides before the run).
 FROM busybox@sha256:4279d9b47df4c1b02d80efd8d02cd59b3a8182c1e785a4ff3f6983bee19dc8b0 AS runtime
 
 COPY --from=builder /conformance.test /conformance.test
+COPY --from=builder /conformance-bootstrap /conformance-bootstrap
 
 # rclone's fstests bootstrap (fstest/testserver.Start) unconditionally locates
 # an fstest/testserver/init.d directory relative to the working directory
@@ -48,5 +54,5 @@ COPY --from=builder /conformance.test /conformance.test
 WORKDIR /work
 RUN mkdir -p /work/fstest/testserver/init.d
 
-# The command (poll for the broker session socket, then exec the test binary
-# from /work) is supplied by the compose service.
+# The command (render the rclone env overrides via conformance-bootstrap, source
+# them, then exec the test binary from /work) is supplied by the compose service.

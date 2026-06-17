@@ -1,11 +1,13 @@
 {
   "schema_version": "v1alpha",
-  "service_url": "https://broker.internal",
+  "service_url": "https://edge.invalid",
+  "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nTEMPLATE_PLACEHOLDER_RENDERED_AT_BRINGUP\n-----END CERTIFICATE-----\n",
   "mounts": [
     {
-      "destination": "/workspace/out",
+      "destination": "/mnt/user-data/outputs/",
+      "auth_token": "TEMPLATE_PLACEHOLDER_RENDERED_AT_BRINGUP",
       "filesystem_id": "fsrw",
-      "writes": true,
+      "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
       "vfs_cache_max_size": "1G",
@@ -13,9 +15,10 @@
       "file_perms": "0644"
     },
     {
-      "destination": "/workspace/out2",
+      "destination": "/mnt/user-data/outputs2/",
+      "auth_token": "TEMPLATE_PLACEHOLDER_RENDERED_AT_BRINGUP",
       "filesystem_id": "fsrw",
-      "writes": true,
+      "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
       "vfs_cache_max_size": "1G",
@@ -23,21 +26,21 @@
       "file_perms": "0644"
     },
     {
-      "destination": "/workspace/throttle",
+      "destination": "/mnt/user-data/throttle/",
+      "auth_token": "TEMPLATE_PLACEHOLDER_RENDERED_AT_BRINGUP",
       "filesystem_id": "fsthrottle",
-      "writes": true,
+      "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
       "vfs_cache_max_size": "1G",
       "dir_perms": "0755",
       "file_perms": "0644"
-    }
-  ],
-  "readonly_mounts": [
+    },
     {
-      "destination": "/workspace/in",
+      "destination": "/mnt/user-data/uploads/",
+      "auth_token": "TEMPLATE_PLACEHOLDER_RENDERED_AT_BRINGUP",
       "filesystem_id": "fsro",
-      "writes": false,
+      "readonly": true,
       "vfs_cache_mode": "minimal",
       "cache_duration_s": 5,
       "vfs_cache_max_size": "256M",

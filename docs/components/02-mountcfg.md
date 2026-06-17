@@ -5,69 +5,73 @@
 
 The guest binary is handed a JSON mount config at provision time. That JSON is
 untrusted input, and `mountcfg` is the one place it becomes a typed `*Config`.
-`Load` is the single door: it strict-decodes into the guest shape, validates
-every structural rule, and refuses any provision-side credential marker. Nothing
-downstream re-checks — a `*Config` from `Load` is the only evidence the rest of
-the binary trusts, and `run.go` calls `Load` exactly once before it mounts
-anything.
+`Load` is the single door: it strict-decodes into the guest shape and validates
+every structural rule. Nothing downstream re-checks — a `*Config` from `Load` is
+the only evidence the rest of the binary trusts, and `run.go` calls `Load`
+exactly once before it mounts anything.
 
-The struct deliberately has no credential field. The session-scoped
-`filesystem_id` is the only backend handle the guest ever holds; the bearer is
-injected at the egress edge and is never visible here. This loader is where the
-guest half of SEC-25 — no backend protocol, no backend credential inside the
-guest — is mechanically held.
+The config carries the transport the guest speaks and the credential it
+presents. The top level holds the egress endpoint (`service_url`, an `https://`
+URL) and the trust anchor for that hop (`ca_cert_pem`); each mount holds its own
+`auth_token`, a short-lived, scoped session JWT. That JWT is a Bearer the guest
+presents on every outbound call and is therefore visible to this loader — it is
+a required field, not a refused one. The egress edge is what validates the JWT,
+strips it, and exchanges it for the real storage credential, so the guest never
+holds a BACKEND or object-store key. The only backend handle the guest carries
+is the session-scoped `filesystem_id`. This loader is where the guest half of
+SEC-25 — no backend protocol and no backend credential inside the guest — is
+mechanically held: the JWT it accepts is an edge-only assertion, never a
+storage key.
 
 ## What a caller touches
 
 `Load(path)` returns `*Config`, or one of this package's pointer-typed errors.
-`Config` is the top level (`SchemaVersion`, `ServiceURL`, and the two mount
-arrays `Mounts` and `ReadonlyMounts`); each entry is a `Mount`. Callers that
-want to branch on *why* a config was rejected use `errors.As` against the
-concrete `Err*` types described below.
+`Config` is the top level — `SchemaVersion`, `ServiceURL`, `CACertPEM`, and a
+single `Mounts` array — and each entry is a `Mount`. Callers that want to branch
+on *why* a config was rejected use `errors.As` against the concrete `Err*` types
+described below.
 
 The presence-sensitive `Mount` fields are pointers on purpose, so the loader can
 tell an absent field from a zero value: `FilesystemID` and `MemoryStoreID` (the
-scope), `Writes` (the RW/RO posture), and `CacheDurationS` (the freshness
+scope), `Readonly` (the RW/RO posture), and `CacheDurationS` (the freshness
 window). A nil `CacheDurationS` is a missing field and is rejected; an explicit
-`0` is legal. Collapsing any of these to a value type would silently accept an
-absent field as its zero — that is a correctness break, not a simplification.
+`0` is legal. A nil `Readonly` is a missing field and is rejected; both explicit
+`true` and explicit `false` are legal. Collapsing any of these to a value type
+would silently accept an absent field as its zero — that is a correctness break,
+not a simplification.
 
 ## The load path
 
-`Load` is fail-fast and ordered. The credential pre-scan runs on the raw bytes
-*before* strict decode, so a leaked marker surfaces as a legible
-`ErrProvisionMarker` instead of being buried in a generic unknown-field decode
-error.
+`Load` is fail-fast and ordered. It reads the file, strict-decodes with
+unknown-field rejection, then validates every rule, stopping at the first
+failure.
 
 ```mermaid
 flowchart TD
     A["Load(path)"] --> B["os.ReadFile"]
     B -->|read error| Z1["wrapped path error"]
-    B --> C["scanProvisionMarkers raw bytes"]
-    C -->|marker present| Z2["ErrProvisionMarker"]
-    C --> D["strict decode, DisallowUnknownFields"]
+    B --> D["strict decode, DisallowUnknownFields"]
     D -->|bad JSON or unknown field| Z3["ErrDecode"]
     D --> E["validate"]
     E -->|first failing rule| Z4["typed rule error"]
     E --> F["return Config"]
 ```
 
-`validate` checks the top level — `schema_version` pattern, `service_url`, then
-required `mounts` presence — and hands each array to `validateMount`. The
-`mounts` key must be present: a nil slice (absent or JSON `null`) is rejected
-with `ErrMissingField`, while a present-but-empty array is legal. The same
-`validateMount` enforces both arrays, parameterised by the posture each requires.
+`validate` checks the top level — `schema_version` pattern, `service_url`,
+required `ca_cert_pem` presence, then required `mounts` presence — and hands the
+array to `validateMount`. The `mounts` key must be present: a nil slice (absent
+or JSON `null`) is rejected with `ErrMissingField`, while a present-but-empty
+array is legal.
 
-Code: mountcfg.go (Load, scanProvisionMarkers, validate, validateServiceURL, validateMounts, validateMount), run.go (Load call site).
+Code: mountcfg.go (Load, validate, validateServiceURL, validateMounts, validateMount), run.go (Load call site).
 
 ## Structural rules and their errors
 
-Every rule has its own concrete error type, returned as a pointer. Most carry
-the array name (`mounts` or `readonly_mounts`, typed as `mountArray`) and the
-entry index, so a message points an operator at the exact mount that failed.
-Validation stops at the first failure, so the precedence below is also the order
-in which a multiply-broken mount reports — reordering the checks changes which
-error a caller sees.
+Every rule has its own concrete error type, returned as a pointer. The per-mount
+errors carry the entry index, so a message points an operator at the exact mount
+that failed. Validation stops at the first failure, so the precedence below is
+also the order in which a multiply-broken mount reports — reordering the checks
+changes which error a caller sees.
 
 Top-level:
 
@@ -75,6 +79,7 @@ Top-level:
 | --- | --- | --- |
 | `schema_version` | matches `^v[0-9]+(alpha\|beta)?[0-9]*$` | `ErrSchemaVersion` |
 | `service_url` | literal `https://` prefix, then a parseable URI (`Reason` says which failed) | `ErrServiceURL` |
+| `ca_cert_pem` | non-empty | `ErrMissingField` |
 | `mounts` | key present (nil slice rejected) | `ErrMissingField` |
 | any field | unknown to the guest shape, or malformed JSON | `ErrDecode` |
 
@@ -85,9 +90,10 @@ Per mount, in evaluation order:
 | Field | Rule | Error |
 | --- | --- | --- |
 | `destination` | absolute, matches `^/.+` (bare `/` is rejected) | `ErrDestination` |
+| `auth_token` | present and non-empty | `ErrAuthToken` |
 | scope | exactly one of `filesystem_id` / `memory_store_id` present | `ErrMountScope` |
 | scope id | the present id is a non-empty string | `ErrScopeID` |
-| `writes` | present and equal to the array's posture | `ErrWritesPosture` |
+| `readonly` | present (absent flag rejected; `true` and `false` both legal) | `ErrReadonlyMissing` |
 | `cache_duration_s` | present and `>= 0` (explicit `0` legal) | `ErrCacheDuration` |
 | `dir_perms`, `file_perms` | octal, match `^0[0-7]{3}$` | `ErrPerms` |
 | `vfs_cache_max_size` | match `^[0-9]+(B\|K\|M\|G\|T)?$` (suffix optional, not normalised) | `ErrByteSize` |
@@ -97,7 +103,7 @@ The byte-size string is passed through verbatim for the mounter to interpret;
 `mountcfg` only checks its shape. `octalRe` wants exactly four digits with a
 leading `0`, so a three-digit `755` is rejected.
 
-Code: errors.go (every `Err*` type, `mountArray`), mountcfg.go (`schemaVersionRe`, `destinationRe`, `octalRe`, `byteSizeRe`, `cacheModes`).
+Code: errors.go (every `Err*` type), mountcfg.go (`schemaVersionRe`, `destinationRe`, `octalRe`, `byteSizeRe`, `cacheModes`).
 
 ## Scope is a true XOR
 
@@ -111,27 +117,35 @@ empty id separately, since a scope id must be a non-empty string. The pointer
 types are what make "present" mean "the key appeared," which is why the scope
 fields cannot become value types.
 
-RW/RO posture is structural and checked both ways: `Mounts` entries must carry
-`writes=true`, `ReadonlyMounts` entries `writes=false`. The array a mount lives
-in and its flag must agree, so a write mount cannot hide in the read-only list,
-and a missing flag is itself a posture failure.
+`memory_store_id` is a valid scope branch at config-load time: a mount that names
+it parses and validates. Standing one up as a live FUSE mount is out of scope for
+v1, so the mounter rejects a memory-store mount as a hard error rather than the
+loader. The loader's job is to accept the well-formed shape; the v1 mount-surface
+limit is enforced where the mount is built.
 
-## Refusing credential markers
+## RW/RO posture is per-mount
 
-The frozen contract defines the provisioning credential fields — `auth_token`
-and `ca_cert_pem` — only on the host-side variant, never on the guest shape.
-Strict decoding already rejects them as unknown fields, but `scanProvisionMarkers`
-checks for them explicitly across the top level and every mount entry, returning
-`ErrProvisionMarker` with the offending field and its location. The redundancy is
-deliberate: it turns a credential leak into a named, independently testable
-refusal rather than something indistinguishable from a typo. If the contract
-ever adds another host-only field, it joins `provisionMarkers` here.
+There is one `mounts` array, and each entry carries its own `readonly` boolean.
+A read-only mount sets `readonly=true`, a writable mount `readonly=false`, and
+the field is mandatory — an absent flag is itself a posture failure. The posture
+is structural in the config and is enforced again at the VFS layer when the mount
+is built, so a read-only mount cannot be written through even if a caller tries.
 
-This is the structural form of SEC-25: the transport substrate and the backend
-source path are intentionally not guest fields, so an attempt to smuggle them in
-fails decode, and the named credential markers fail the pre-scan.
+## Required transport and credential fields
 
-Code: mountcfg.go (`provisionMarkers`, scanProvisionMarkers), errors.go (`ErrProvisionMarker`).
+The guest config carries the egress transport and the per-mount Bearer it
+presents. `service_url` and `ca_cert_pem` are required top-level fields, and each
+mount's `auth_token` is required and non-empty. The loader holds these rather
+than refusing them: the JWT is the assertion the guest presents at the egress
+hop, and `ca_cert_pem` is the trust anchor for that hop.
+
+This is the structural form of SEC-25: the guest config names a single egress
+endpoint and a scoped, edge-only JWT — never a backend object-store protocol and
+never a backend storage credential. The egress edge validates the JWT, strips it,
+and exchanges it for the real credential out of the guest's sight, so an
+`auth_token` in this config is a session assertion, not a storage key.
+
+Code: mountcfg.go (validate, validateServiceURL, validateMount), errors.go (`ErrAuthToken`, `ErrReadonlyMissing`, `ErrMissingField`, `ErrServiceURL`).
 
 ## Parity with the schema
 

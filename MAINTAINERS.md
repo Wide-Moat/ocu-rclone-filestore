@@ -18,7 +18,8 @@ maintained by the Open Computer Use Contributors.
   first and this repository follows.
 - **Implementation decisions happen in the open, via pull request.** How the
   guest side implements an upstream decision — the backend package, the FUSE
-  frontend, the broker RPC client, the build and release plumbing — is reviewed
+  frontend, the HTTPS/REST transport client (`internal/brokerrpc`), the build
+  and release plumbing — is reviewed
   and agreed in PR threads on this repository.
 
 ## Review bar

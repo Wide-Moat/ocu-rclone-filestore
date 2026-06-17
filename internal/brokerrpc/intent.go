@@ -5,12 +5,13 @@ package brokerrpc
 
 import "fmt"
 
-// Op identifies one of the 18 file-operations service methods under the
-// ocu.filestore.v1alpha namespace.
+// Op identifies one of the 18 file-operations service methods the broker's
+// file-ops service exposes.
 type Op string
 
-// The 18 op constants. Names match the camelCase method names used in the
-// Connect-RPC route path (/ocu.filestore.v1alpha.FilesystemService/<Op>).
+// The 18 op constants. Each value is the final path segment of the REST route
+// the client builds: <service_url>/v1/filestore/fs/<op> (see opURL/restBase in
+// client.go).
 const (
 	// Read-class ops: intent resolves to "read".
 	OpListDirectory   Op = "listDirectory"

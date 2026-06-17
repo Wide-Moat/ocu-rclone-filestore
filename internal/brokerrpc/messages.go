@@ -170,9 +170,9 @@ type RemoveFileRequest struct {
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
-// FileUploadRequest is the params frame for the fileUpload client-streaming
-// op. The streaming transport (frame envelope, chunk frames, half-close) is
-// wired in a later phase; the type is defined here for use in that phase.
+// FileUploadRequest is the params field for the fileUpload op. It is carried as
+// the JSON "params" field of a multipart/form-data POST alongside the streamed
+// file part (see upload.go).
 type FileUploadRequest struct {
 	FilesystemID          string                `json:"filesystem_id"`
 	Path                  string                `json:"path"`
@@ -180,8 +180,9 @@ type FileUploadRequest struct {
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
-// FileDownloadRequest is the request for the fileDownload server-streaming
-// op (uuid-axis). Range is the optional {offset, length} window: when it is
+// FileDownloadRequest is the request for the fileDownload op (uuid-axis), whose
+// response is a chunked octet-stream (see download.go). Range is the optional
+// {offset, length} window: when it is
 // the zero value (omitted on the wire) the broker streams the whole object;
 // when set, the broker streams only that window. A ranged read therefore
 // transfers just the requested bytes rather than the full object. *Range is a
@@ -269,7 +270,7 @@ type CreateFileResponse struct {
 // ReadFileResponse is the unary readFile result. It is METADATA-ONLY as shipped:
 // File carries no content/data field, so this type cannot return file bytes —
 // the content body is a TBD per D6 and is never invented here. Bulk content is
-// delivered by the server-streaming fileDownload op (download.go), not by this
+// delivered by the chunked fileDownload op (download.go), not by this
 // unary op. When a content body is pinned in the contract it will be added here;
 // until then a broker that returns a content field has it silently dropped by
 // the tolerant decoder. The Range field on the request selects within that
@@ -310,21 +311,18 @@ type MoveFileResponse = AckResponse
 // RemoveFileResponse is the bare-ack response for removeFile.
 type RemoveFileResponse = AckResponse
 
-// FileUploadResponse is the optional response message frame (data flag 0x00)
-// the broker MAY emit before the EndStreamResponse trailer on a completed
-// fileUpload stream — the standard Connect client-streaming success shape. The
-// upload reader tolerates its presence or absence; the trailer carries the
-// authoritative success verdict (D5). It carries the assembled object's
-// metadata as a FilesystemFile (D6).
+// FileUploadResponse is the JSON body the broker MAY return on a successful
+// fileUpload, carrying the assembled object's metadata as a FilesystemFile.
+// Success is signalled by the HTTP status; this body, when present, conveys the
+// resulting object's metadata.
 type FileUploadResponse struct {
 	File FilesystemFile `json:"file"`
 }
 
-// Note: fileDownload content frames carry {"data": <base64 bytes>}
-// (downloadContentFrame in download.go), per D5 — NOT a {"file": ...} unary
-// body. There is no separate per-frame download response type; the
-// FilesystemFile-bearing metadata, when present, rides the trailer/metadata
-// per D6.
+// Note: a fileDownload 2xx delivers the object bytes directly as a chunked
+// octet-stream body — there is no per-chunk JSON envelope. The
+// FilesystemFile-bearing metadata, when needed, is fetched via the metadata
+// ops, not the download body.
 
 // ImportFilesResponse is the bare-ack response for importFiles.
 type ImportFilesResponse = AckResponse

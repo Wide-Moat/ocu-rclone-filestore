@@ -231,26 +231,37 @@ func TestRegister(t *testing.T) {
 // TestNewFsReadOnly verifies that NewFs with read_only=true produces an Fs
 // whose read-only flag is set.
 func TestNewFsReadOnly(t *testing.T) {
-	// NewFs requires a real socket path; we skip the actual connection by
-	// checking option parsing directly via the Fs struct.
-	// The test constructs an Fs directly rather than calling NewFs because
-	// NewFs dials the socket — integration with a live broker is a later phase.
+	// NewFs requires a reachable broker endpoint; we skip the actual connection
+	// by checking option parsing directly via the Fs struct. The test
+	// constructs an Fs directly rather than calling NewFs because NewFs builds
+	// the broker client — integration with a live broker is a later phase.
 	f := newTestFs(t, &fakeClient{}, true)
 	if !f.readOnly {
 		t.Error("readOnly flag is false, want true")
 	}
 }
 
-// TestNewFsMissingSocketPath verifies that NewFs returns a non-nil error when
-// the socket_path option is absent.
-func TestNewFsMissingSocketPath(t *testing.T) {
-	m := configmap.Simple{
+// TestNewFsMissingRequiredOptions verifies that NewFs returns a non-nil error
+// when any required option (service_url, auth_token, ca_cert_pem) is absent.
+func TestNewFsMissingRequiredOptions(t *testing.T) {
+	full := configmap.Simple{
+		"service_url":   "https://broker",
 		"filesystem_id": "fs-01",
-		// socket_path deliberately absent
+		"auth_token":    "t",
+		"ca_cert_pem":   "pem",
 	}
-	_, err := NewFs(context.Background(), "test", "/", m)
-	if err == nil {
-		t.Fatal("NewFs with missing socket_path returned nil error, want an error")
+	for _, missing := range []string{"service_url", "auth_token", "ca_cert_pem"} {
+		t.Run("missing_"+missing, func(t *testing.T) {
+			m := configmap.Simple{}
+			for k, v := range full {
+				if k != missing {
+					m[k] = v
+				}
+			}
+			if _, err := NewFs(context.Background(), "test", "/", m); err == nil {
+				t.Fatalf("NewFs with missing %s returned nil error, want an error", missing)
+			}
+		})
 	}
 }
 
@@ -258,7 +269,9 @@ func TestNewFsMissingSocketPath(t *testing.T) {
 // when the filesystem_id option is absent.
 func TestNewFsMissingFilesystemID(t *testing.T) {
 	m := configmap.Simple{
-		"socket_path": "/run/broker.sock",
+		"service_url": "https://broker",
+		"auth_token":  "t",
+		"ca_cert_pem": "pem",
 		// filesystem_id deliberately absent
 	}
 	_, err := NewFs(context.Background(), "test", "/", m)
@@ -1147,8 +1160,8 @@ func TestPathEncodingRoundTrip(t *testing.T) {
 	}
 }
 
-// TestNewObjectMissingFilesystemID ensures NewFs returns an error when both
-// socket_path and filesystem_id are present but value is empty.
+// TestNewFsBothMissing ensures NewFs returns an error when the configmap is
+// empty: the required transport and scope options are all absent.
 func TestNewFsBothMissing(t *testing.T) {
 	m := configmap.Simple{}
 	_, err := NewFs(context.Background(), "test", "/", m)

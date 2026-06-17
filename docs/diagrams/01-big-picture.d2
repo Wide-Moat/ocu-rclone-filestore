@@ -21,17 +21,21 @@ guest: Guest sandbox {
   }
   mount: "ocu-rclone-filestore\n— THIS binary —\nrclone mount + ocufs backend" {
     style: {fill: "#ffffff"; stroke: "#cf3b3b"; stroke-width: 3; border-radius: 12; bold: true; font-color: "#000"}
-    tooltip: Holds NO credential, NO object-store client. Only a unix socket + a filesystem_id.
+    tooltip: Holds NO backend credential, NO object-store client. Only a filesystem_id and an edge-only session JWT.
   }
   app -> mount: "normal file ops\n(open, read, write, ls, rename)" {style.stroke: "#cf3b3b"}
 }
 
 host: Host (trusted) {
   style: {fill: "#eef3ff"; stroke: "#3b5bcf"; stroke-width: 2; border-radius: 16; font-color: "#1f2f7a"}
-  tooltip: Trusted control plane. Holds the one backend credential.
+  tooltip: Trusted control plane. The egress edge exchanges the session JWT for the real credential, which lives only in the broker.
   label.near: top-center
 
-  broker: "Storage broker\n(ocu-filestore)" {
+  edge: "Envoy egress edge\nvalidate · strip · exchange · inject" {
+    style: {fill: "#dfe9ff"; stroke: "#3b5bcf"; stroke-width: 2; border-radius: 10; font-color: "#000"}
+    tooltip: Validates the session JWT, strips it, exchanges it (RFC 8693) for the real storage credential keyed on filesystem_id, and injects it before the filestore.
+  }
+  broker: "Storage broker / REST filestore\n(ocu-filestore)" {
     shape: hexagon
     style: {fill: "#d6e0ff"; stroke: "#3b5bcf"; stroke-width: 2; font-color: "#000"}
     tooltip: Custodies the backend credential, signs every backend request, decides authorization per request.
@@ -43,8 +47,11 @@ store: "Backend object store\n(local volume or S3-class)" {
   style: {fill: "#eafaef"; stroke: "#2e9e54"; stroke-width: 2; font-color: "#13502a"}
 }
 
-guest.mount -> host.broker: "file-ops RPC\nover a per-session unix socket\n(the ONLY way out — no credential crosses)" {
+guest.mount -> host.edge: "file-ops over outbound HTTPS/2\nTLS to the edge CA · static Bearer JWT\n(the ONLY way out — no backend credential crosses)" {
   style: {stroke: "#3b5bcf"; stroke-width: 3; bold: true}
+}
+host.edge -> host.broker: "JWT exchanged for the real credential\nkeyed on filesystem_id, then injected" {
+  style: {stroke: "#3b5bcf"; stroke-width: 2}
 }
 host.broker -> store: "broker signs it,\nbytes go out byte-intact" {
   style: {stroke: "#2e9e54"; stroke-width: 3}
@@ -55,5 +62,5 @@ legend: |md
   - 🔴 red = untrusted guest — where this binary runs
   - 🔵 blue = trusted host — where the broker and the one credential live
   - 🟢 green = the real storage, reached only by the broker
-  - The guest can only talk through **one unix socket**, and it never holds a key.
+  - The guest dials **one outbound HTTPS connection** to the edge, and it never holds a backend key.
 | {near: bottom-center; style: {fill: "#fafafa"; stroke: "#bbb"; font-size: 14}}
