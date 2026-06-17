@@ -7,9 +7,10 @@
 
 The guest-side mount binary of Open Computer Use: it mounts the per-session
 filestore into the guest filesystem tree and translates file operations into
-the broker's file-operations service. Built on [rclone](https://github.com/rclone/rclone)
+HTTPS/REST requests sent through the egress edge. Built on [rclone](https://github.com/rclone/rclone)
 (MIT): rclone supplies the mount machinery; this repo adds a backend that
-speaks the broker over HTTPS/REST instead of any object-store protocol.
+reaches storage over HTTPS/REST via the egress edge instead of any object-store
+protocol.
 
 The guest holds **no backend credential and no object-store client**. It dials
 an outbound HTTPS `service_url`, trusting only the inspecting edge's CA, and
@@ -47,10 +48,12 @@ go build -o ocu-rclone-filestore ./cmd/ocu-rclone-filestore
 ./ocu-rclone-filestore --version
 ```
 
-**Write a minimal mount config** (`mount.json`). The config is single-shape: a
+**Write a mount config** (`mount.json`). The config is single-shape: a
 top-level `service_url` + `ca_cert_pem` (the edge's trust anchor) and a `mounts`
 array. Each mount carries its own `auth_token` — the static session JWT, an
-edge-only assertion, not a backend key.
+edge-only assertion, not a backend key — its `filesystem_id` scope, and its own
+`readonly` posture. The two canonical mounts are the read-only inputs at
+`/mnt/user-data/uploads/` and the read-write sink at `/mnt/user-data/outputs/`:
 
 ```json
 {
@@ -59,9 +62,20 @@ edge-only assertion, not a backend key.
   "ca_cert_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
   "mounts": [
     {
+      "destination": "/mnt/user-data/uploads",
+      "filesystem_id": "session_01HXYZ_inputs",
+      "auth_token": "eyJhbGciOi...inputs-session-jwt...",
+      "readonly": true,
+      "vfs_cache_mode": "minimal",
+      "cache_duration_s": 3,
+      "vfs_cache_max_size": "512M",
+      "dir_perms": "0755",
+      "file_perms": "0644"
+    },
+    {
       "destination": "/mnt/user-data/outputs",
       "filesystem_id": "session_01HXYZ_chat",
-      "auth_token": "eyJhbGciOi...session-jwt...",
+      "auth_token": "eyJhbGciOi...outputs-session-jwt...",
       "readonly": false,
       "vfs_cache_mode": "writes",
       "cache_duration_s": 3600,
@@ -73,9 +87,12 @@ edge-only assertion, not a backend key.
 }
 ```
 
-`destination` must be an absolute path (not bare `/`). `filesystem_id` is the
-session scope; the edge attests it from the validated JWT and the broker resolves
-authorization from it.
+`destination` must be an absolute path (not bare `/`). `readonly` is
+host-enforced — the agent cannot flip it. `filesystem_id` is the session scope;
+the edge attests it from the validated JWT and the broker resolves authorization
+from it. The read-only inputs mount uses a short `cache_duration_s` so
+externally-written user data appears promptly, while the read-write outputs sink
+uses a long window since the agent is the writer.
 
 **Run** it:
 
@@ -91,9 +108,10 @@ The transport is config-derived — there is no socket flag. The flags:
 | `--ready-file` | `OCU_READY_FILE` | optional path touched once every mount is up |
 | `--version` | — | print the version and exit |
 
-`/mnt/user-data/outputs` is now a live filesystem backed by the broker. Any failure to
-bring up a mount is a hard, non-zero exit — never a silently missing directory.
-For a full local run with real brokers, see [`docs/e2e-local.md`](./docs/e2e-local.md).
+`/mnt/user-data/uploads` and `/mnt/user-data/outputs` are now live filesystems
+served over HTTPS/REST through the egress edge. Any failure to bring up a mount
+is a hard, non-zero exit — never a silently missing directory. For a full local
+run of the network topology, see [`docs/e2e-local.md`](./docs/e2e-local.md).
 
 ## Status
 
