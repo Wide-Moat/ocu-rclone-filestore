@@ -33,11 +33,14 @@ session sandbox. Given a host-supplied mount configuration that names one or
 more per-session filesystem scopes, it presents each scope as a directory tree
 in the guest filesystem (a FUSE mount) and translates every file operation the
 guest performs — `open`, `read`, `write`, `readdir`, `rename`, `unlink`, … —
-into a call on the broker's file-operations RPC. It serves nothing, proxies
-nothing, and exposes no network facade. It holds **no backend credential, no
-object-store client, and no second transport**: the only handle it carries is a
-session-scoped `filesystem_id`, and its only egress is a per-session unix socket
-to the broker.
+into a call on the broker's file-operations service. It serves nothing, proxies
+nothing, and exposes no network facade. It holds **no backend credential and no
+object-store client**, and opens **no second transport**: the scope handle it
+carries is a session-scoped `filesystem_id`, and its only egress is an outbound
+HTTPS connection to the configured `service_url`, reached over TLS that trusts
+only the inspecting edge's CA. On that connection it presents a static session
+JWT — an edge-only assertion the egress edge exchanges for the real storage
+credential — never a backend key.
 
 The binary is built on [rclone](https://github.com/rclone/rclone) (MIT). rclone
 supplies the FUSE/VFS mount machinery; this repository adds one backend package
@@ -54,7 +57,7 @@ The binary is one participant in a larger system. The diagram below is the
 context view, scoped to the storage path; the full system context lives in the
 canon (`docs/architecture/03-c4-context.md`).
 
-![Rendered big-picture view: the guest sandbox reaches this binary, which reaches only the broker over one unix socket; the broker holds the credential and reaches backend storage.](./diagrams/01-big-picture.svg)
+![Rendered big-picture view: the guest sandbox reaches this binary, which dials outbound over HTTPS to the Envoy egress edge; the edge validates and exchanges the guest's session JWT for the real storage credential before the REST filestore, which holds the backend credential and reaches backend storage.](./diagrams/01-big-picture.svg)
 
 The Mermaid source below is the maintainable version of the same view; the
 rendered SVG above is generated from [`diagrams/01-big-picture.d2`](./diagrams/01-big-picture.d2).
@@ -68,17 +71,17 @@ flowchart TB
     end
 
     subgraph host["Host control plane (trusted)"]
+        edge["Envoy egress edge<br/>validate · strip · exchange (RFC 8693) · inject<br/>allow-list · audit"]
         broker["Storage broker (ocu-filestore)<br/>holds the one backend credential<br/>re-derives authz per request"]
-        edge["Egress trust-edge<br/>allow-list · credential injection · audit"]
     end
 
     subgraph backend["Backend object store (external)"]
         store[("Durable object store<br/>(local volume or S3-class)")]
     end
 
-    mount -->|"file-ops RPC<br/>per-session AF_UNIX socket<br/>(the only egress)"| broker
-    broker -->|"signed backend request<br/>storage-dedicated lane"| edge
-    edge -->|"byte-intact, allow-list-only"| store
+    mount -->|"file-ops over outbound HTTPS/2<br/>TLS to the edge CA · static Bearer JWT<br/>(the only egress)"| edge
+    edge -->|"JWT exchanged for the real credential<br/>keyed on filesystem_id, injected"| broker
+    broker -->|"signed backend request<br/>storage-dedicated lane"| store
 
     classDef untrusted fill:#fde,stroke:#b35,color:#000
     classDef trusted fill:#def,stroke:#36b,color:#000
@@ -92,11 +95,17 @@ Key relationships:
 
 - **The guest agent never talks to storage directly.** It performs ordinary file
   operations against a mounted directory; this binary is the only thing that
-  turns those into RPC.
+  turns those into a call on the file-operations service.
 - **This binary never talks to the backend store directly.** Its sole outbound
-  channel is the per-session unix socket to the broker. There is no object-store
-  client linked into the binary and no network path to any backend (SEC-25,
-  SEC-16). The build-graph denylist CI gate enforces this mechanically.
+  channel is an HTTPS connection to the configured `service_url`, which reaches
+  only the egress edge; the REST filestore behind the edge is not directly
+  dialable from the guest. There is no object-store client linked into the binary
+  and no network path to any backend (SEC-25, SEC-16). The build-graph denylist
+  CI gate enforces this mechanically.
+- **The guest holds no backend credential.** It presents only a static session
+  JWT — an edge-only assertion. The egress edge validates that JWT, strips it,
+  and exchanges it (RFC 8693) for the real storage credential keyed on the
+  validated `filesystem_id` before the request reaches the REST filestore.
 - **The broker is the only component that holds the backend credential**, signs
   backend requests, and re-derives authorization for every operation.
 
@@ -106,22 +115,25 @@ Key relationships:
 
 This is the load-bearing security property and the most common point of
 confusion, so it is documented precisely. The question is: *if the guest holds
-no credential, where do the bytes actually leave the trusted boundary, and where
-is the credential attached?*
+no backend credential, where do the bytes actually leave the trusted boundary,
+and where is the real storage credential attached?*
 
 The answer is that there is **no single backdoor "hole"** punched through the
-host. Instead, the guest is structurally credential-free and **three distinct
+host. The guest holds no backend key; it carries only a static session JWT, an
+**edge-only assertion** that is useless past the egress edge. **Three distinct
 host-side mediation points** stand between a guest file operation and durable
-storage. The guest reaches the broker through one narrow, host-mediated channel
-(a per-session unix socket); everything secret happens on the far side of it.
+storage. The guest reaches the REST filestore only through one narrow,
+host-mediated channel — an outbound HTTPS connection to the egress edge — and
+the real credential is attached on the far side of that edge, never in the
+guest.
 
 ### 3.1 The zones
 
 | Zone | Trust | What runs there | Relevant to this binary |
 |---|---|---|---|
-| Compute plane | **Untrusted** | The session sandbox; the guest agent; **this binary** | This binary lives here. Anything it holds is assumed reachable by an adversary. |
-| Host control plane | **Trusted** | Session lifecycle; **the storage broker** | The broker is the peer on the other end of the unix socket. |
-| Egress trust-edge | **Trusted** | Forward proxy + credential injector | This binary's traffic never reaches the public internet; the broker's backend traffic does, through here. |
+| Compute plane | **Untrusted** | The session sandbox; the guest agent; **this binary** | This binary lives here. Anything it holds — including the static session JWT — is assumed reachable by an adversary, which is exactly why the JWT is an edge-only assertion, not a backend key. |
+| Egress edge | **Trusted** | **The Envoy egress edge** the guest dials over HTTPS | The guest's only reachable peer. It validates the session JWT, strips it, exchanges it (RFC 8693) for the real storage credential keyed on `filesystem_id`, and injects that credential before the REST filestore. |
+| Host control plane | **Trusted** | Session lifecycle; **the storage broker / REST filestore** | The filestore behind the edge holds the one backend credential and re-derives authorization per request. The guest never reaches it directly. |
 | Backend object store | **External** | The durable store (local volume or S3-class) | This binary never names it, never dials it, never sees its protocol. |
 
 ### 3.2 The two egress lanes
@@ -132,20 +144,20 @@ carry different things:
 ```mermaid
 flowchart LR
     subgraph g["Guest sandbox (untrusted)"]
-        m["ocu-rclone-filestore<br/>holds: filesystem_id only"]
+        m["ocu-rclone-filestore<br/>holds: filesystem_id + edge-only JWT"]
+    end
+    subgraph e["Envoy egress edge (trusted)"]
+        ex["validate · strip · exchange (RFC 8693) · inject"]
+        f8["F8 forward-proxy lane<br/>(guest internet)"]
     end
     subgraph h["Host control plane (trusted)"]
-        b["Storage broker<br/>holds: backend credential"]
-    end
-    subgraph e["Egress trust-edge (trusted)"]
-        f8["F8 forward-proxy lane<br/>(guest internet)"]
-        f9["F9 storage-dedicated lane<br/>byte-intact, no TLS termination"]
+        b["Storage broker / REST filestore<br/>holds: backend credential"]
     end
     store[("Backend object store")]
 
-    m -->|"① file-ops RPC<br/>AF_UNIX, NO credential"| b
-    b -->|"② broker SIGNS with its credential"| f9
-    f9 -->|"③ allow-list-only"| store
+    m -->|"① file-ops over HTTPS/2<br/>TLS to the edge CA<br/>static Bearer JWT (edge-only)"| ex
+    ex -->|"② JWT exchanged for the real<br/>credential, keyed on filesystem_id,<br/>and injected"| b
+    b -->|"③ signed request, allow-list-only"| store
 
     m -.->|"guest-internet, if any,<br/>is a SEPARATE concern (F8)<br/>— not the storage path"| f8
 
@@ -156,14 +168,17 @@ flowchart LR
     class e t
 ```
 
-- **The storage path is hop ① → ② → ③.** The guest's file-ops RPC crosses the
-  sandbox boundary over a **per-session AF_UNIX socket** and lands at the broker.
-  *No credential travels on hop ①.* The broker then originates the backend
-  request, **signs it with its own credential** (hop ②), and that signed request
-  leaves through the **storage-dedicated egress lane** (hop ③, canon ADR-0011 /
-  SEC-85): allow-list-only, byte-intact, no TLS termination, so the broker's
-  signature is preserved end to end. That lane is out-of-process from the broker,
-  so even a compromised broker cannot silence the edge's enforcement.
+- **The storage path is hop ① → ② → ③.** The guest's file-ops requests cross the
+  sandbox boundary as **outbound HTTPS/2 over TLS** whose only trust anchor is
+  the edge CA, carrying a **static Authorization Bearer session JWT** (hop ①).
+  That JWT is an edge-only assertion — *no backend credential travels on hop ①*.
+  The egress edge **validates the JWT against the control-plane JWKS, strips it,
+  exchanges it (RFC 8693) for the real storage credential keyed on the validated
+  `filesystem_id`, and injects that credential** before the REST filestore (hop
+  ②). The filestore then originates the signed backend request, which leaves
+  through the storage-dedicated egress path (hop ③, canon SEC-85): allow-list-only
+  and audited. Because the exchange happens at the edge — out-of-process from the
+  guest — a fully compromised guest still cannot obtain the real credential.
 - **The guest-internet forward-proxy lane (F8)** is a *different* lane for a
   *different* purpose (a guest process reaching an allow-listed external API);
   it is where upstream-API credential injection happens (canon ADR-0005/0007,
@@ -172,43 +187,50 @@ flowchart LR
 
 ### 3.3 The three credential-mediation points
 
-1. **The unix socket is the narrow channel.** The guest's only way to reach
-   storage is the per-session AF_UNIX socket named for its `filesystem_id`. The
-   broker accepts a connection on it only from the same uid and attributes the
-   caller by **host-derived identity** (the socket's provenance), never by the
-   id the guest asserts in the request body (SEC-43). A guest-supplied
-   `filesystem_id` is a *hint* the broker cross-checks, not a capability.
+1. **The egress edge is the narrow channel.** The guest's only way to reach
+   storage is the outbound HTTPS connection to the egress edge. The edge
+   validates the static session JWT, derives the caller's identity from that
+   validated token — **host-attested, not guest-asserted** (SEC-43) — and
+   exchanges the JWT for the real credential keyed on the validated
+   `filesystem_id`. A `filesystem_id` the guest names in a request body is a
+   *hint* the broker cross-checks against the edge-attested identity, not a
+   capability.
 2. **The broker custodies and signs.** The one backend credential lives only in
-   the broker (zone "trusted"). The broker maps `filesystem_id` to a backend
-   prefix the guest never sees, resolves the object, checks the broker-side
-   `downloadable` policy (SEC-73), and signs the backend request itself.
-3. **The storage egress lane enforces, out-of-process.** The signed request
-   crosses to the backend only through the storage-dedicated lane, which forwards
-   allow-list-only and byte-intact and emits an audit event per operation
-   (SEC-85, SEC-16).
+   the broker / REST filestore behind the edge. The broker maps `filesystem_id`
+   to a backend prefix the guest never sees, resolves the object, checks the
+   broker-side `downloadable` policy (SEC-73), and signs the backend request
+   itself.
+3. **The storage egress enforces, out-of-process.** The signed request crosses to
+   the backend only through the storage-dedicated egress path, which forwards
+   allow-list-only and emits an audit event per operation (SEC-85, SEC-16).
 
 The net effect: the worst an adversary with full control of the guest can do is
-issue file-ops RPC against *its own* session scope over *its own* socket. It
-cannot forge another session's identity (host-derived attribution), cannot
-obtain the backend credential (it never enters the guest), cannot reach the
-backend store on a second path (no object-store client is linked, no network
-route exists), and cannot turn a non-downloadable object into an exfiltrable one
-(that decision is broker-resolved and the guest never sets `downloadable=true`).
+issue file-ops against *its own* session scope, presenting *its own* edge-only
+JWT. It cannot forge another session's identity (the edge attests identity from
+the validated token, not the guest-asserted body), cannot obtain the backend
+credential (it never enters the guest; the JWT is exchanged for it only at the
+edge), cannot reach the REST filestore on a second path (no object-store client
+is linked, the edge is the only reachable hop), and cannot turn a
+non-downloadable object into an exfiltrable one (that decision is broker-resolved
+and the guest never sets `downloadable=true`).
 
 ### 3.4 How this binary upholds its end
 
-This binary's responsibility in the credential seam is **to hold nothing and to
-assert nothing it is not entitled to**. Concretely:
+This binary's responsibility in the credential seam is **to hold no backend key
+and to assert nothing it is not entitled to**. Concretely:
 
-- It refuses any mount config that carries a provision-side credential marker
-  (`auth_token`, `ca_cert_pem`) — both by strict-decoding (unknown field) and by
-  an explicit, independently-tested refusal (`internal/mountcfg`).
-- It constructs **no** `Authorization` header and **no** credential header
-  anywhere on the RPC path (`internal/brokerrpc`).
+- It presents only the per-mount static session JWT, read once from config at
+  construction and never refreshed; it holds no backend or object-store
+  credential (`internal/brokerrpc`).
+- It sends every request over TLS that trusts only the edge CA
+  (`ca_cert_pem` from config) — it never reaches the REST filestore directly and
+  never falls back to system-root trust (`internal/brokerrpc`).
 - It has **no** code path that sets `downloadable` to `true` — the field is
   stamped `false` on every request body, centrally (`internal/brokerrpc`).
-- It links **no** object-store client; the only egress is the configured unix
-  socket (enforced by the build-graph denylist CI gate).
+- It requests only `read` and `write` intents, never `preview`
+  (`internal/brokerrpc`).
+- It links **no** object-store client; the only egress is the configured HTTPS
+  `service_url` to the edge (enforced by the build-graph denylist CI gate).
 
 ---
 
@@ -216,7 +238,8 @@ assert nothing it is not entitled to**. Concretely:
 
 The diagram below traces a guest `read()` of a file, from syscall to bytes,
 naming every hop. A `write()` is the mirror image (the broker signs a `PutObject`
-instead of a `GetObject`, and the upload is chunked client-streaming).
+instead of a `GetObject`, and the upload is a multipart/form-data POST that
+streams the source in ceiling-bounded chunks).
 
 ![Rendered file-path view: a read walks the VFS cache, falls through to the ocufs backend and brokerrpc on a miss, and the broker signs and streams the bytes back; a write lands in the cache and uploads in the background.](./diagrams/02-file-path.svg)
 
@@ -231,6 +254,7 @@ sequenceDiagram
     participant V as rclone VFS<br/>(cache + readahead)
     participant O as ocufs backend<br/>(this repo)
     participant R as brokerrpc client<br/>(this repo)
+    participant E as Envoy egress edge<br/>(host-side)
     participant B as Storage broker<br/>(host-side)
     participant S as Backend store
 
@@ -239,11 +263,14 @@ sequenceDiagram
     Note right of V: served from VFS cache if warm —<br/>otherwise a backend Open is issued
     V->>O: Object.Open(RangeOption)
     O->>R: readFile / fileDownload<br/>(filesystem_id, intent=read, downloadable=false)
-    R->>B: Connect-JSON over AF_UNIX socket
-    Note right of B: host-derived attribution (SEC-43)<br/>map filesystem_id to prefix<br/>resolve downloadable (SEC-73)<br/>sign + fetch via storage lane
+    R->>E: POST /v1/filestore/fs/op over HTTPS<br/>static Authorization Bearer JWT
+    Note right of E: validate JWT (JWKS)<br/>strip it, exchange (RFC 8693)<br/>for the real credential<br/>keyed on filesystem_id, inject
+    E->>B: request with the injected credential
+    Note right of B: host-attested identity (SEC-43)<br/>map filesystem_id to prefix<br/>resolve downloadable (SEC-73)<br/>sign + fetch via storage lane
     B->>S: signed backend request (broker credential)
     S-->>B: object bytes
-    B-->>R: streamed content frames + end-stream trailer
+    B-->>E: response bytes
+    E-->>R: chunked octet-stream download body
     R-->>O: reassembled / ranged bytes
     O-->>V: io.Reader
     V-->>K: bytes (and fills cache)
@@ -270,13 +297,15 @@ operation set and authorization axes are pinned by
 `contracts/storage/file-ops.schema.json` in the canon; the transport details are
 the component spec's.
 
-- **Transport.** Connect-RPC, JSON codec, over a **per-session AF_UNIX socket**.
-  Unary ops are `POST application/json` to
-  `/ocu.filestore.v1alpha.FilesystemService/<Op>` with `Connect-Protocol-Version: 1`.
-  `fileUpload` is Connect **client-streaming** (a params frame, then ceiling-sized
-  chunk frames, then an end-stream frame). `fileDownload` is Connect
-  **server-streaming** (content frames, then an end-stream trailer). For streams,
-  success or failure comes from the **end-stream trailer**, never the HTTP status.
+- **Transport.** REST-JSON over **outbound HTTPS/2**, TLS-trusting the edge CA,
+  with a static `Authorization: Bearer <session JWT>` header on every request.
+  Unary ops are `POST application/json` to `<service_url>/v1/filestore/fs/<Op>`.
+  `fileUpload` is a `multipart/form-data` POST (a JSON `params` field plus a file
+  part streamed in ceiling-bounded chunks). `fileDownload` returns a chunked
+  `application/octet-stream` body, read to completion. Success or failure is the
+  **HTTP status**: `429`/`503` map to a retryable back-off error (honouring
+  `Retry-After`), `401` and `403` both collapse to permission-denied, and every
+  other non-2xx is permanent.
 - **The 18 operations.** `listDirectory`, `makeDirectory`, `moveDirectory`,
   `removeDirectory`; `createFile`, `readFile`, `readMetadata`, `getFileMetadata`,
   `listFiles`, `copyFile`, `moveFile`, `removeFile`; `fileUpload`, `fileDownload`,
@@ -317,7 +346,7 @@ flowchart TB
     cfg["guest mount config<br/>(read-only file)"] --> main
     ready["ready-file<br/>(touched when all mounts up)"]
     main -.-> ready
-    rpc -->|"AF_UNIX <filesystem_id>.sock"| sock[("per-session socket(s)")]
+    rpc -->|"outbound HTTPS to service_url"| edge[("Envoy egress edge")]
 
     classDef box fill:#eef,stroke:#449,color:#000
     class proc,perMount box
@@ -344,7 +373,7 @@ Every package below is authored in this repository (FSL-1.1-Apache-2.0). The
 "discharges" column names the architecture promise the package is responsible
 for upholding.
 
-![Rendered package map: the entrypoint loads config and drives the mounter, which builds the ocufs backend per mount, which reaches the broker only through brokerrpc and its single socket; the build-graph and coverage guards run at test time only.](./diagrams/03-package-map.svg)
+![Rendered package map: the entrypoint loads config and drives the mounter, which builds the ocufs backend per mount, which reaches the egress edge only through brokerrpc and its single outbound HTTPS connection; the build-graph and coverage guards run at test time only.](./diagrams/03-package-map.svg)
 
 The rendered SVG above is generated from [`diagrams/03-package-map.d2`](./diagrams/03-package-map.d2);
 the Mermaid graph below is the maintainable source.
@@ -356,7 +385,7 @@ flowchart LR
     contract["internal/contract<br/>schema conformance"]
     mounter["internal/mounter<br/>multimount orchestration"]
     ocufs["backend/ocufs<br/>rclone backend"]
-    rpc["internal/brokerrpc<br/>Connect-RPC client"]
+    rpc["internal/brokerrpc<br/>HTTPS/REST client"]
 
     cmd --> cfg
     cmd --> mounter
@@ -370,16 +399,17 @@ flowchart LR
 
 ### 7.1 `cmd/ocu-rclone-filestore` — the entrypoint
 
-Parses `--config`, loads and validates the guest mount config, sources the two
-runtime inputs that are deliberately *not* in the frozen config schema (the
-ready-file path and the broker socket / socket-dir, each from a flag with an env
-fallback), wires a termination-signal channel, and drives the mounter. Every
-error path returns non-zero; a clean shutdown returns zero. All logic lives in a
-testable `run`/`runWith` core so flag/env resolution is asserted without
-spawning a process or mounting.
+Parses `--config`, loads and validates the guest mount config, sources the
+ready-file path (the one runtime input deliberately *not* in the frozen config
+schema, from a flag with an env fallback), wires a termination-signal channel,
+and drives the mounter. The transport is config-derived: `service_url`,
+`auth_token`, and `ca_cert_pem` all come from the validated config, so there is
+no socket flag. Every error path returns non-zero; a clean shutdown returns zero.
+All logic lives in a testable `run`/`runWith` core so flag/env resolution is
+asserted without spawning a process or mounting.
 
 **Discharges:** hard-error session start (no silent skip); the runtime/config
-split (socket path is a runtime input, never derived from `service_url`).
+split (the ready-file path is a runtime input; the transport is config-derived).
 
 ### 7.2 `internal/mountcfg` — the config loader
 
@@ -387,42 +417,47 @@ Strictly decodes the host-supplied guest mount config: unknown fields are
 rejected, every structural rule is enforced with a distinct typed error
 (absolute `destination`, `https://` `service_url`, octal perms, byte-size cap,
 valid cache mode), and the XOR between `filesystem_id` and `memory_store_id` is a
-hard error if both or neither is set. It refuses any provision-side credential
-marker (`auth_token`, `ca_cert_pem`) explicitly, in addition to strict decoding
-rejecting them as unknown fields.
+hard error if both or neither is set. The config is single-shape: a top-level
+`service_url` + `ca_cert_pem` and a `mounts` array whose entries each carry a
+per-mount `auth_token` (the static session JWT). The loader **holds** these — a
+mount missing its `auth_token`, or a config missing `ca_cert_pem`, is a hard
+error — because the JWT is an edge-only assertion, not a backend key.
 
-**Discharges:** SEC-25 (the guest config carries no credential, by construction);
-the XOR scope rule; hard-error on malformed config.
+**Discharges:** SEC-25 (the guest config carries no backend credential — the
+session JWT is exchanged for the real credential only at the edge); the XOR scope
+rule; hard-error on malformed config.
 
 ### 7.3 `internal/contract` — schema conformance
 
-Compiles the **guest-variant entry point** (`#/$defs/GuestMountConfig`) of the
-vendored mount-config schema and validates documents against it — never the
-schema root. The root is `oneOf[GuestMountConfig, ProvisionMountConfig]`, so a
-document carrying a credential marker is a valid `ProvisionMountConfig`;
-validating against the guest subschema is what makes the guest's refusal
-observable as a conformance property, not just a code path.
+Compiles the vendored mount-config schema and validates documents against its
+**root**. The schema is a single shape — one top-level object with `service_url`
++ `ca_cert_pem` and a `mounts` array whose entries carry the per-mount
+`auth_token` and the scope handle — so conformance is a straight root validation,
+not a subschema selection. A document that violates the single shape (a bad
+`service_url`, a missing `auth_token`, both/neither scope id) fails the schema.
 
-**Discharges:** SEC-25, expressed as a contract-conformance test against the
-vendored canon schema.
+**Discharges:** mount-config conformance against the vendored canon schema; the
+single-shape contract the loader enforces in code.
 
-### 7.4 `internal/brokerrpc` — the Connect-RPC client
+### 7.4 `internal/brokerrpc` — the HTTPS/REST client
 
 The guest-side client for the broker's file-operations service. It owns the
-transport (Connect-JSON over the per-session AF_UNIX socket; client-streaming
-upload; server-streaming download; ranged read), the single authoritative
-op→intent table, the central authorization-metadata stamp (`filesystem_id`,
-`intent`, and always `downloadable=false`), chunk arithmetic against the message
-ceiling, cursor pagination, and the mapping of broker denials to typed errors
-(retryable-with-backoff for `resource_exhausted`/`unavailable`, permanent for the
-closed class). It constructs no credential header and has no path that sets
-`downloadable=true`.
+transport (REST-JSON over outbound HTTPS/2 to `<service_url>/v1/filestore/fs/<op>`,
+TLS-trusting only the edge CA from `ca_cert_pem`; `multipart/form-data` upload;
+chunked octet-stream download; ranged read), the static `Authorization: Bearer`
+header (the session JWT read once at construction, never refreshed), the single
+authoritative op→intent table, the central authorization-metadata stamp
+(`filesystem_id`, `intent`, and always `downloadable=false`), chunk arithmetic
+against the message ceiling, cursor pagination, and the mapping of HTTP statuses
+to typed errors (`429`/`503` retryable-with-backoff honouring `Retry-After`, `401`
+and `403` to permission-denied, everything else permanent). It holds no backend
+credential and has no path that sets `downloadable=true` or refreshes the token.
 
-**Discharges:** SEC-25 (no credential, one transport, one socket); SEC-73
-(`downloadable` is never guest-asserted); SEC-46 (throttle is backpressure: it is
-mapped to a clean retryable error, never data loss); SEC-43 (the guest-supplied
-`filesystem_id` is sent as a hint, and correctness never depends on it being
-trusted).
+**Discharges:** SEC-25 (no backend credential, one transport, one egress to the
+edge); SEC-73 (`downloadable` is never guest-asserted); SEC-46 (throttle is
+backpressure: it is mapped to a clean retryable error, never data loss); SEC-43
+(the guest-supplied `filesystem_id` is sent as a hint, and correctness never
+depends on it being trusted).
 
 ### 7.5 `backend/ocufs` — the rclone backend
 
@@ -463,9 +498,9 @@ and pinned by the cited NFR row or contract.
 
 | Promise | NFR / source | Upheld in |
 |---|---|---|
-| Guest config carries no credential | SEC-25, mount-config contract | `internal/mountcfg` (refusal + strict decode), `internal/contract` (subschema conformance) |
+| Guest holds no backend credential (only an edge-only session JWT) | SEC-25, mount-config contract | `internal/brokerrpc` (no backend key; JWT exchanged only at the edge), `internal/mountcfg` (strict-decode + single-shape validation), `internal/contract` (root conformance) |
 | Exactly one of `filesystem_id`/`memory_store_id` (XOR) | mount-config contract | `internal/mountcfg` |
-| Only the file-ops RPC, no object-store client, no second transport | SEC-25 / SEC-16 | `internal/brokerrpc` (one socket), `backend/ocufs` (only the `brokerClient` seam), build-graph denylist CI gate |
+| Only the file-ops service, no object-store client, no second transport | SEC-25 / SEC-16 | `internal/brokerrpc` (one outbound HTTPS egress to the edge), `backend/ocufs` (only the `brokerClient` seam), build-graph denylist CI gate |
 | Guest-supplied ids are hints; attribution is host-derived | SEC-43 | `internal/brokerrpc` (id sent as a hint; correctness never depends on it) |
 | Read-only vs writable per mount, enforced at the VFS layer | mount-config contract | `internal/mounter` (VFS `ReadOnly`), `backend/ocufs` (top-of-method gate) |
 | Throttling is backpressure, never data loss | SEC-46 | `internal/brokerrpc` (retryable-with-backoff mapping), rclone VFS (write-back retry) |
@@ -477,12 +512,14 @@ and pinned by the cited NFR row or contract.
 ## 9. What is deliberately *not* here
 
 - **Serving, share-by-link, preview, the north face.** Those are broker concerns.
-  This binary only speaks the south-face file-ops RPC.
+  This binary only speaks the south-face file-operations service.
 - **Authorization policy.** The broker re-derives the three axes per request; the
   mount is a translator with local caching, not a policy point.
-- **Credential handling of any kind.** Covered in §3 — the guest holds nothing.
+- **Backend credential handling.** Covered in §3 — the guest holds no backend
+  key; it carries only the edge-only session JWT, which the egress edge exchanges
+  for the real credential.
 - **A backend protocol.** No object-store client is linked; the only protocol the
-  binary knows is the broker RPC.
+  binary knows is the file-operations service over HTTPS/REST.
 
 ---
 
