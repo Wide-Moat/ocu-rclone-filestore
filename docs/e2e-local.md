@@ -20,10 +20,21 @@ Envoy-only-hop assertion and the conformance round-trip), and tear it down.
 - AppArmor caveat: on an AppArmor-enforcing host (e.g. Ubuntu), the default
   container profile denies the mount syscall even with `CAP_SYS_ADMIN`, so a
   FUSE mount inside a container fails with `permission denied`. The compose
-  harness therefore runs the mount service with
-  `security_opt: [apparmor=unconfined]`; a tailored AppArmor profile allowing
-  `mount fstype=fuse.*` is the stricter alternative if your environment
-  forbids unconfined containers.
+  harness therefore runs the mount service under a tailored, NAMED AppArmor
+  profile, `ocu-mount` (`deploy/compose/apparmor/ocu-mount.profile`), that
+  permits only `mount fstype=fuse.*` onto the mount root plus the narrow set of
+  paths the mount path touches, and denies the rest — not `apparmor=unconfined`.
+  A named profile must be loaded into the host kernel BEFORE `docker compose up`,
+  or the mount container fails at create with `unable to apply apparmor profile
+  ... no such file or directory` and never starts. Load it once per host (it
+  persists until reboot):
+
+  ```sh
+  limactl shell <vm> sudo apparmor_parser -r deploy/compose/apparmor/ocu-mount.profile
+  ```
+
+  Add `-W` to have the parser warn on anything it would not enforce. The CI and
+  release e2e jobs run this same load step before bring-up.
 
 ## The graph in one breath
 
@@ -70,11 +81,27 @@ limactl shell <vm> mkdir -p /tmp/ocu-e2e-mountroot/outputs /tmp/ocu-e2e-mountroo
 From the repository root, build and start the peers, the edge, and the mount.
 The `harness-init` service runs first (it generates the CA, the leaf certs, the
 weak JWTs, and the rendered guest config into the shared volume); every other
-service waits on it:
+service waits on it.
+
+Load the named AppArmor profile into the VM kernel first (once per host; see the
+caveat under Prerequisites) — the mount service references it by name and will
+not start until it is loaded:
 
 ```sh
+limactl shell <vm> sudo apparmor_parser -r deploy/compose/apparmor/ocu-mount.profile
 limactl shell <vm> docker compose -f deploy/compose/docker-compose.yml up --build -d harness-init control-plane exchange filestore edge mount
 ```
+
+The mount service runs hardened: the `ocu-mount` AppArmor profile (above),
+`cap_drop: [ALL]` with only `CAP_SYS_ADMIN` granted back (the sole capability
+the in-process FUSE mount/umount path needs), `no-new-privileges`, a read-only
+container rootfs with a single writable tmpfs for the rclone VFS disk cache
+(`/root/.cache`), and a narrow seccomp profile
+(`deploy/compose/seccomp/mount-fuse.json`) that removes the broad
+`CAP_SYS_ADMIN`-gated admin syscall group and adds back only `mount`/`umount2`
+(plus the runtime's `clone`/`clone3`). The container still runs as root — that
+is required so the kernel grants the `CAP_SYS_ADMIN` mount permission; the
+hardening above bounds what that root can do.
 
 The mount entrypoint creates the ready-file at `/run/ocu/mount-ready` on the
 `mount-shared` volume once every mount is up; the test-runner polls it before
@@ -86,10 +113,15 @@ The exercise runs INSIDE the harness, in the `test-runner` compose service
 (profile `test`, so a plain `up` never starts it). The runner asserts
 `TestEnvoyOnlyHop` (the single-hop topology) and then drives `TestE2EExercise`.
 It has the live gate `RCLONE_OCUFS_LIVE` and the mountpoint/ready-file env
-preset, receives the FUSE mounts through an `rslave` bind, and shares the host
-PID namespace with the mount service so the graceful-teardown step signals the
-real mount process — and survives that process's exit to finish its assertions.
-It resolves the mount PID itself; you never export a PID by hand.
+preset, receives the FUSE mounts through an `rslave` bind, and joins the host
+PID namespace (`pid: host`) so the graceful-teardown step signals the real mount
+process — and SURVIVES that process's exit to finish its assertions. The host
+namespace is the runner's alone, not a mount-service privilege: the mount itself
+runs in its own private PID namespace (it is PID 1 there). The runner cannot
+instead share the mount's namespace (`pid: service:mount`), because there the
+mount is PID 1 and the kernel SIGKILLs the runner the instant the teardown
+SIGTERMs it (exit 137), before the post-teardown assertions can run. The runner
+resolves the mount PID itself; you never export a PID by hand.
 
 ```sh
 limactl shell <vm> docker compose -f deploy/compose/docker-compose.yml run --rm test-runner

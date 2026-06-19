@@ -212,17 +212,53 @@ services:
         condition: service_started
     devices:
       - /dev/fuse
+    # Capabilities: start from zero and grant back only CAP_SYS_ADMIN, the one
+    # capability the in-process FUSE mount(2)/umount2(2) path exercises. The
+    # default container capability set (CHOWN, DAC_OVERRIDE, SETUID, ...) is
+    # dropped. The container runs as root, so DAC checks on the root-owned
+    # staging dirs and the VFS cache take the uid-0 fast path, not a capability.
+    cap_drop:
+      - ALL
     cap_add:
       - SYS_ADMIN
-    # FUSE's mount(2) needs the AppArmor mount restriction lifted: CAP_SYS_ADMIN
-    # alone is insufficient under the default container AppArmor profile. Only
-    # this service mounts.
     security_opt:
-      - apparmor=unconfined
-    # Shared (host) PID namespace, mirrored by the test-runner: the runner
-    # signals the REAL mount process for the graceful-teardown step and must
-    # survive that process's exit to finish its assertions.
-    pid: "host"
+      # Narrow AppArmor profile (NOT unconfined): permits only the fuse.* mount/
+      # umount onto /mnt/user-data, /dev/fuse, the binary exec, and the runtime
+      # writes (VFS cache under /root/.cache, ready-file under /run/ocu, mount
+      # targets under /mnt/user-data); denies the rest. Load it into the host
+      # kernel before `up`:
+      #   sudo apparmor_parser -r -W deploy/compose/apparmor/ocu-mount.profile
+      # (see docs/e2e-local.md). The profile name, not a path, is referenced.
+      - apparmor=ocu-mount
+      # Narrow seccomp: the runtime default allowlist with the broad
+      # CAP_SYS_ADMIN-gated admin group removed and only {mount, umount2, clone,
+      # clone3} added back unconditionally — sixteen admin syscalls the default
+      # would unlock under CAP_SYS_ADMIN are now denied. clone/clone3 are the Go
+      # runtime's OS-thread creation and cannot be removed.
+      - seccomp=./seccomp/mount-fuse.json
+      # Block privilege gain via execve (PR_SET_NO_NEW_PRIVS). The mount path
+      # execs nothing and the static image carries no setuid/file-cap binary, so
+      # this is hardening at zero functional cost; CAP_SYS_ADMIN is retained.
+      - no-new-privileges:true
+    # Read-only container root filesystem: the mount process writes nothing to
+    # the image. The single writable tmpfs is the rclone VFS disk cache, which
+    # the runtime (HOME=/root) resolves to /root/.cache; without it rclone
+    # disables the cache and degrades the SEC-46 hold-data-across-throttle path.
+    # The ready-file dir (/run/ocu) and the mount targets (/mnt/user-data) are a
+    # named volume and a host bind respectively, already writable.
+    read_only: true
+    tmpfs:
+      - /root/.cache
+    # No host PID namespace: the mount runs in its OWN private PID namespace and
+    # is PID 1 in this container, so it exposes no host process table of its own.
+    # The graceful-teardown step still signals the REAL mount process: the
+    # test-runner (the harness, NOT a mount-service privilege) joins the HOST PID
+    # namespace and finds the mount by its host-side PID. Sharing the mount's own
+    # namespace (pid: service:mount) is NOT usable for teardown — there the mount
+    # is PID 1, and when the teardown SIGTERMs it the kernel SIGKILLs every other
+    # process in that namespace (the runner included, exit 137) before the
+    # post-teardown assertions can run. The runner's PID-ns choice is documented
+    # on the test-runner service below.
     networks:
       - mount-facing
     volumes:
@@ -263,12 +299,24 @@ services:
     depends_on:
       mount:
         condition: service_started
+    # Host PID namespace (test-harness only — NOT a mount-service privilege): the
+    # graceful-teardown step (10_sigterm_teardown) SIGTERMs the real mount
+    # process and then MUST OUTLIVE that process's exit to finish its assertions
+    # (poll the mountpoint, confirm the ready-file retracted). The mount runs in
+    # its OWN private PID namespace, where it is PID 1; sharing that namespace
+    # (pid: service:mount) makes the kernel SIGKILL the runner the instant the
+    # mount (PID 1 there) exits, so the post-teardown assertions never run. The
+    # host namespace lets the runner see the mount by its host-side PID
+    # (pgrep -f '^/ocu-rclone-filestore') and survive its exit. This privilege is
+    # the runner's alone; the mount service holds NO host PID namespace.
     pid: "host"
     networks:
       - mount-facing
-    # The graceful-teardown step signals the real mount process, which runs
-    # under apparmor=unconfined; lifting the runner's profile lets the signal
-    # through.
+    # The runner stays apparmor=unconfined: it must deliver a SIGTERM to the
+    # mount process for the graceful-teardown step and read the broker workspace
+    # volume. Its own attack surface is bounded (it runs only the e2e test binary
+    # and never mounts), so narrowing it is out of scope for the mount-service
+    # posture; the strict profile is on the mount service.
     security_opt:
       - apparmor=unconfined
     environment:
