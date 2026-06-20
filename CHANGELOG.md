@@ -74,4 +74,22 @@ Nothing has been tagged yet. Until the first release, all changes live under
   VM (mount → egress edge → REST filestore) and asserts the edge is the only
   hop the guest reaches.
 
+### Security
+
+- The guest FUSE mount service now runs under a narrow named AppArmor profile
+  instead of an unconfined one: it permits the `fuse.*` mount/unmount only onto
+  the canonical mount root, grants `capability sys_admin` alone, and denies
+  ptrace and writes to securityfs.
+- The mount container drops all capabilities and grants back only
+  `CAP_SYS_ADMIN`, sets no-new-privileges, runs on a read-only root filesystem
+  with a single writable tmpfs for the rclone VFS cache, and is confined by a
+  narrow seccomp allowlist that removes the admin syscall group the default
+  would otherwise unlock under `CAP_SYS_ADMIN`.
+- The mount runs in a private PID namespace and exposes no host process table.
+  The e2e test-runner retains the host PID namespace solely to drive the
+  graceful-teardown assertion against the real mount process; that privilege is
+  the runner's alone and is not held by the mount service.
+- The live end-to-end and release end-to-end jobs load the AppArmor profile
+  into the host kernel before bringing the topology up.
+
 [Unreleased]: https://github.com/Wide-Moat/ocu-rclone-filestore/commits/main
