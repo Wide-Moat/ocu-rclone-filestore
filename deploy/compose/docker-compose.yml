@@ -373,6 +373,12 @@ services:
         fi
         export OCU_E2E_MOUNT_PID
         /e2e.test -test.v -test.run '^TestEnvoyOnlyHop$$' -test.count=1 || exit 1
+        # Mount runtime-posture (CapEff == CAP_SYS_ADMIN only, read-only image
+        # rootfs EROFS, writable VFS-cache tmpfs) must run while the mount is
+        # still live — TestE2EExercise SIGTERMs it in its teardown step — and
+        # needs the resolved OCU_E2E_MOUNT_PID to read the mount process's
+        # CapEff and probe its rootfs through /proc/<pid>/.
+        /e2e.test -test.v -test.run '^TestMountRuntimePosture$$' -test.count=1 || exit 1
         exec /e2e.test -test.v -test.run '^TestE2EExercise$$' -test.count=1
 
   # ---------------------------------------------------------------------------
