@@ -78,8 +78,13 @@ Nothing has been tagged yet. Until the first release, all changes live under
 
 - The guest FUSE mount service now runs under a narrow named AppArmor profile
   instead of an unconfined one: it permits the `fuse.*` mount/unmount only onto
-  the canonical mount root, grants `capability sys_admin` alone, and denies
-  ptrace and writes to securityfs.
+  the canonical mount root, grants `capability sys_admin` alone, allows only the
+  IPv4/IPv6 stream and datagram sockets the single outbound leg to the egress
+  edge and its name resolution require, and denies ptrace and writes to
+  securityfs. Declaring the inet sockets explicitly keeps the profile's
+  behaviour identical whether or not the host kernel mediates inet network
+  access — without it, a mediating kernel denies all socket creation and every
+  file operation fails closed.
 - The mount container drops all capabilities and grants back only
   `CAP_SYS_ADMIN`, sets no-new-privileges, runs on a read-only root filesystem
   with a single writable tmpfs for the rclone VFS cache, and is confined by a

@@ -54,6 +54,28 @@ profile ocu-mount flags=(attach_disconnected,mediate_deleted) {
   signal (send,receive) peer=ocu-mount,
   signal (receive) set=(term,int,kill),
 
+  # ---- the single outbound network leg --------------------------------------
+  # The guest's ONLY network path is the outbound HTTPS dial to the egress edge
+  # (the broker RPC rides this), plus the name resolution that precedes it. The
+  # mount opens an IPv4/IPv6 stream socket to the edge and a datagram/stream
+  # socket to the container resolver for the DNS lookup of the edge hostname.
+  # These four families/types are the whole of the mount's socket surface; no
+  # raw, packet, netlink, or vsock socket is granted, so default-deny refuses
+  # every other address family.
+  #
+  # This rule is load-bearing on a kernel whose AppArmor policy mediates the
+  # inet address families: there, a profile that names no network rule denies
+  # ALL socket creation, so the resolver socket fails at creation
+  # (`socket: permission denied`) and every broker RPC — hence every file
+  # operation on the mount — returns EIO before any byte leaves the guest. On a
+  # kernel that does not mediate inet, the same rule is a no-op, so granting it
+  # makes the posture identical across kernels rather than depending on whether
+  # the host happens to mediate inet.
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+  network inet6 dgram,
+
   # ---- the FUSE mount, and nothing else -------------------------------------
   # Allow mounting a fuse.* superblock onto a mountpoint under the canonical
   # mount root. The mount DATA string (fd=,rootmode=,user_id=,group_id=,
