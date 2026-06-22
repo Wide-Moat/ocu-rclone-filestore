@@ -37,6 +37,19 @@ RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
       -o /ocu-rclone-filestore \
       ./cmd/ocu-rclone-filestore
 
+# A tiny one-shot runtime-posture witness, built into the SAME image so a
+# sibling service can run it under the IDENTICAL hardening posture as the mount
+# (read_only rootfs + tmpfs at /root/.cache, cap_drop:[ALL]+cap_add:[SYS_ADMIN],
+# no-new-privileges, the same AppArmor/seccomp profiles). It probes the rootfs
+# (expects EROFS) and the tmpfs (expects a writable round-trip) from INSIDE its
+# own namespace/uid and writes a verdict the live-e2e runner reads. Same static,
+# CGO-free shape as the mount binary; it carries no extra runtime dependency.
+RUN GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+    go build -trimpath \
+      -ldflags "-s -w" \
+      -o /ocu-posture-probe \
+      ./cmd/posture-probe
+
 # Stage the empty mount destination directories the guest config points at,
 # under the canonical /mnt/user-data mount root (outputs and uploads). The
 # distroless runtime has no shell and the mount binary does not create
@@ -59,6 +72,10 @@ FROM gcr.io/distroless/static-debian12@sha256:9c346e4be81b5ca7ff31a0d89eaeade58b
 # surface is the one binary plus its outbound HTTPS connection to the egress edge.
 COPY --from=builder /staging/ /
 COPY --from=builder /ocu-rclone-filestore /ocu-rclone-filestore
+# The posture-probe witness rides in the same image. The default ENTRYPOINT
+# stays the mount binary; the posture-probe service overrides ENTRYPOINT to this
+# binary so the production mount path is untouched.
+COPY --from=builder /ocu-posture-probe /ocu-posture-probe
 
 # The container is invoked as the mount binary; the host supplies --config and
 # optionally --ready-file (or OCU_READY_FILE) as args/env per the shipped

@@ -7,66 +7,54 @@ package e2e
 
 import (
 	"bufio"
-	"bytes"
-	"crypto/rand"
-	"encoding/hex"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 )
 
 // This file pins the RUNTIME (kernel-enforced) hardening posture of the guest
-// mount CONTAINER, as observed against the live mount process. The compose
-// content pins in test/posture assert what the YAML says; this asserts what the
-// kernel actually did with it at run time, so a posture that is silently NOT
-// applied (a runtime that ignores read_only, a capability set wider than
-// declared) goes red here even though the YAML still reads correctly.
+// mount CONTAINER, as observed live. The compose content pins in test/posture
+// assert what the YAML says; this asserts what the kernel actually did with it
+// at run time, so a posture that is silently NOT applied (a runtime that ignores
+// read_only, a capability set wider than declared) goes red here even though the
+// YAML still reads correctly.
 //
-// HOW THE ASSERTION REACHES THE MOUNT CONTAINER. The mount image is distroless
-// (no shell, no tooling), so `docker compose exec mount sh -c ...` cannot run
-// inside it. Instead the test-runner service already runs in the HOST PID
-// namespace (pid: "host" in the compose graph) and resolves the mount process's
-// host-side PID into OCU_E2E_MOUNT_PID. From the host PID namespace the runner
-// can observe the mount process through procfs:
-//   - /proc/<pid>/status carries the process's effective capability mask
-//     (CapEff), the kernel's own accounting of what cap_drop/cap_add produced;
-//   - /proc/<pid>/root is the mount process's mount-namespace root, so a write
-//     attempted through that path is mediated by the mount CONTAINER's own
-//     mount table (its read-only rootfs, its /root/.cache tmpfs), not the
-//     runner's. This is the procfs equivalent of executing inside the mount
-//     container, and it works precisely because the runner is host-PID-ns.
+// HOW EACH ARM REACHES THE KERNEL OUTCOME. The mount image is distroless (no
+// shell, no tooling), so `docker compose exec mount sh -c ...` cannot run inside
+// it. Two mechanisms cover the three arms:
 //
-// arch binding. CapEff (c) and the read-only-rootfs EROFS (a) are KERNEL
-// enforced and therefore CANNOT be verified on the Lima arm64 dev host the
-// authoring happened on — there is no running Linux mount container there. They
-// are AMD64-BINDING: the authoritative red-able proof is the amd64 CI live-e2e
-// job (ci.yml "live e2e (data path)"), which brings the container up under a
-// real Linux kernel and runs this test. The tmpfs-writability arm (b) is the
+//   - CapEff (the effective-capability mask). The test-runner runs in the HOST
+//     PID namespace (pid: "host") and resolves the mount process's host-side PID
+//     into OCU_E2E_MOUNT_PID. From the host PID namespace the runner reads
+//     /proc/<pid>/status, which carries CapEff — the kernel's own accounting of
+//     what cap_drop/cap_add produced. A cross-namespace procfs READ is permitted,
+//     so this arm stays a direct procfs observation.
+//
+//   - read_only-rootfs (EROFS) and tmpfs-writability. A cross-namespace procfs
+//     WRITE through /proc/<pid>/root is denied by the kernel with EACCES (a
+//     different container's uid/namespace) BEFORE the target's mount-table
+//     EROFS/tmpfs semantics ever apply, so the write cannot witness the posture.
+//     Instead a one-shot sibling service (mount-posture-probe) runs from the SAME
+//     image with the IDENTICAL hardening posture (read_only rootfs + tmpfs
+//     /root/.cache, cap_drop:[ALL]+cap_add:[SYS_ADMIN], the same AppArmor/seccomp/
+//     no-new-privileges). Running inside its OWN namespace and uid, the kernel
+//     applies the same read_only and tmpfs semantics to its own syscalls: a
+//     create under the image root surfaces EROFS and a write under /root/.cache
+//     round-trips. The probe writes a verdict line to a shared volume; this test
+//     READS the verdict instead of doing the write itself.
+//
+// arch binding. CapEff is KERNEL enforced and therefore cannot be witnessed on
+// the Lima arm64 dev host the authoring happened on — there is no running Linux
+// mount container there. It is AMD64-BINDING: the authoritative red-able proof is
+// the amd64 CI live-e2e job (ci.yml "live e2e (data path)"). The read_only-rootfs
+// EROFS arm IS witnessable on the arm64 dev host through the probe, because the
+// kernel enforces read_only rootfs on arm64 too (it is AppArmor INET mediation,
+// not read_only, that the arm64 dev host does not enforce). The tmpfs arm is the
 // positive companion: it proves the single declared writable surface really is
-// writable, so (a) cannot pass merely because the whole filesystem is broken.
-//
-// The compile + logic of every arm is exercised by `go vet`/`go build -tags
-// e2e` and by a dry reading of the asserted errno/mask; only the live kernel
-// outcome is amd64-bound.
-
-const (
-	// envMountRoot names a path the mount process's image rootfs is expected to
-	// expose as read-only. It is resolved THROUGH /proc/<pid>/root so the probe
-	// lands in the mount container's filesystem, not the runner's. The probe
-	// file name is appended by the test; the directory must exist in the image.
-	// The mount binary lives at /ocu-rclone-filestore, so / (the image root) is
-	// the natural read-only surface to probe.
-	envMountImageRootProbeDir = "OCU_E2E_MOUNT_IMAGE_ROOT_PROBE_DIR"
-	// envMountTmpfsProbeDir names the single declared writable surface inside the
-	// mount container — the VFS-cache tmpfs at /root/.cache — resolved THROUGH
-	// /proc/<pid>/root as well. A write+read-back here must succeed.
-	envMountTmpfsProbeDir = "OCU_E2E_MOUNT_TMPFS_PROBE_DIR"
-)
+// writable, so the EROFS arm cannot pass merely because the whole filesystem is
+// broken.
 
 // capSysAdmin is the effective-capability mask the hardened mount process must
 // carry and NOTHING ELSE: bit 21 (CAP_SYS_ADMIN), value 0x200000. cap_drop:
@@ -74,33 +62,61 @@ const (
 // exactly this. Any other bit set means a capability leaked past the drop.
 const capSysAdmin uint64 = 1 << 21 // 0x0000000000200000
 
-// mountImageRootProbeDir returns the in-mount-container directory to probe for
-// read-only-ness, defaulting to the image root "/" when the harness leaves it
-// unset. The binary sits at /, so / is read-only in the hardened image.
-func mountImageRootProbeDir() string {
-	if v := os.Getenv(envMountImageRootProbeDir); v != "" {
+const (
+	// envProbeVerdict names the file the one-shot mount-posture-probe wrote its
+	// verdict line to, on the shared /run/ocu volume. Defaults to
+	// /run/ocu/posture-verdict.
+	envProbeVerdict     = "OCU_E2E_PROBE_VERDICT"
+	defaultProbeVerdict = "/run/ocu/posture-verdict"
+)
+
+// probeVerdictPath returns the path the runner reads the posture probe's verdict
+// from, defaulting to the shared-volume location the probe writes by default.
+func probeVerdictPath() string {
+	if v := os.Getenv(envProbeVerdict); v != "" {
 		return v
 	}
-	return "/"
+	return defaultProbeVerdict
 }
 
-// mountTmpfsProbeDir returns the in-mount-container writable tmpfs directory to
-// probe, defaulting to the declared VFS-cache tmpfs mountpoint.
-func mountTmpfsProbeDir() string {
-	if v := os.Getenv(envMountTmpfsProbeDir); v != "" {
-		return v
+// readProbeVerdict reads the single-line verdict the posture probe wrote and
+// returns its space-separated KEY=value tokens as a map. Under the live gate the
+// verdict file MUST exist (the one-shot probe service ran before the runner), so
+// an absent file is a hard failure, not a skip.
+func readProbeVerdict(t *testing.T) map[string]string {
+	t.Helper()
+	path := probeVerdictPath()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open posture-probe verdict %q: %v — under the live gate the one-shot "+
+			"mount-posture-probe service must have run and written its verdict before the "+
+			"runner reads it (compose depends_on service_completed_successfully)", path, err)
 	}
-	return "/root/.cache"
-}
+	defer func() { _ = f.Close() }()
 
-// procRootPath joins an in-mount-container absolute path onto the mount
-// process's mount-namespace root as seen from the host PID namespace, so the
-// returned path, when opened by the runner, is mediated by the MOUNT
-// container's mount table (its read-only rootfs, its tmpfs).
-func procRootPath(pid int, inContainer string) string {
-	// filepath.Join cleans the leading slash off inContainer so it nests under
-	// the proc root path rather than escaping to the host root.
-	return filepath.Join("/proc", strconv.Itoa(pid), "root", inContainer)
+	tokens := map[string]string{}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		for _, field := range strings.Fields(line) {
+			k, v, ok := strings.Cut(field, "=")
+			if !ok {
+				t.Fatalf("malformed posture-probe verdict token %q in %q (want KEY=value)",
+					field, path)
+			}
+			tokens[k] = v
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("scan posture-probe verdict %q: %v", path, err)
+	}
+	if len(tokens) == 0 {
+		t.Fatalf("posture-probe verdict %q is empty: the probe must write a verdict line", path)
+	}
+	return tokens
 }
 
 // readCapEff parses the CapEff hex mask out of /proc/<pid>/status. CapEff is the
@@ -139,15 +155,17 @@ func readCapEff(t *testing.T, pid int) uint64 {
 }
 
 // TestMountRuntimePosture asserts the live mount container's kernel-enforced
-// hardening posture through procfs from the host-PID-namespace runner. It runs
-// only under the live gate; on a host build (gate unset) it skips clean.
+// hardening posture: CapEff through procfs from the host-PID-namespace runner,
+// and the read_only-rootfs/tmpfs arms through the one-shot posture probe's
+// verdict. It runs only under the live gate; on a host build (gate unset) it
+// skips clean.
 //
 // LIMA-HONEST vs AMD64-BINDING (also marked per subtest):
 //   - capeff_only_sys_admin   — AMD64-BINDING (kernel capability accounting).
-//   - image_rootfs_read_only  — AMD64-BINDING (kernel read_only-rootfs EROFS).
-//   - tmpfs_cache_writable    — positive companion; the write/read-back logic is
-//     Lima-honest, but it too only runs inside the live harness because it needs
-//     the running mount container's tmpfs. The amd64 CI job is authoritative.
+//   - image_rootfs_read_only  — witnessed via the probe; the probe's EROFS arm
+//     is enforced on arm64 too, so the verdict is Lima-honest, but it runs inside
+//     the live harness.
+//   - tmpfs_cache_writable    — positive companion read from the same verdict.
 func TestMountRuntimePosture(t *testing.T) {
 	if os.Getenv(envGate) == "" {
 		t.Skipf("%s not set — the mount runtime-posture assertion runs only against the "+
@@ -160,12 +178,12 @@ func TestMountRuntimePosture(t *testing.T) {
 		if allowPartial() {
 			t.Skipf("%s unset and partial mode explicitly opted into via %s — skipping the "+
 				"mount runtime-posture assertion (it needs the live mount process's host PID "+
-				"to read its CapEff and probe its rootfs through procfs)",
+				"to read its CapEff)",
 				envMountPID, envAllowPartial)
 		}
 		t.Fatalf("%s is required under the live gate (%s): the runtime-posture assertion "+
-			"reads the mount process's CapEff and probes its read-only rootfs through "+
-			"/proc/<pid>/; set %s=1 only to opt into a partial run on purpose",
+			"reads the mount process's CapEff through /proc/<pid>/; set %s=1 only to opt "+
+			"into a partial run on purpose",
 			envMountPID, envGate, envAllowPartial)
 	}
 	pid, err := strconv.Atoi(pidStr)
@@ -201,67 +219,44 @@ func TestMountRuntimePosture(t *testing.T) {
 		t.Logf("AMD64-BINDING: mount process CapEff=0x%016x is exactly CAP_SYS_ADMIN", eff)
 	})
 
-	// (a) The image rootfs must be READ-ONLY — AMD64-BINDING.
+	// (a) The image rootfs must be READ-ONLY — witnessed via the posture probe.
 	//
-	// A write attempted THROUGH /proc/<pid>/root is mediated by the mount
-	// container's mount table, so read_only:true makes the create fail with
-	// EROFS. Dry logic: a successful create (err == nil) proves the rootfs is
-	// writable — fatal, and the stray probe is removed; any errno OTHER than
-	// EROFS (e.g. EACCES, ENOENT) is NOT the read-only signal and also fails, so
-	// the pin cannot pass on an unrelated denial. Only EROFS is the read-only
-	// proof.
+	// The one-shot mount-posture-probe ran from the SAME image with the IDENTICAL
+	// hardening posture and attempted a create under its own image root. With
+	// read_only:true the create surfaces EROFS, and the probe records
+	// ROOTFS_EROFS=ok only on that exact errno (a successful create, or any errno
+	// other than EROFS, records a failing detail instead). This test asserts the
+	// recorded verdict. Reading the probe's verdict — rather than the runner
+	// attempting a cross-namespace procfs-root write the kernel denies with EACCES
+	// — is what makes the arm witnessable on amd64 CI and on the arm64 dev host.
 	t.Run("image_rootfs_read_only", func(t *testing.T) {
-		probe := procRootPath(pid, filepath.Join(mountImageRootProbeDir(), "ocu-rootfs-probe"))
-		f, werr := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY, 0o644)
-		if werr == nil {
-			_ = f.Close()
-			_ = os.Remove(probe)
-			t.Fatalf("created %q inside the mount container's rootfs: the image root is "+
-				"WRITABLE, but read_only:true must make it read-only (the mount process "+
-				"writes nothing to the image)", probe)
+		verdict := readProbeVerdict(t)
+		got := verdict["ROOTFS_EROFS"]
+		if got != "ok" {
+			t.Fatalf("posture-probe ROOTFS_EROFS=%q, want \"ok\": the probe's create under its "+
+				"own image root did NOT surface EROFS, so read_only:true is not enforced on the "+
+				"mount image rootfs (full verdict: %v)", got, verdict)
 		}
-		if !errors.Is(werr, syscall.EROFS) {
-			t.Fatalf("write to the mount container rootfs probe %q failed with %v, not EROFS: "+
-				"a read-only root must surface EROFS; a different errno is not the "+
-				"read-only-rootfs signal", probe, werr)
-		}
-		t.Logf("AMD64-BINDING: mount container rootfs probe %q is read-only (EROFS)", probe)
+		t.Logf("mount image rootfs is read-only (probe ROOTFS_EROFS=ok: create surfaced EROFS)")
 	})
 
-	// (b) The VFS-cache tmpfs must be WRITABLE — positive companion (logic
-	// Lima-honest; runs live).
+	// (b) The VFS-cache tmpfs must be WRITABLE — positive companion read from the
+	// same probe verdict.
 	//
-	// /root/.cache is the single declared writable surface (tmpfs). Writing a
-	// nonce'd probe through /proc/<pid>/root and reading it back byte-identical
-	// proves the surface the rclone VFS cache needs is genuinely writable, so the
-	// read-only-rootfs arm above is not passing merely because the whole
-	// filesystem is unusable. Dry logic: a failed create or a read-back mismatch
-	// fails; success requires both write and identical read-back.
+	// /root/.cache is the single declared writable surface (tmpfs). The probe
+	// wrote a nonce'd file there and read it back byte-identical, recording
+	// TMPFS_WRITABLE=ok only on a successful round-trip. This proves the surface
+	// the rclone VFS cache needs is genuinely writable, so the read-only-rootfs arm
+	// above is not passing merely because the whole filesystem is unusable.
 	t.Run("tmpfs_cache_writable", func(t *testing.T) {
-		nonce := make([]byte, 16)
-		if _, nerr := rand.Read(nonce); nerr != nil {
-			t.Fatalf("generate tmpfs probe nonce: %v", nerr)
+		verdict := readProbeVerdict(t)
+		got := verdict["TMPFS_WRITABLE"]
+		if got != "ok" {
+			t.Fatalf("posture-probe TMPFS_WRITABLE=%q, want \"ok\": the declared writable "+
+				"VFS-cache tmpfs (/root/.cache) did not accept a write+read-back round-trip "+
+				"(full verdict: %v)", got, verdict)
 		}
-		name := "ocu-tmpfs-probe-" + hex.EncodeToString(nonce)
-		probe := procRootPath(pid, filepath.Join(mountTmpfsProbeDir(), name))
-		want := []byte(fmt.Sprintf("ocu tmpfs writability probe %s\n", hex.EncodeToString(nonce)))
-
-		if werr := os.WriteFile(probe, want, 0o644); werr != nil {
-			t.Fatalf("write to the mount container tmpfs probe %q failed: %v — the declared "+
-				"writable VFS-cache tmpfs (%s) must accept writes",
-				probe, werr, mountTmpfsProbeDir())
-		}
-		defer func() { _ = os.Remove(probe) }()
-
-		got, rerr := os.ReadFile(probe)
-		if rerr != nil {
-			t.Fatalf("read back the tmpfs probe %q failed: %v", probe, rerr)
-		}
-		if !bytes.Equal(got, want) {
-			t.Fatalf("tmpfs probe %q read back %d bytes, want %d byte-identical: the writable "+
-				"surface did not persist the bytes", probe, len(got), len(want))
-		}
-		t.Logf("the mount container tmpfs %q is writable (probe round-tripped byte-identical)",
-			mountTmpfsProbeDir())
+		t.Logf("mount tmpfs /root/.cache is writable (probe TMPFS_WRITABLE=ok: round-trip " +
+			"byte-identical)")
 	})
 }

@@ -239,6 +239,15 @@ jobs:
         run: sudo apparmor_parser -r -W deploy/compose/apparmor/ocu-mount.profile
       - name: Bring up the harness (peers + edge + mount)
         run: docker compose -f deploy/compose/docker-compose.yml up --build -d harness-init control-plane exchange filestore edge mount
+      # The one-shot posture probe witnesses the kernel-enforced read_only-rootfs
+      # (EROFS) and tmpfs-writability arms from INSIDE its own hardened namespace.
+      # The test-runner in a different namespace/uid cannot write through the
+      # mount's procfs root — the kernel denies it with EACCES before the mount
+      # table's EROFS/tmpfs semantics apply. Run the probe to completion so its
+      # verdict exists on the shared volume before the test-runner reads it; a
+      # non-zero verdict (either arm failed) fails this step loudly.
+      - name: Witness the mount runtime posture (one-shot probe)
+        run: docker compose -f deploy/compose/docker-compose.yml run --rm --build mount-posture-probe
       - name: Run the live exercise (test-runner service)
         run: docker compose -f deploy/compose/docker-compose.yml run --rm --build test-runner
       - name: Run the backend conformance round-trip (conformance-runner service)
