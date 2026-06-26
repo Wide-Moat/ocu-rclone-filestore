@@ -1,0 +1,168 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# ===========================================================================
+# Phase-2-pending compose FRAGMENT for the assembled ocu-deploy app (fleet
+# pin v0.2). This is NOT the repo's component-test harness — that remains
+# deploy/compose/docker-compose.yml, which stands up its own in-tree edge +
+# backend peers to exercise the full data path locally. This fragment instead
+# freezes the NAME-SHAPE of the guest mount service as it slots into the
+# assembled fleet, so the live single edge can pick it up later without a
+# rename.
+#
+# Topology this fragment commits to (fleet pin v0.2):
+#
+#   guest mount  --(ocu-mount-facing)-->  EDGE (ocu-egress)
+#                                           |  (ocu-edge-backend, NOT here)
+#                                           v
+#                                         filestore:8444
+#
+# The guest sits on ocu-mount-facing ONLY. It has NO ocu-edge-backend
+# membership and therefore NO L3 route to the filestore: the edge is the sole
+# storage hop. The edge itself (service key `ocu-egress`) is component-06
+# Envoy + control SDS and is delivered by ocu-deploy in Phase-2; it is not
+# defined in this fragment.
+#
+# PLACEHOLDERS (frozen name-shapes, NOT working endpoints):
+#   - `ocu-egress`  — the single edge service key the guest dials. Resolves to
+#                     a live Envoy + control-SDS edge only once ADR-0019/0021
+#                     SDS lands in ocu-deploy Phase-2. Until then it is a name
+#                     with no backing container in this fragment.
+#   - service_url   — rendered into guest-config.json by a control/cert-init
+#                     step in the assembled app; this fragment models that
+#                     delivery as a read-only /shared mount that control
+#                     populates Phase-2 (mirrors the harness handoff shape).
+#   - ca_cert_pem   — the CA the edge leaf chains to; rendered by cert-init in
+#                     ocu-deploy Phase-2 into the same /shared guest-config.json.
+#
+# This fragment is deliberately NOT a mock: it introduces no fake endpoint and
+# no relaxed posture. It declares the real service shape and the real hardened
+# posture; the only things deferred are the Phase-2 edge and the Phase-2
+# control-rendered secrets, each marked Phase-2-pending below.
+# ===========================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # The guest rclone FUSE mount, as it slots into the assembled fleet. Built
+  # from this repo's Dockerfile (default ENTRYPOINT is the mount binary). It
+  # dials its HTTPS service_url (the `ocu-egress` edge) OUTBOUND on
+  # ocu-mount-facing; it joins no backend network, so it holds no route to any
+  # storage backend and no backend credential — only the weak, scoped,
+  # short-lived session JWT carried in its rendered config.
+  # ---------------------------------------------------------------------------
+  ocu-rclone-mount:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+
+    # ocu-mount-facing ONLY. No ocu-edge-backend membership — the guest has no
+    # L3 route to the filestore; the edge (`ocu-egress`) is the only hop.
+    networks:
+      - ocu-mount-facing
+
+    # FUSE needs the device node.
+    devices:
+      - /dev/fuse
+
+    # -----------------------------------------------------------------------
+    # Kernel-enforced hardening posture. This is the SAME strict posture the
+    # mount carries in the component-test harness, where it merges the shared
+    # `x-mount-posture` YAML anchor. A standalone fragment cannot reference an
+    # anchor defined in another file, so the posture is inlined here verbatim;
+    # in the assembled ocu-deploy app it merges the fleet's shared
+    # mount-posture anchor by the same `<<: *mount-posture` pattern. It is the
+    # hardened posture, NOT a relaxed one:
+    #   - cap_drop ALL, then grant back only CAP_SYS_ADMIN (the in-process
+    #     FUSE mount(2)/umount2(2) capability).
+    #   - the narrow `ocu-mount` AppArmor profile (NOT unconfined); load it
+    #     into the host kernel before `up`:
+    #       sudo apparmor_parser -r -W deploy/compose/apparmor/ocu-mount.profile
+    #   - the narrow seccomp allowlist (admin group removed; only
+    #     {mount, umount2, clone, clone3} added back).
+    #   - no-new-privileges.
+    #   - read-only container rootfs; the single writable surface is the
+    #     rclone VFS disk cache tmpfs at /root/.cache.
+    # -----------------------------------------------------------------------
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor=ocu-mount
+      - seccomp=./seccomp/mount-fuse.json
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /root/.cache
+
+    volumes:
+      # Phase-2-pending: control/cert-init in ocu-deploy renders the guest
+      # mount config (service_url -> the `ocu-egress` edge, auth_token -> the
+      # weak session JWT, ca_cert_pem -> the CA the edge leaf chains to) into
+      # this read-only /shared volume before the mount starts. This models the
+      # control-rendered delivery; the harness performs the equivalent render
+      # via its harness-init one-shot. Control delivers /shared Phase-2.
+      - shared:/shared:ro
+      # Ready-file handoff: the mount creates --ready-file once all mounts are
+      # ready and removes it on teardown; a peer (orchestrator/health consumer)
+      # reads it from this volume.
+      - mount-shared:/run/ocu
+      # The mount destinations propagate out to the host via an rshared bind so
+      # the FUSE mounts created inside this container reach the guest userspace.
+      - type: bind
+        source: /tmp/ocu-mountroot
+        target: /mnt/user-data
+        bind:
+          propagation: rshared
+
+    # The shipped entrypoint contract: --config (required) + --ready-file. No
+    # env is introduced — both are already flags, so compose passes them in the
+    # command. The transport (service_url, auth_token, ca_cert_pem) flows in
+    # the rendered config at /shared/guest-config.json, NOT via flags or env.
+    command:
+      - --config
+      - /shared/guest-config.json
+      - --ready-file
+      - /run/ocu/mount-ready
+
+    # A REAL readiness healthcheck keyed on the --ready-file path: the mount
+    # creates /run/ocu/mount-ready only once every mount is up, and removes it
+    # on teardown, so the file's existence is an authoritative liveness signal
+    # (NOT a sleep). start_period covers first-mount + edge-dial latency.
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /run/ocu/mount-ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+
+# ===========================================================================
+# Phase-2-pending placeholders, gathered here for the assembled-app wiring.
+# These document the frozen name-shapes this fragment commits to; the live
+# values land via ocu-deploy in Phase-2.
+#
+#   service_url:  https://ocu-egress:8450
+#                 Phase-2-pending: the live single edge (Envoy + control SDS,
+#                 ADR-0019/0021) lands in ocu-deploy; `ocu-egress` is the
+#                 frozen service-key placeholder until then. Rendered into
+#                 /shared/guest-config.json by control/cert-init Phase-2.
+#
+#   ca_cert_pem:  Phase-2-pending: the CA the edge leaf chains to is rendered
+#                 by cert-init in ocu-deploy Phase-2 into the same
+#                 /shared/guest-config.json. No CA material is baked here.
+# ===========================================================================
+
+networks:
+  # The guest-facing network: the guest mount and the `ocu-egress` edge meet
+  # here. The edge ALSO joins ocu-edge-backend (defined by ocu-deploy, NOT in
+  # this fragment) to reach the filestore; the guest never joins that backend
+  # network, which is what makes the edge the single storage hop.
+  ocu-mount-facing:
+
+volumes:
+  # Control-rendered bringup artifacts (the guest mount config, the CA PEM,
+  # the weak session JWT) delivered by control/cert-init Phase-2, read-only to
+  # the guest.
+  shared:
+  # Ready-file handoff between the mount and its health/orchestration consumer.
+  mount-shared:
