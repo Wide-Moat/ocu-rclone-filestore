@@ -105,8 +105,11 @@ through and quietly mount.
     carries a valid `filesystem_id` and asserts the error names the memory-store
     axis, so neutering this site alone goes RED. (Previously this was a
     composite-masking vacuous guard, fixed by adding the discriminating fixture.)
-  - **site-2** the mountcfg loader — mutating the condition makes the harness
-    test RED.
+  - **site-2** `internal/mounter/orchestrator.go:234` — the orchestrator
+    refuses a memory-store mount before starting any point; mutating that
+    condition makes `TestOrchestratorMemoryStoreHardError`
+    (`internal/mounter/orchestrator_test.go:338`, which feeds a memory-only
+    config and asserts a hard error with zero points started) RED.
 - **Canon tie:** the mount-config single-shape contract; a memory-store scope is
   a build-time hard stop in this guest.
 
@@ -211,8 +214,10 @@ Never give the mount service `pid: host`. The test-runner deliberately keeps
 
 - **Guard:** `.coverage-floor:1` (value `90.00`), enforced by
   `internal/coverage/coverage_test.go`.
-- **Mutation → RED:** changing the floor (`90` → `50`, or `90` → `95`) against a
-  fixed profile flips the gate RED both ways.
+- **Mutation → RED:** the gate fails only on `measured < floor`
+  (`internal/coverage/coverage_test.go:35`) — raising the floor above the
+  measured aggregate, or a coverage regression below the recorded floor, goes
+  RED.
 - **Canon tie:** repo quality gate (coverage floor, ratcheted to 90).
 
 ---
