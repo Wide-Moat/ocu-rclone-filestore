@@ -12,7 +12,10 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"net/http"
@@ -62,13 +65,15 @@ func mainWith(args []string) error {
 	keyPath := fs.String("key", "/shared/exchange.key.pem", "leaf private key PEM")
 	caPath := fs.String("ca", "/shared/ca.pem", "CA PEM for dialing the control-plane")
 	cpJWKSURL := fs.String("control-plane-jwks", "https://control-plane:8443/.well-known/jwks.json", "control-plane JWKS URL")
+	credKeyPath := fs.String("credential-signing-key", "/shared/exchange.credential.key.pem",
+		"stable PKCS#8 EC credential signing key PEM (shared with harness-init); empty generates an ephemeral key (NOT restart-durable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return runFn(*addr, *certPath, *keyPath, *caPath, *cpJWKSURL)
+	return runFn(*addr, *certPath, *keyPath, *caPath, *cpJWKSURL, *credKeyPath)
 }
 
-func run(addr, certPath, keyPath, caPath, cpJWKSURL string) error {
+func run(addr, certPath, keyPath, caPath, cpJWKSURL, credKeyPath string) error {
 	client, err := serve.CAClient(caPath)
 	if err != nil {
 		return err
@@ -85,9 +90,24 @@ func run(addr, certPath, keyPath, caPath, cpJWKSURL string) error {
 	}
 
 	// The credential issuer: issues bound credential JWTs, publishes their JWKS.
-	issuer, err := exchange.NewJWTCredentialIssuer(exchange.CredentialIssuerOptions{
+	// A persisted key keeps the published JWKS stable across a restart, so an
+	// edge that cached an exchanged credential or a filestore that cached this
+	// JWKS does not desync and reject a valid token after the exchange reboots.
+	// An empty path falls back to an ephemeral generated key (test convenience),
+	// which is explicitly NOT restart-durable.
+	credKey, err := loadCredentialSigningKey(credKeyPath)
+	if err != nil {
+		return err
+	}
+	issuerOpts := exchange.CredentialIssuerOptions{
 		Issuer: credIssuer, Audience: credAudience, Kid: credKid,
-	})
+	}
+	var issuer *exchange.JWTCredentialIssuer
+	if credKey != nil {
+		issuer, err = exchange.NewJWTCredentialIssuerFromKey(credKey, issuerOpts)
+	} else {
+		issuer, err = exchange.NewJWTCredentialIssuer(issuerOpts)
+	}
 	if err != nil {
 		return fmt.Errorf("build credential issuer: %w", err)
 	}
@@ -112,4 +132,32 @@ func run(addr, certPath, keyPath, caPath, cpJWKSURL string) error {
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "exchange: serving token + credential JWKS on %s\n", addr)
 	return serve.Run(addr, tlsConf, mux)
+}
+
+// loadCredentialSigningKey reads the stable PKCS#8 EC credential signing key
+// harness-init writes to the shared volume. An empty path returns (nil, nil) so
+// the caller falls back to an ephemeral generated key — the only place a missing
+// path is acceptable, since an ephemeral key is not restart-durable. A present
+// but unreadable or malformed path is a hard error, never a silent fallback.
+func loadCredentialSigningKey(path string) (*ecdsa.PrivateKey, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: path is the harness credential signing key on the shared volume
+	if err != nil {
+		return nil, fmt.Errorf("read credential signing key %q: %w", path, err)
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		return nil, fmt.Errorf("credential signing key %q is not PEM", path)
+	}
+	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse credential signing key %q: %w", path, err)
+	}
+	ecKey, ok := key.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("credential signing key %q is not an EC key", path)
+	}
+	return ecKey, nil
 }

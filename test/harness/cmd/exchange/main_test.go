@@ -79,7 +79,7 @@ func TestExchangeRunServesCredentialJWKS(t *testing.T) {
 	cpJWKS := startControlPlane(t, ca)
 	addr := ephemeralAddr(t)
 
-	go func() { _ = run(addr, certPath, keyPath, caPath, cpJWKS) }()
+	go func() { _ = run(addr, certPath, keyPath, caPath, cpJWKS, "") }()
 
 	client, err := serve.CAClient(caPath)
 	if err != nil {
@@ -121,7 +121,7 @@ func TestRunRejectsBadCA(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad-ca.pem")
 	_ = os.WriteFile(bad, []byte("not a cert"), 0o600)
-	if err := run(ephemeralAddr(t), "c", "k", bad, "https://127.0.0.1:1/jwks"); err == nil {
+	if err := run(ephemeralAddr(t), "c", "k", bad, "https://127.0.0.1:1/jwks", ""); err == nil {
 		t.Fatal("run accepted a CA file with no certificate")
 	}
 }
@@ -131,7 +131,7 @@ func TestMainWith(t *testing.T) {
 	saved := runFn
 	t.Cleanup(func() { runFn = saved })
 	called := false
-	runFn = func(addr, cert, key, ca, cpJWKS string) error { called = true; return nil }
+	runFn = func(addr, cert, key, ca, cpJWKS, credKey string) error { called = true; return nil }
 	if err := mainWith([]string{"-addr", "127.0.0.1:9"}); err != nil {
 		t.Fatalf("mainWith: %v", err)
 	}
