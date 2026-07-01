@@ -8,6 +8,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Hold a newly published version for a week before proposing it, so a
+    # malicious release that is caught and yanked shortly after publication is
+    # never auto-proposed into this tree.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 10
     commit-message:
       prefix: "build"
@@ -32,6 +37,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Hold a newly published version for a week before proposing it, so a
+    # malicious release that is caught and yanked shortly after publication is
+    # never auto-proposed into this tree.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
