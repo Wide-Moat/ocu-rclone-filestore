@@ -49,13 +49,24 @@ which `test/e2e/envoy_only_hop_test.go` asserts rather than assumes.
   expresses (kept in the tree as the validated artifact; the live F harness
   serves the equivalent chain in-repo pending real-Envoy keyed-injector
   resolution).
-- **mount** — built from the repo-root `Dockerfile`. Granted `/dev/fuse` and
-  `SYS_ADMIN` (FUSE needs both), the rendered guest config, and the workspace
-  bind. Unlike the old graph it has a real network stack (mount-facing only) and
-  dials its `service_url` (the edge) outbound; it has no edge-backend membership,
-  so no direct route to the filestore. The guest holds no backend credential:
-  the per-mount `auth_token` is the weak JWT, and the real filestore credential
-  never reaches it (it lives only between the edge and the filestore).
+- **mount** — built from the repo-root `Dockerfile`. Granted `/dev/fuse` and the
+  rendered guest config and workspace bind, and run hardened: `cap_drop: [ALL]`
+  with only `CAP_SYS_ADMIN` granted back (the sole capability the in-process FUSE
+  mount/umount path needs); the named `ocu-mount` AppArmor profile
+  (`apparmor/ocu-mount.profile`) that permits only `mount fstype=fuse.*` plus the
+  narrow path set the mount touches, NOT `apparmor=unconfined`; a narrow seccomp
+  profile (`seccomp/mount-fuse.json`) that drops the broad `CAP_SYS_ADMIN`-gated
+  admin syscall group and adds back only `mount`/`umount2` (plus the runtime's
+  `clone`/`clone3`); `no-new-privileges`; and a read-only container rootfs with a
+  single writable tmpfs for the rclone VFS cache (`/root/.cache`). The named
+  AppArmor profile must be loaded into the host kernel before `up` (`sudo
+  apparmor_parser -r apparmor/ocu-mount.profile`). The container runs as root so
+  the kernel grants the mount permission; the hardening bounds that root. Unlike
+  the old graph it has a real network stack (mount-facing only) and dials its
+  `service_url` (the edge) outbound; it has no edge-backend membership, so no
+  direct route to the filestore. The guest holds no backend credential: the
+  per-mount `auth_token` is the weak JWT, and the real filestore credential never
+  reaches it (it lives only between the edge and the filestore).
 - **test-runner** — the live e2e gate (profile `test`; `docker compose run --rm
   test-runner`). Asserts `TestEnvoyOnlyHop` (the single-hop topology) then drives
   `TestE2EExercise`. Shares the HOST PID namespace with the mount so the

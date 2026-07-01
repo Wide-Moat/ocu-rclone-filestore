@@ -55,10 +55,29 @@ const defaultCredentialTTL = time.Hour
 
 // NewJWTCredentialIssuer constructs an issuer, generating a fresh P-256 signing
 // key distinct from the control-plane's.
+//
+// A generated key is NOT restart-durable: a fresh key on every boot republishes
+// a new credential JWKS, so any edge that cached an exchanged credential or any
+// filestore that cached the old JWKS desyncs and rejects an otherwise-valid
+// token after an independent restart. For a long-running graph, pass a stable
+// persisted key via NewJWTCredentialIssuerFromKey instead.
 func NewJWTCredentialIssuer(opts CredentialIssuerOptions) (*JWTCredentialIssuer, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("exchange: generate credential key: %w", err)
+	}
+	return NewJWTCredentialIssuerFromKey(priv, opts)
+}
+
+// NewJWTCredentialIssuerFromKey constructs an issuer over a caller-supplied
+// signing key. Passing the same persisted key across restarts keeps the
+// published credential JWKS stable, so a restart of the exchange (or of an edge
+// or filestore that caches against it) does not desync the credential seam and
+// reject a valid token. The key is mirror of the control-plane's stable signing
+// key: both are PKCS#8 EC keys harness-init writes once to the shared volume.
+func NewJWTCredentialIssuerFromKey(priv *ecdsa.PrivateKey, opts CredentialIssuerOptions) (*JWTCredentialIssuer, error) {
+	if priv == nil {
+		return nil, fmt.Errorf("exchange: credential signing key must not be nil")
 	}
 	ttl := opts.TTL
 	if ttl <= 0 {

@@ -228,8 +228,26 @@ jobs:
       # mount of the rw scope, throttle = the SC2 throttle scope.
       - name: Prepare the mount-root bind
         run: mkdir -p /tmp/ocu-e2e-mountroot/outputs /tmp/ocu-e2e-mountroot/uploads /tmp/ocu-e2e-mountroot/outputs2 /tmp/ocu-e2e-mountroot/throttle
+      # The mount service references a NAMED AppArmor profile (apparmor=ocu-mount).
+      # A named profile must be loaded into the runner's host kernel before the
+      # container is created, or OCI create fails ("unable to apply apparmor
+      # profile ... no such file or directory", exit 127) and the mount never
+      # starts. ubuntu-latest ships AppArmor and apparmor_parser; load the profile
+      # here. No swallowing: a parser rejection is a real defect we want surfaced,
+      # so the step fails loudly rather than continuing to an exit-127 bring-up.
+      - name: Load the mount AppArmor profile into the runner kernel
+        run: sudo apparmor_parser -r -W deploy/compose/apparmor/ocu-mount.profile
       - name: Bring up the harness (peers + edge + mount)
         run: docker compose -f deploy/compose/docker-compose.yml up --build -d harness-init control-plane exchange filestore edge mount
+      # The one-shot posture probe witnesses the kernel-enforced read_only-rootfs
+      # (EROFS) and tmpfs-writability arms from INSIDE its own hardened namespace.
+      # The test-runner in a different namespace/uid cannot write through the
+      # mount's procfs root — the kernel denies it with EACCES before the mount
+      # table's EROFS/tmpfs semantics apply. Run the probe to completion so its
+      # verdict exists on the shared volume before the test-runner reads it; a
+      # non-zero verdict (either arm failed) fails this step loudly.
+      - name: Witness the mount runtime posture (one-shot probe)
+        run: docker compose -f deploy/compose/docker-compose.yml run --rm --build mount-posture-probe
       - name: Run the live exercise (test-runner service)
         run: docker compose -f deploy/compose/docker-compose.yml run --rm --build test-runner
       - name: Run the backend conformance round-trip (conformance-runner service)

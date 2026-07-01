@@ -30,6 +30,61 @@ x-peer-build: &peer-build
   context: ../..
   dockerfile: deploy/compose/peer.Dockerfile
 
+# SINGLE SOURCE OF TRUTH for the kernel-enforced mount hardening posture. Both
+# the mount service and the one-shot mount-posture-probe witness merge this
+# anchor with `<<: *mount-posture`, so the two processes carry a byte-identical
+# posture by construction — there is no second copy to drift out of lockstep.
+# The probe proves the OLD posture of a DIFFERENT process; if the mount could
+# carry a weakened copy while the probe stayed green, the witness would be
+# vacuous. Anchoring removes that class: a single flip here moves BOTH the
+# mount and the witness together, so the probe always proves the live mount's
+# real posture and the posture-lint reads this anchored value (see
+# test/posture/compose_posture_test.go, which resolves the merge).
+#
+# Merge semantics relied on here: `<<` deep-merges MAPS, so a service may add
+# its own keys (devices, volumes, command, ...) alongside the merged posture.
+# The posture VALUES that are lists (security_opt, tmpfs, cap_drop, cap_add)
+# are taken wholesale from the anchor — neither service re-declares them
+# inline, so there is nothing to override and the anchor is authoritative.
+x-mount-posture: &mount-posture
+  # Capabilities: start from zero and grant back only CAP_SYS_ADMIN, the one
+  # capability the in-process FUSE mount(2)/umount2(2) path exercises. The
+  # default container capability set (CHOWN, DAC_OVERRIDE, SETUID, ...) is
+  # dropped. The container runs as root, so DAC checks on the root-owned
+  # staging dirs and the VFS cache take the uid-0 fast path, not a capability.
+  cap_drop:
+    - ALL
+  cap_add:
+    - SYS_ADMIN
+  security_opt:
+    # Narrow AppArmor profile (NOT unconfined): permits only the fuse.* mount/
+    # umount onto /mnt/user-data, /dev/fuse, the binary exec, and the runtime
+    # writes (VFS cache under /root/.cache, ready-file under /run/ocu, mount
+    # targets under /mnt/user-data); denies the rest. Load it into the host
+    # kernel before `up`:
+    #   sudo apparmor_parser -r -W deploy/compose/apparmor/ocu-mount.profile
+    # (see docs/e2e-local.md). The profile name, not a path, is referenced.
+    - apparmor=ocu-mount
+    # Narrow seccomp: the runtime default allowlist with the broad
+    # CAP_SYS_ADMIN-gated admin group removed and only {mount, umount2, clone,
+    # clone3} added back unconditionally — sixteen admin syscalls the default
+    # would unlock under CAP_SYS_ADMIN are now denied. clone/clone3 are the Go
+    # runtime's OS-thread creation and cannot be removed.
+    - seccomp=./seccomp/mount-fuse.json
+    # Block privilege gain via execve (PR_SET_NO_NEW_PRIVS). The mount path
+    # execs nothing and the static image carries no setuid/file-cap binary, so
+    # this is hardening at zero functional cost; CAP_SYS_ADMIN is retained.
+    - no-new-privileges:true
+  # Read-only container root filesystem: the mount process writes nothing to
+  # the image. The single writable tmpfs is the rclone VFS disk cache, which
+  # the runtime (HOME=/root) resolves to /root/.cache; without it rclone
+  # disables the cache and degrades the SEC-46 hold-data-across-throttle path.
+  # The ready-file dir (/run/ocu) and the mount targets (/mnt/user-data) are a
+  # named volume and a host bind respectively, already writable.
+  read_only: true
+  tmpfs:
+    - /root/.cache
+
 services:
   # ---------------------------------------------------------------------------
   # Bringup keystone: generate the CA + per-service leaf certs, the stable
@@ -212,17 +267,22 @@ services:
         condition: service_started
     devices:
       - /dev/fuse
-    cap_add:
-      - SYS_ADMIN
-    # FUSE's mount(2) needs the AppArmor mount restriction lifted: CAP_SYS_ADMIN
-    # alone is insufficient under the default container AppArmor profile. Only
-    # this service mounts.
-    security_opt:
-      - apparmor=unconfined
-    # Shared (host) PID namespace, mirrored by the test-runner: the runner
-    # signals the REAL mount process for the graceful-teardown step and must
-    # survive that process's exit to finish its assertions.
-    pid: "host"
+    # Kernel-enforced hardening posture (cap_drop:[ALL]+cap_add:[SYS_ADMIN], the
+    # narrow ocu-mount AppArmor profile, the narrow seccomp allowlist,
+    # no-new-privileges, read_only rootfs, tmpfs /root/.cache) merged from the
+    # single x-mount-posture anchor above. The mount-posture-probe witness merges
+    # the SAME anchor, so the witnessed posture cannot drift from the live mount.
+    <<: *mount-posture
+    # No host PID namespace: the mount runs in its OWN private PID namespace and
+    # is PID 1 in this container, so it exposes no host process table of its own.
+    # The graceful-teardown step still signals the REAL mount process: the
+    # test-runner (the harness, NOT a mount-service privilege) joins the HOST PID
+    # namespace and finds the mount by its host-side PID. Sharing the mount's own
+    # namespace (pid: service:mount) is NOT usable for teardown — there the mount
+    # is PID 1, and when the teardown SIGTERMs it the kernel SIGKILLs every other
+    # process in that namespace (the runner included, exit 137) before the
+    # post-teardown assertions can run. The runner's PID-ns choice is documented
+    # on the test-runner service below.
     networks:
       - mount-facing
     volumes:
@@ -250,6 +310,44 @@ services:
       - /run/ocu/mount-ready
 
   # ---------------------------------------------------------------------------
+  # Runtime-posture probe — a one-shot witness for the kernel-enforced hardening
+  # posture, built from the SAME image as the mount but with its ENTRYPOINT
+  # overridden to the posture-probe binary. It carries the IDENTICAL posture
+  # block as the mount service (cap_drop:[ALL]+cap_add:[SYS_ADMIN], the same
+  # AppArmor + seccomp + no-new-privileges, read_only rootfs, tmpfs /root/.cache)
+  # so the kernel applies the very same read_only and tmpfs semantics to the
+  # probe's OWN syscalls. Running inside its own namespace/uid, a create under
+  # the image root surfaces EROFS and a write under /root/.cache succeeds — no
+  # cross-container /proc/<pid>/root write (which the kernel denies with EACCES
+  # before the target's mount-table semantics ever apply). It writes a verdict
+  # line to the probe-verdict volume; the test-runner reads it. One-shot
+  # (restart:"no"); the runner waits on its successful completion.
+  # ---------------------------------------------------------------------------
+  mount-posture-probe:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    entrypoint:
+      - /ocu-posture-probe
+    restart: "no"
+    # IDENTICAL posture to the mount service, merged from the SAME x-mount-posture
+    # anchor the mount service merges. There is no second copy to drift: a flip of
+    # the anchor moves both this witness and the live mount together, so the probe
+    # always proves the mount's real posture (the witness can never be vacuous).
+    <<: *mount-posture
+    networks:
+      - mount-facing
+    environment:
+      OCU_E2E_PROBE_VERDICT: /run/ocu/posture-verdict
+    volumes:
+      # The verdict handoff to the test-runner, on the SAME /run/ocu volume the
+      # ready-file uses (a distinct filename). /run/ocu is one of the three
+      # write surfaces the narrow ocu-mount AppArmor profile permits, so the
+      # probe writes the verdict from inside its read_only rootfs without
+      # widening the profile (the mount's posture is unchanged).
+      - mount-shared:/run/ocu
+
+  # ---------------------------------------------------------------------------
   # Test runner — the live e2e gate (profile "test"). Runs the gated exercise
   # against the FUSE mountpoints. On mount-facing ONLY (it drives FUSE and needs
   # no peer access). Mounts the filestore scope volume READ-ONLY for the
@@ -263,12 +361,28 @@ services:
     depends_on:
       mount:
         condition: service_started
+      # The posture probe is one-shot; wait for its successful completion so the
+      # verdict file exists on the shared volume before the runner reads it.
+      mount-posture-probe:
+        condition: service_completed_successfully
+    # Host PID namespace (test-harness only — NOT a mount-service privilege): the
+    # graceful-teardown step (10_sigterm_teardown) SIGTERMs the real mount
+    # process and then MUST OUTLIVE that process's exit to finish its assertions
+    # (poll the mountpoint, confirm the ready-file retracted). The mount runs in
+    # its OWN private PID namespace, where it is PID 1; sharing that namespace
+    # (pid: service:mount) makes the kernel SIGKILL the runner the instant the
+    # mount (PID 1 there) exits, so the post-teardown assertions never run. The
+    # host namespace lets the runner see the mount by its host-side PID
+    # (pgrep -f '^/ocu-rclone-filestore') and survive its exit. This privilege is
+    # the runner's alone; the mount service holds NO host PID namespace.
     pid: "host"
     networks:
       - mount-facing
-    # The graceful-teardown step signals the real mount process, which runs
-    # under apparmor=unconfined; lifting the runner's profile lets the signal
-    # through.
+    # The runner stays apparmor=unconfined: it must deliver a SIGTERM to the
+    # mount process for the graceful-teardown step and read the broker workspace
+    # volume. Its own attack surface is bounded (it runs only the e2e test binary
+    # and never mounts), so narrowing it is out of scope for the mount-service
+    # posture; the strict profile is on the mount service.
     security_opt:
       - apparmor=unconfined
     environment:
@@ -294,6 +408,10 @@ services:
       OCU_E2E_EXCHANGE_ADDR: exchange:8447
       OCU_E2E_EDGE_ADDR: edge:8450
       OCU_E2E_ALLOW_PARTIAL: ${OCU_E2E_ALLOW_PARTIAL:-}
+      # Where the runner reads the posture probe's verdict line (written by the
+      # mount-posture-probe one-shot to the shared /run/ocu volume). The
+      # runtime-posture test asserts ROOTFS_EROFS=ok and TMPFS_WRITABLE=ok here.
+      OCU_E2E_PROBE_VERDICT: /run/ocu/posture-verdict
     volumes:
       - mount-shared:/run/ocu
       - type: bind
@@ -325,6 +443,12 @@ services:
         fi
         export OCU_E2E_MOUNT_PID
         /e2e.test -test.v -test.run '^TestEnvoyOnlyHop$$' -test.count=1 || exit 1
+        # Mount runtime-posture (CapEff == CAP_SYS_ADMIN only, read-only image
+        # rootfs EROFS, writable VFS-cache tmpfs) must run while the mount is
+        # still live — TestE2EExercise SIGTERMs it in its teardown step — and
+        # needs the resolved OCU_E2E_MOUNT_PID to read the mount process's
+        # CapEff and probe its rootfs through /proc/<pid>/.
+        /e2e.test -test.v -test.run '^TestMountRuntimePosture$$' -test.count=1 || exit 1
         exec /e2e.test -test.v -test.run '^TestE2EExercise$$' -test.count=1
 
   # ---------------------------------------------------------------------------
@@ -383,7 +507,8 @@ volumes:
   # Bringup artifacts (CA, leaf certs, signing key, weak tokens, rendered guest
   # config) the init step writes and the peers read.
   shared:
-  # Ready-file handoff between the mount and the test runner.
+  # Ready-file handoff between the mount and the test runner; also carries the
+  # one-shot posture probe's verdict line (a distinct filename).
   mount-shared:
   # The filestore engine root (all scopes live in subdirectories of it).
   filestore-workspace:

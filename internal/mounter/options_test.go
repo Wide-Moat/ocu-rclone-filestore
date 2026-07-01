@@ -6,6 +6,7 @@ package mounter
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -229,11 +230,21 @@ func TestBuildOcufsConfigmap(t *testing.T) {
 }
 
 func TestBuildOcufsConfigmapMemoryStoreIsHardError(t *testing.T) {
+	// The fixture carries a VALID filesystem_id alongside memory_store_id so the
+	// "filesystem_id is required" guard cannot satisfy this test by accident: the
+	// only thing left that can produce an error is the memory-store guard. The
+	// error text must name the memory-store axis, so neutering that guard (letting
+	// the mount fall through to a successful configmap) goes RED here.
 	m := mountcfg.Mount{
 		Destination:   "/mnt/mem",
+		FilesystemID:  ptrStr("fs-123"),
 		MemoryStoreID: ptrStr("mem-9"),
 	}
-	if _, err := buildOcufsConfigmap(m, true, "https://broker.internal", "pem"); err == nil {
+	_, err := buildOcufsConfigmap(m, true, "https://broker.internal", "pem")
+	if err == nil {
 		t.Fatalf("buildOcufsConfigmap with memory_store_id = nil error; want a hard error")
+	}
+	if !strings.Contains(err.Error(), "memory-store") {
+		t.Errorf("error = %q; want it to name the memory-store axis", err.Error())
 	}
 }

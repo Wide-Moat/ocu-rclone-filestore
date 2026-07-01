@@ -17,6 +17,7 @@ cover.out
 # drops the binary at the repo root named after the package basename). Never
 # commit these; the images build them in-container.
 /ocu-rclone-filestore
+/posture-probe
 /filestored
 /controlplane
 /exchange
@@ -27,6 +28,11 @@ cover.out
 .env
 .env.*
 !.env.example
+
+# ─── stray tooling artefacts (never part of this Go module) ───
+node_modules/
+package.json
+package-lock.json
 
 # ─── local-only Claude Code instructions ───
 CLAUDE.local.md

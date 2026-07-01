@@ -141,6 +141,24 @@ func run(out, edgeHost string, edgePort int, fixtureTemplate string) error {
 		return fmt.Errorf("write control-plane signing key: %w", err)
 	}
 
+	// 3b. The exchange credential signing key, written once so the exchange
+	// serves a STABLE credential JWKS across restarts. Without a persisted key
+	// the exchange mints a fresh one on every boot, desyncing any edge that
+	// cached an exchanged credential or any filestore that cached the JWKS — an
+	// otherwise-valid token then fails with a hard 401 after an independent
+	// restart. This mirrors the control-plane signing key above.
+	credKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("exchange credential key: %w", err)
+	}
+	credKeyPEM, err := marshalECKeyPEM(credKey)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(out, "exchange.credential.key.pem"), credKeyPEM, 0o600); err != nil {
+		return fmt.Errorf("write exchange credential signing key: %w", err)
+	}
+
 	// 4. Mint one weak session JWT per scope, signed by the control-plane key.
 	tokens := map[string]string{}
 	now := time.Now()
