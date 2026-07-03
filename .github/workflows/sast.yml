@@ -1,9 +1,17 @@
 # SPDX-License-Identifier: FSL-1.1-Apache-2.0
 # Copyright (c) 2025 Open Computer Use Contributors
 #
-# Static analysis (SAST) via semgrep. The build fails on ERROR-severity
-# findings (semgrep's highest blocking tier). Uses the auto config plus the
-# Go and security-audit rulesets, run from the pinned semgrep image.
+# Static analysis (SAST) via semgrep. The build fails on WARNING- and
+# ERROR-severity findings. Uses the auto config plus the Go and security-audit
+# rulesets, run from the pinned semgrep image.
+#
+# WARNING is deliberately included: the p/golang and p/security-audit packs emit
+# their security findings (weak crypto, insecure TLS, SQL/command injection,
+# hardcoded credentials, weak RNG) at WARNING severity, not ERROR. Filtering to
+# ERROR alone dropped every one of them, so the gate ran, loaded the rules, found
+# the issues, and blocked nothing — a real vulnerability passed the gate. Blocking
+# on WARNING+ERROR restores the security coverage the chosen rulesets provide;
+# INFO (low-signal/style) stays non-blocking.
 
 name: sast
 
@@ -24,12 +32,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Run semgrep (ERROR blocks)
+      - name: Run semgrep (WARNING+ERROR blocks)
         run: |
           semgrep scan \
             --config=auto \
             --config=p/golang \
             --config=p/security-audit \
             --severity=ERROR \
+            --severity=WARNING \
             --error \
             --quiet
