@@ -1,17 +1,28 @@
 # SPDX-License-Identifier: FSL-1.1-Apache-2.0
 # Copyright (c) 2025 Open Computer Use Contributors
 #
-# CodeQL static analysis. Runs on every pull request, on push to main, and on
-# a weekly schedule, then uploads SARIF results to the repository's code
-# scanning dashboard (Security tab). A matrix over the analyzed languages keeps
-# the Go module and the workflow definitions on independent, parallel jobs.
-# This workflow is additive to sast.yml (semgrep) and is fully separate from
-# the build, release, and live e2e paths.
+# CodeQL static analysis. Runs on push to main and on a weekly schedule, then
+# uploads SARIF results to the repository's code scanning dashboard (Security
+# tab) for human triage. A matrix over the analyzed languages keeps the Go
+# module and the workflow definitions on independent, parallel jobs. This
+# workflow is additive to sast.yml (semgrep) and is fully separate from the
+# build, release, and live e2e paths.
+#
+# CodeQL is advisory defense-in-depth, NOT a merge gate: the required, blocking
+# SAST floor is semgrep (sast.yml, a required status check). CodeQL runs on the
+# pushed main branch and weekly, so its findings still reach code scanning
+# alerts, but it deliberately carries NO pull_request trigger — a per-PR CodeQL
+# check would render a green tick that masquerades as a gate while not being a
+# required, blocking one. Keeping it off the PR event removes that misleading
+# signal without losing the dashboard coverage.
 
 name: codeql
 
 on:
-  pull_request:
+  # No pull_request trigger: CodeQL is advisory defense-in-depth, not a merge
+  # gate (semgrep in sast.yml is the required blocking SAST floor). Running only
+  # on pushed main + weekly keeps the dashboard current without a per-PR check
+  # that masquerades as a gate while not being a required, blocking one.
   push:
     branches: [main]
   schedule:
