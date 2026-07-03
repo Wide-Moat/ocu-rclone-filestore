@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -406,4 +407,248 @@ func TestListFilesAllErrorsMidPagination(t *testing.T) {
 	if !errors.Is(err, ErrPermissionDenied) {
 		t.Errorf("the underlying 403 must be preserved; got %v", err)
 	}
+}
+
+// dirPage renders a listDirectory page of perPage directory entries whose paths
+// are globally unique and monotonically increasing, so a caller can check both
+// completeness and order. cursor, when non-empty, is set on the response.
+func dirPage(page, perPage int, cursor string) []byte {
+	type dirEntry struct {
+		Path string `json:"path"`
+	}
+	type entry struct {
+		Directory *dirEntry `json:"directory,omitempty"`
+	}
+	type resp struct {
+		Entries []entry `json:"entries,omitempty"`
+		Cursor  string  `json:"cursor,omitempty"`
+	}
+	out := resp{Entries: make([]entry, 0, perPage), Cursor: cursor}
+	for i := 0; i < perPage; i++ {
+		idx := page*perPage + i
+		out.Entries = append(out.Entries, entry{Directory: &dirEntry{Path: fmt.Sprintf("/d/%06d", idx)}})
+	}
+	b, _ := json.Marshal(out)
+	return b
+}
+
+// TestListDirectoryAllLargeListing exercises the aggregation loop at volume,
+// two-sided in one test. The advancing arm proves a broker returning many pages
+// of many entries produces the complete listing in order, one call per page,
+// without ever false-tripping the non-advancing-cursor progress guard. The stuck
+// arm proves the same guard DOES fire when the broker stalls the cursor deep into
+// a large listing — the loop aborts with a "did not advance" error rather than
+// spinning forever with unbounded memory.
+func TestListDirectoryAllLargeListing(t *testing.T) {
+	const pages, perPage = 50, 200
+	const total = pages * perPage
+
+	t.Run("advancing_volume_completes", func(t *testing.T) {
+		callCount := 0
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Cursor string `json:"cursor,omitempty"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			// Page 1 arrives with an empty cursor; page N+1 carries "cursor-N".
+			page := 0
+			if body.Cursor != "" {
+				if _, err := fmt.Sscanf(body.Cursor, "cursor-%d", &page); err != nil {
+					t.Errorf("unexpected cursor echo %q", body.Cursor)
+				}
+			}
+			callCount++
+			next := ""
+			if page < pages-1 {
+				next = fmt.Sprintf("cursor-%d", page+1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(dirPage(page, perPage, next))
+		}
+
+		c, _ := newTLSTestClient(t, "fs-large-dir", handler)
+		entries, err := c.ListDirectoryAll(context.Background(), "/d")
+		if err != nil {
+			t.Fatalf("ListDirectoryAll over %d pages: %v", pages, err)
+		}
+		if len(entries) != total {
+			t.Fatalf("aggregated %d entries, want %d (%d pages × %d)", len(entries), total, pages, perPage)
+		}
+		if callCount != pages {
+			t.Errorf("made %d page calls, want %d (one per page)", callCount, pages)
+		}
+		// Order must be preserved end-to-end across every page boundary.
+		for i, e := range entries {
+			if e.Directory == nil {
+				t.Fatalf("entries[%d].Directory is nil at volume", i)
+			}
+			want := fmt.Sprintf("/d/%06d", i)
+			if e.Directory.Path != want {
+				t.Fatalf("entries[%d].Path = %q, want %q — aggregation reordered or dropped entries", i, e.Directory.Path, want)
+			}
+		}
+	})
+
+	t.Run("stuck_cursor_at_volume_aborts", func(t *testing.T) {
+		// The broker advances normally for a stretch of pages, then stalls: from
+		// the stallAt page onward it echoes the SAME cursor the client just sent.
+		// The guard must fire on the first non-advancing repeat, not before.
+		const stallAt = 20
+		const stuckCursor = "cursor-stuck"
+		callCount := 0
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				Cursor string `json:"cursor,omitempty"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			callCount++
+			var next string
+			switch {
+			case body.Cursor == stuckCursor:
+				// The stall: echo the same cursor back, never advancing.
+				next = stuckCursor
+			case callCount >= stallAt:
+				next = stuckCursor
+			default:
+				next = fmt.Sprintf("cursor-%d", callCount)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(dirPage(callCount-1, perPage, next))
+		}
+
+		c, _ := newTLSTestClient(t, "fs-large-dir-stuck", handler)
+		entries, err := c.ListDirectoryAll(context.Background(), "/d")
+		if err == nil {
+			t.Fatalf("a stalled cursor at volume must abort, got %d entries and nil error", len(entries))
+		}
+		if entries != nil {
+			t.Errorf("a non-progressing listing must not return a partial result, got %d entries", len(entries))
+		}
+		if !strings.Contains(err.Error(), "did not advance") {
+			t.Errorf("error %q does not name the non-advancing-cursor abort", err.Error())
+		}
+		// The guard fires on the first repeat, not on a bounded runaway: the stall
+		// begins at stallAt and the very next request repeats the cursor, so the
+		// loop must stop within a couple of calls of the stall, never spinning.
+		if callCount > stallAt+2 {
+			t.Errorf("guard fired late after %d calls; the loop should abort on the first non-advancing repeat", callCount)
+		}
+	})
+}
+
+// filePage renders a listFiles page of perPage files with unique, increasing
+// paths/uuids. afterUUID, when non-empty, is set on the response.
+func filePage(page, perPage int, afterUUID string) []byte {
+	type file struct {
+		Path string `json:"path"`
+		UUID string `json:"uuid"`
+	}
+	type resp struct {
+		Files     []file `json:"files,omitempty"`
+		AfterUUID string `json:"after_uuid,omitempty"`
+	}
+	out := resp{Files: make([]file, 0, perPage), AfterUUID: afterUUID}
+	for i := 0; i < perPage; i++ {
+		idx := page*perPage + i
+		out.Files = append(out.Files, file{
+			Path: fmt.Sprintf("/f/%06d", idx),
+			UUID: fmt.Sprintf("u-%06d", idx),
+		})
+	}
+	b, _ := json.Marshal(out)
+	return b
+}
+
+// TestListFilesAllLargeListing is the uuid-paginated (listFiles) analog of
+// TestListDirectoryAllLargeListing, two-sided in one test: the advancing arm
+// aggregates many pages completely and in order with no false abort; the stuck
+// arm proves the after_uuid progress guard fires when the broker stalls the
+// cursor deep into a large listing.
+func TestListFilesAllLargeListing(t *testing.T) {
+	const pages, perPage = 50, 200
+	const total = pages * perPage
+
+	t.Run("advancing_volume_completes", func(t *testing.T) {
+		callCount := 0
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				AfterUUID string `json:"after_uuid,omitempty"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			page := 0
+			if body.AfterUUID != "" {
+				if _, err := fmt.Sscanf(body.AfterUUID, "after-%d", &page); err != nil {
+					t.Errorf("unexpected after_uuid echo %q", body.AfterUUID)
+				}
+			}
+			callCount++
+			next := ""
+			if page < pages-1 {
+				next = fmt.Sprintf("after-%d", page+1)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(filePage(page, perPage, next))
+		}
+
+		c, _ := newTLSTestClient(t, "fs-large-files", handler)
+		files, err := c.ListFilesAll(context.Background(), "root-uuid")
+		if err != nil {
+			t.Fatalf("ListFilesAll over %d pages: %v", pages, err)
+		}
+		if len(files) != total {
+			t.Fatalf("aggregated %d files, want %d (%d pages × %d)", len(files), total, pages, perPage)
+		}
+		if callCount != pages {
+			t.Errorf("made %d page calls, want %d (one per page)", callCount, pages)
+		}
+		for i, f := range files {
+			want := fmt.Sprintf("/f/%06d", i)
+			if f.Path != want {
+				t.Fatalf("files[%d].Path = %q, want %q — aggregation reordered or dropped files", i, f.Path, want)
+			}
+		}
+	})
+
+	t.Run("stuck_cursor_at_volume_aborts", func(t *testing.T) {
+		const stallAt = 20
+		const stuckAfter = "after-stuck"
+		callCount := 0
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			var body struct {
+				AfterUUID string `json:"after_uuid,omitempty"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			callCount++
+			var next string
+			switch {
+			case body.AfterUUID == stuckAfter:
+				next = stuckAfter
+			case callCount >= stallAt:
+				next = stuckAfter
+			default:
+				next = fmt.Sprintf("after-%d", callCount)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(filePage(callCount-1, perPage, next))
+		}
+
+		c, _ := newTLSTestClient(t, "fs-large-files-stuck", handler)
+		files, err := c.ListFilesAll(context.Background(), "root-uuid")
+		if err == nil {
+			t.Fatalf("a stalled after_uuid at volume must abort, got %d files and nil error", len(files))
+		}
+		if files != nil {
+			t.Errorf("a non-progressing listing must not return a partial result, got %d files", len(files))
+		}
+		if !strings.Contains(err.Error(), "did not advance") {
+			t.Errorf("error %q does not name the non-advancing-cursor abort", err.Error())
+		}
+		if callCount > stallAt+2 {
+			t.Errorf("guard fired late after %d calls; the loop should abort on the first non-advancing repeat", callCount)
+		}
+	})
 }
