@@ -110,21 +110,25 @@ func TestApparmorMountRuleScopedToFuse(t *testing.T) {
 			"guest performs); without it the in-process mount(2) is refused")
 	}
 
-	// A bare `mount,` or `mount <target>` with no fstype constraint permits mounting
-	// any filesystem type — forbidden. Every mount allow rule must constrain fstype.
-	bareMountRe := regexp.MustCompile(`^mount\s*,`)
-	unscopedMountRe := regexp.MustCompile(`^mount\s+(?:options|[/(-])`) // mount with options=/path but no fstype=
+	// POSITIVE constraint (whitelist, not a blacklist of known-bad shapes): EVERY
+	// mount/remount ALLOW rule MUST be scoped to a fuse.* superblock, i.e. must
+	// contain `fstype=fuse.`. A rule is a mount allow rule when it begins with
+	// `mount` or `remount` (umount is teardown, governed by its own rules; a
+	// `deny ` rule is exempt). Any such rule WITHOUT `fstype=fuse.` — a bare
+	// `mount,`, a `mount fstype=ext4 -> ...` (a foreign filesystem type), a
+	// `mount options=... -> ...` — permits mounting something other than a fuse
+	// superblock and is a widening. Requiring the fuse.* scope on every mount rule
+	// (rather than blacklisting specific unscoped forms) means a novel unscoped
+	// shape cannot slip past.
+	mountAllowRe := regexp.MustCompile(`^(?:re)?mount\b`)
 	for _, r := range rules {
-		if bareMountRe.MatchString(r) {
-			t.Errorf("apparmor profile carries a bare unscoped mount rule %q; only "+
-				"`mount fstype=fuse.*` may be permitted — a bare mount rule allows mounting any "+
-				"filesystem type", r)
+		if strings.HasPrefix(r, "deny ") || !mountAllowRe.MatchString(r) {
+			continue
 		}
-		// A mount allow rule that starts to specify a target/options without an
-		// fstype= constraint is also a widening.
-		if unscopedMountRe.MatchString(r) && !strings.Contains(r, "fstype=fuse.") {
-			t.Errorf("apparmor profile carries a mount rule without an fstype=fuse.* "+
-				"constraint %q; every permitted mount must be scoped to fuse.*", r)
+		if !strings.Contains(r, "fstype=fuse.") {
+			t.Errorf("apparmor profile carries a mount allow rule NOT scoped to fuse.* %q; every "+
+				"permitted (re)mount rule must contain `fstype=fuse.` — a bare mount, or any other "+
+				"filesystem type (ext4, proc, tmpfs, ...), is a widening", r)
 		}
 	}
 }
@@ -175,18 +179,29 @@ func TestApparmorNetworkIsNarrowInetOnly(t *testing.T) {
 		}
 	}
 
-	// Forbidden broadenings: a bare `network,` (all families/types), or any
-	// raw/packet/netlink/bluetooth/vsock socket grant.
-	bareNetworkRe := regexp.MustCompile(`^network\s*,`)
-	if anyRuleMatches(rules, bareNetworkRe) {
-		t.Error("apparmor profile carries a bare `network,` rule (ALL address families); the " +
-			"guest's socket surface must stay the narrow inet/inet6 stream+dgram set")
-	}
-	forbiddenFamilyRe := regexp.MustCompile(`^network\s+(raw|packet|netlink|bluetooth|vsock|can|rds)\b`)
+	// POSITIVE constraint (whitelist, not a blacklist of known-bad families): EVERY
+	// network ALLOW rule's address family MUST be inet or inet6. A `deny ` rule is
+	// exempt. Extract the family token (the word after `network`); require it be
+	// inet/inet6. A bare `network,` (or `network` with no family) carries no family
+	// token and grants ALL families — forbidden. Any other family — raw, packet,
+	// netlink, vsock, bluetooth, or one not yet invented — is forbidden by NOT being
+	// on the whitelist, so a novel family cannot slip past a hardcoded deny-list.
+	familyRe := regexp.MustCompile(`^network\s+([a-z0-9_]+)`)
 	for _, r := range rules {
-		if forbiddenFamilyRe.MatchString(r) {
-			t.Errorf("apparmor profile grants a forbidden network family %q; only inet/inet6 "+
-				"stream+dgram are permitted (the single outbound HTTPS+DNS leg)", r)
+		if strings.HasPrefix(r, "deny ") || !strings.HasPrefix(r, "network") {
+			continue
+		}
+		m := familyRe.FindStringSubmatch(r)
+		if m == nil {
+			t.Errorf("apparmor profile carries a network rule with NO address-family constraint "+
+				"%q (a bare `network,` grants ALL families); only inet/inet6 stream+dgram are "+
+				"permitted (the single outbound HTTPS+DNS leg)", r)
+			continue
+		}
+		if family := m[1]; family != "inet" && family != "inet6" {
+			t.Errorf("apparmor profile grants network family %q in rule %q; only inet and inet6 "+
+				"are permitted — any other family (raw, packet, netlink, vsock, ...) is a widening",
+				family, r)
 		}
 	}
 }
