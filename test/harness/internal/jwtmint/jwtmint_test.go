@@ -76,6 +76,52 @@ func TestVerifyRejectsExpired(t *testing.T) {
 	}
 }
 
+// TestVerifyExpiryBoundary pins the exact expiry instant. Verify rejects a token
+// at or after its exp with no leeway: the check is `!now.Before(exp)`, so
+// now == exp-1s is still valid, now == exp is already expired, and now == exp+1s
+// is expired. This two-sided boundary would redden on any accidental clock-skew
+// leeway (a token surviving past its exp) or a flipped comparison (a token
+// rejected one tick early). The neighbouring "expired hours ago" case is covered
+// by TestVerifyRejectsExpired; this fixes the seam at the instant itself.
+func TestVerifyExpiryBoundary(t *testing.T) {
+	priv := mustKey(t)
+	now := time.Unix(1_700_000_000, 0)
+	jwks := JWKS{Keys: []JWK{JWKFromPublic("kid-1", &priv.PublicKey)}}
+
+	cases := []struct {
+		name       string
+		expiry     int64
+		wantExpiry bool // true => Verify must return ErrExpired
+	}{
+		{"one_second_before_expiry_is_valid", now.Add(time.Second).Unix(), false},
+		{"exactly_at_expiry_is_expired", now.Unix(), true},
+		{"one_second_after_expiry_is_expired", now.Add(-time.Second).Unix(), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			claims := sampleClaims(now)
+			claims.Expiry = tc.expiry
+
+			tok, err := Sign(priv, "kid-1", claims)
+			if err != nil {
+				t.Fatalf("sign: %v", err)
+			}
+
+			_, err = Verify(tok, jwks, claims.Issuer, claims.Audience, now)
+			if tc.wantExpiry {
+				if !errors.Is(err, ErrExpired) {
+					t.Fatalf("exp=%d now=%d: want ErrExpired, got %v", tc.expiry, now.Unix(), err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("exp=%d now=%d: want valid, got %v", tc.expiry, now.Unix(), err)
+			}
+		})
+	}
+}
+
 func TestVerifyRejectsBadSignature(t *testing.T) {
 	priv := mustKey(t)
 	now := time.Unix(1_700_000_000, 0)
