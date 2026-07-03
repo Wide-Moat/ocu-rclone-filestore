@@ -2,7 +2,16 @@
 # Copyright (c) 2025 Open Computer Use Contributors
 #
 # Software composition analysis (SCA). Trivy scans the filesystem for known
-# vulnerabilities in dependencies; the job fails on CRITICAL severity.
+# vulnerabilities in dependencies; the job fails on CRITICAL AND HIGH severity.
+#
+# HIGH is included deliberately: CRITICAL-only is near-vacuous for a Go module,
+# where the common vulnerable dependencies (the golang.org/x/* set, the git
+# libraries, and similar) publish their advisories at HIGH, not CRITICAL. Gating
+# on CRITICAL alone let a HIGH-severity dependency vulnerability pass the gate
+# unblocked. Blocking on CRITICAL,HIGH restores real SCA coverage. The job name
+# below is kept verbatim ("CRITICAL blocks") so the branch-protection required
+# status-check context still matches; the threshold it enforces is now
+# CRITICAL,HIGH.
 
 name: sca
 
@@ -26,9 +35,9 @@ jobs:
         # action wrapper, whose install script fetches the binary from GitHub
         # release downloads and fails intermittently under rate limiting. The
         # image is pulled from a registry, avoiding that path. The job fails on
-        # any CRITICAL finding (--exit-code 1), keeping this gate blocking.
+        # any CRITICAL or HIGH finding (--exit-code 1), keeping this gate blocking.
         run: |
           docker run --rm -v "${{ github.workspace }}:/repo" \
             ghcr.io/aquasecurity/trivy@sha256:de90a656e79b175a294abe85cb8b99670fab83ebf339cccd163e6f584846809a \
-            filesystem --scanners vuln --severity CRITICAL --exit-code 1 \
+            filesystem --scanners vuln --severity CRITICAL,HIGH --exit-code 1 \
             --ignore-unfixed=false --no-progress /repo
