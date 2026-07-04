@@ -106,11 +106,14 @@ func (f *fakeClient) ListDirectoryAll(ctx context.Context, path string) ([]broke
 // existing tests that configure ListDirectoryAll behaviour also exercise the
 // streaming path Fs.List now uses. A yield error stops iteration.
 func (f *fakeClient) ListDirectoryStream(ctx context.Context, path string, yield func(brokerrpc.ListDirEntry) error) error {
+	f.mu.Lock()
 	f.listDirectoryStreamCount++
+	result := f.listDirectoryAllResult
+	f.mu.Unlock()
 	var entries []brokerrpc.ListDirEntry
 	var err error
-	if f.listDirectoryAllResult != nil {
-		entries, err = f.listDirectoryAllResult(ctx, path)
+	if result != nil {
+		entries, err = result(ctx, path)
 	}
 	if err != nil {
 		return err

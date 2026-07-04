@@ -61,7 +61,7 @@ const maxRetryAfterSeconds = 3600
 // ErrPermanentOther is the sentinel for any non-2xx status not in the mapped
 // table. These map to a permanent no-retry error. The explicit default
 // prevents a wrong retryable fallthrough from looping a write forever.
-var ErrPermanentOther = fmt.Errorf("brokerrpc: permanent error")
+var ErrPermanentOther = errors.New("brokerrpc: permanent error")
 
 // ---------------------------------------------------------------------------
 // Error mapper
