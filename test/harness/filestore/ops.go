@@ -6,6 +6,8 @@ package filestore
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -79,10 +81,13 @@ func (s *Server) handleCreateFile(w http.ResponseWriter, scope Scope, body commo
 		return
 	}
 	if mkErr := os.MkdirAll(filepath.Dir(abs), 0o750); mkErr != nil {
-		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("mkdir parent failed: %v", mkErr))
 		return
 	}
-	f, err := os.OpenFile(abs, os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // G304: abs is traversal-guarded by resolveUnder, confined to the scope volume
+	// O_TRUNC so createFile produces an EMPTY file even when the path already
+	// exists: without it a pre-existing file would keep its old contents, which
+	// createFile's "empty file" contract forbids.
+	f, err := os.OpenFile(abs, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // G304: abs is traversal-guarded by resolveUnder, confined to the scope volume
 	if err != nil {
 		writeMetaError(w, err)
 		return
@@ -312,20 +317,35 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, scope Scope, body commonB
 			return
 		}
 	}
-	data, readErr := os.ReadFile(srcAbs) //nolint:gosec // G304: srcAbs is traversal-guarded by resolveSrcDst, confined to the scope volume
-	if readErr != nil {
-		writeMetaError(w, readErr)
-		return
-	}
 	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o750); mkErr != nil {
-		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("mkdir parent failed: %v", mkErr))
 		return
 	}
-	if wErr := os.WriteFile(dstAbs, data, 0o600); wErr != nil { //nolint:gosec // G703/G304: dstAbs is traversal-guarded by resolveSrcDst, confined to the scope volume
-		writeMetaError(w, wErr)
+	if cErr := copyFileContents(srcAbs, dstAbs); cErr != nil {
+		writeMetaError(w, cErr)
 		return
 	}
 	writeJSON(w, struct{}{})
+}
+
+// copyFileContents streams src to dst so a large file copy does not read the
+// whole file into memory (os.ReadFile+os.WriteFile would). dst is created with
+// 0o600 and truncated; both paths are already scope-confined by the caller.
+func copyFileContents(srcAbs, dstAbs string) error {
+	in, err := os.Open(srcAbs) //nolint:gosec // G304: srcAbs is traversal-guarded by resolveSrcDst, confined to the scope volume
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(dstAbs, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec // G304: dstAbs is traversal-guarded by resolveSrcDst, confined to the scope volume
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // handleMoveFile moves source to destination, honouring overwrite_existing.
@@ -347,7 +367,7 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, scope Scope, body commonB
 		}
 	}
 	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o750); mkErr != nil {
-		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("mkdir parent failed: %v", mkErr))
 		return
 	}
 	if rErr := os.Rename(srcAbs, dstAbs); rErr != nil {
@@ -357,7 +377,10 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, scope Scope, body commonB
 	writeJSON(w, struct{}{})
 }
 
-// handleMoveDirectory moves the directory at source to destination.
+// handleMoveDirectory moves the directory at source to destination. Like
+// handleMoveFile it refuses to clobber an existing destination unless
+// overwrite_existing is set, returning 409 Conflict — without this a move onto a
+// present path would silently replace it.
 func (s *Server) handleMoveDirectory(w http.ResponseWriter, scope Scope, body commonBody) {
 	sd, err := srcDstFromBody(body)
 	if err != nil {
@@ -369,8 +392,14 @@ func (s *Server) handleMoveDirectory(w http.ResponseWriter, scope Scope, body co
 		writeError(w, status, msg)
 		return
 	}
+	if !sd.OverwriteExisting {
+		if _, statErr := os.Stat(dstAbs); statErr == nil {
+			writeError(w, http.StatusConflict, "destination exists")
+			return
+		}
+	}
 	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o750); mkErr != nil {
-		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("mkdir parent failed: %v", mkErr))
 		return
 	}
 	if rErr := os.Rename(srcAbs, dstAbs); rErr != nil {

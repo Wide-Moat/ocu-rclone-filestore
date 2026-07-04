@@ -142,8 +142,11 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The broker assembles the object only when the streamed total matches the
-	// declared size; a mismatch is a permanent (non-retryable) client fault.
-	if params.DeclaredSizeBytes != 0 && written != params.DeclaredSizeBytes {
+	// declared size; a mismatch is a permanent (non-retryable) client fault. The
+	// check is unconditional: a declared 0 must match an ACTUAL 0-byte stream, so
+	// a non-empty body sent against declared_size_bytes=0 (or an omitted field
+	// defaulting to 0) is rejected rather than silently accepted.
+	if written != params.DeclaredSizeBytes {
 		_ = os.Remove(abs)
 		writeError(w, http.StatusUnprocessableEntity, "streamed size does not match declared size")
 		return
@@ -197,32 +200,53 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, scope Scope, body com
 		writeError(w, http.StatusBadRequest, "path escapes scope")
 		return
 	}
-	data, readErr := os.ReadFile(abs) //nolint:gosec // G304: abs is traversal-guarded by resolveUnder, confined to the scope volume
-	if readErr != nil {
-		writeMetaError(w, readErr)
+
+	f, openErr := os.Open(abs) //nolint:gosec // G304: abs is traversal-guarded by resolveUnder, confined to the scope volume
+	if openErr != nil {
+		writeMetaError(w, openErr)
 		return
 	}
+	defer func() { _ = f.Close() }()
+	info, statErr := f.Stat()
+	if statErr != nil {
+		writeMetaError(w, statErr)
+		return
+	}
+	total := info.Size()
 
-	// Apply the optional byte window. An out-of-range offset yields an empty
-	// body rather than an error, matching a broker that seeks past EOF.
+	// Resolve the optional byte window against the file size WITHOUT reading the
+	// file. An out-of-range offset yields an empty body rather than an error,
+	// matching a broker that seeks past EOF. Streaming the window (rather than
+	// os.ReadFile + slice) keeps a large object off the heap.
+	start, length := int64(0), total
 	if db.Range != nil {
 		if db.Range.Offset < 0 || db.Range.Length < 0 {
 			writeError(w, http.StatusBadRequest, "negative range")
 			return
 		}
-		start := db.Range.Offset
-		if start > int64(len(data)) {
-			start = int64(len(data))
+		start = db.Range.Offset
+		if start > total {
+			start = total
 		}
 		end := start + db.Range.Length
-		if end > int64(len(data)) {
-			end = int64(len(data))
+		if end > total {
+			end = total
 		}
-		data = data[start:end]
+		length = end - start
+	}
+
+	if start > 0 {
+		if _, seekErr := f.Seek(start, io.SeekStart); seekErr != nil {
+			writeMetaError(w, seekErr)
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	// Stream exactly length bytes from the seek point. A short copy (file
+	// truncated mid-stream) just ends the body; the client's own bounded reader
+	// governs its side.
+	_, _ = io.CopyN(w, f, length)
 }

@@ -350,6 +350,15 @@ func (f *Fs) immediateChildRemote(dir string, entry brokerrpc.ListDirEntry) (str
 	entryPath = cleanPath(entryPath)
 	parentPath := f.absPath(dir)
 
+	// An entry equal to the directory being listed is that directory itself, not
+	// a child. Without this guard a root listing whose entries include an entry
+	// with Path "/" (== parentPath for the root) would fall through the special
+	// case below and surface the directory inside its own listing with an empty
+	// remote. Reject self before the child checks.
+	if entryPath == parentPath {
+		return "", false
+	}
+
 	// The entry must sit directly below parentPath.
 	if !strings.HasPrefix(entryPath, parentPath+"/") {
 		// Special case: parentPath is "/" — all top-level entries are candidates.

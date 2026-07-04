@@ -1086,6 +1086,16 @@ func TestImmediateChildRemoteRootPath(t *testing.T) {
 	if ok {
 		t.Error("immediateChildRemote for deeply nested path returned true, want false")
 	}
+
+	// The directory being listed must never surface as its own child: an entry
+	// whose path equals the listed dir (Path "/" when listing the root) is self,
+	// not a child, and would otherwise appear with an empty remote.
+	selfEntry := brokerrpc.ListDirEntry{
+		Directory: &brokerrpc.Directory{Path: "/"},
+	}
+	if _, ok := f.immediateChildRemote(dir, selfEntry); ok {
+		t.Error("immediateChildRemote surfaced the listed root as its own child, want false")
+	}
 }
 
 // TestListPathErrorPropagated verifies that an error from ListDirectoryAll

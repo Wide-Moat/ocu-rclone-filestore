@@ -372,6 +372,38 @@ func TestUploadDeclaredSizeMismatch(t *testing.T) {
 	}
 }
 
+// TestUploadZeroDeclaredSizeRejectsNonEmptyBody pins the size-match fix: a body
+// streamed against declared_size_bytes=0 must be rejected, not silently
+// accepted. Before the fix the size check was skipped whenever the declared size
+// was 0, so a non-empty stream slipped through against a 0 declaration.
+func TestUploadZeroDeclaredSizeRejectsNonEmptyBody(t *testing.T) {
+	e := newTestEnv(t)
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	params := map[string]any{
+		"filesystem_id":          fsOutputs,
+		"path":                   "/zero-decl.bin",
+		"declared_size_bytes":    0,
+		"authorization_metadata": map[string]any{"intent": "write", "downloadable": false},
+	}
+	raw, _ := json.Marshal(params)
+	_ = mw.WriteField("params", string(raw))
+	fp, _ := mw.CreateFormFile("file", "upload")
+	_, _ = fp.Write([]byte("not empty")) // 9 bytes against a declared 0
+	_ = mw.Close()
+	req, _ := http.NewRequest(http.MethodPost, e.ts.URL+restBase+string(opFileUpload), &buf)
+	req.Header.Set("Authorization", "Bearer "+e.outputsCred)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("non-empty body against declared 0: got %d want 422", resp.StatusCode)
+	}
+}
+
 func TestUploadThrottle(t *testing.T) {
 	uploadsDir := t.TempDir()
 	outputsDir := t.TempDir()
