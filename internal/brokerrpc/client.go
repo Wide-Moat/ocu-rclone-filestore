@@ -39,6 +39,13 @@ type ClientOptions struct {
 	// every frame strictly below this value. A value of 0 uses the default
 	// (256 KiB).
 	MessageCeiling int
+
+	// MaxDownloadBytes caps how many bytes a single whole-object download may
+	// deliver before the streaming reader aborts. It is a safety ceiling against
+	// a broker bug or desynced stream, not a policy value tied to any object. A
+	// value of 0 uses the default (defaultMaxDownloadBytes). The value flows in
+	// from the parsed mount config, so the binary ships no hard-coded ceiling.
+	MaxDownloadBytes int64
 }
 
 // Client is the guest-side REST client for the broker's file-operations
@@ -48,11 +55,12 @@ type ClientOptions struct {
 // construction. It has no code path that sets downloadable to true and no
 // credential-refresh path.
 type Client struct {
-	http           *http.Client
-	serviceURL     string
-	fsID           string
-	authToken      string
-	messageCeiling int
+	http             *http.Client
+	serviceURL       string
+	fsID             string
+	authToken        string
+	messageCeiling   int
+	maxDownloadBytes int64
 }
 
 // New constructs a Client bound to the broker's HTTPS service_url, the
@@ -95,12 +103,17 @@ func NewWithOptions(serviceURL, fsID, authToken string, caCertPEM []byte, opts C
 	if ceiling <= 0 {
 		ceiling = defaultMessageCeiling
 	}
+	maxDL := opts.MaxDownloadBytes
+	if maxDL <= 0 {
+		maxDL = defaultMaxDownloadBytes
+	}
 	return &Client{
-		http:           &http.Client{Transport: transport},
-		serviceURL:     serviceURL,
-		fsID:           fsID,
-		authToken:      authToken,
-		messageCeiling: ceiling,
+		http:             &http.Client{Transport: transport},
+		serviceURL:       serviceURL,
+		fsID:             fsID,
+		authToken:        authToken,
+		messageCeiling:   ceiling,
+		maxDownloadBytes: maxDL,
 	}, nil
 }
 

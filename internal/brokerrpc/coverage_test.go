@@ -391,8 +391,8 @@ func TestListFilesAllCallErrorSurfaces(t *testing.T) {
 // over-cap arm exercises the same boundedBody logic Download returns, with a
 // tiny limit — a real assertion, not a documented placeholder.
 func TestDownloadOversizedBodyIsError(t *testing.T) {
-	if maxDownloadBytes <= 0 {
-		t.Fatal("maxDownloadBytes must be a positive cap")
+	if defaultMaxDownloadBytes <= 0 {
+		t.Fatal("defaultMaxDownloadBytes must be a positive cap")
 	}
 
 	// Control: a normal body under the cap round-trips through the real client.

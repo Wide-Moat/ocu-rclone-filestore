@@ -26,32 +26,34 @@ import (
 	"net/http"
 )
 
-// maxDownloadBytes caps how many bytes a single download body may deliver
-// before the reader aborts. The guest is the least-provisioned party in the
-// architecture and must never let a broker bug or a desynced stream size an
-// unbounded read into guest OOM. The cap is far above any expected single
-// object yet rejects absurd lengths.
+// defaultMaxDownloadBytes is the DEFAULT cap on how many bytes a single download
+// body may deliver before the streaming reader aborts, used when the mount
+// config supplies no MaxDownloadBytes. The guest is the least-provisioned party
+// in the architecture and must never let a broker bug or a desynced stream size
+// an unbounded read into guest OOM. The default is far above any expected single
+// object yet rejects absurd lengths; a deployment overrides it via
+// ClientOptions.MaxDownloadBytes so the binary ships no fixed policy value.
 //
 // The cap bounds the STREAM, not a pre-read buffer: Download returns a reader
 // that yields bytes as they arrive and only fails once cumulative reads would
 // exceed the cap, so a legitimate large object streams through VFS without ever
 // being held whole in guest memory.
-const maxDownloadBytes int64 = 1 << 34 // 16 GiB
+const defaultMaxDownloadBytes int64 = 1 << 34 // 16 GiB
 
 // Download performs the fileDownload op and returns the full object content as
 // a streaming io.ReadCloser. The object is addressed by its broker-minted uuid
 // handle; the guest never derives scope from the uuid. The caller MUST Close
 // the returned reader; closing it releases the underlying HTTP response.
 //
-// The returned reader is bounded by maxDownloadBytes: it streams normally and
-// returns an error on the read that would carry the stream past the cap, so a
-// runaway or desynced body cannot grow guest memory without limit.
+// The returned reader is bounded by the client's maxDownloadBytes: it streams
+// normally and returns an error on the read that would carry the stream past the
+// cap, so a runaway or desynced body cannot grow guest memory without limit.
 func (c *Client) Download(ctx context.Context, uuid string) (io.ReadCloser, error) {
 	fsID, am, err := c.stamp(OpFileDownload)
 	if err != nil {
 		return nil, err
 	}
-	return c.doDownload(ctx, fsID, uuid, am, nil, maxDownloadBytes)
+	return c.doDownload(ctx, fsID, uuid, am, nil, c.maxDownloadBytes)
 }
 
 // DownloadRange is a distinctly-named helper that consumes the fileDownload
@@ -143,11 +145,12 @@ func (c *Client) doDownload(
 type boundedBody struct {
 	body      io.ReadCloser
 	remaining int64
+	limit     int64 // original cap, for the over-cap error message
 	strict    bool
 }
 
 func newBoundedBody(body io.ReadCloser, strict bool, limit int64) *boundedBody {
-	return &boundedBody{body: body, remaining: limit, strict: strict}
+	return &boundedBody{body: body, remaining: limit, limit: limit, strict: strict}
 }
 
 func (b *boundedBody) Read(p []byte) (int, error) {
@@ -156,7 +159,7 @@ func (b *boundedBody) Read(p []byte) (int, error) {
 			// The stream still has bytes past the cap: reject rather than OOM.
 			var probe [1]byte
 			if n, _ := b.body.Read(probe[:]); n > 0 {
-				return 0, fmt.Errorf("brokerrpc: fileDownload: response exceeds %d bytes", maxDownloadBytes)
+				return 0, fmt.Errorf("brokerrpc: fileDownload: response exceeds %d bytes", b.limit)
 			}
 		}
 		return 0, io.EOF

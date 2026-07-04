@@ -46,63 +46,7 @@ type brokerClient interface {
 	MoveDirectory(ctx context.Context, sourcePath, destinationPath string) (*brokerrpc.AckResponse, error)
 }
 
-// brokerClientAdapter is the production implementation of brokerClient. It
-// wraps *brokerrpc.Client and forwards every call verbatim.
-type brokerClientAdapter struct {
-	c *brokerrpc.Client
-}
-
-// newBrokerClientAdapter wraps a *brokerrpc.Client as a brokerClient. The
-// adapter adds no logic; every method is a single forwarding call so the
-// brokerClient interface and the underlying Client stay in sync mechanically.
-func newBrokerClientAdapter(c *brokerrpc.Client) brokerClient {
-	return &brokerClientAdapter{c: c}
-}
-
-func (a *brokerClientAdapter) ListDirectoryStream(ctx context.Context, path string, yield func(brokerrpc.ListDirEntry) error) error {
-	return a.c.ListDirectoryStream(ctx, path, yield)
-}
-
-func (a *brokerClientAdapter) ListDirectoryAll(ctx context.Context, path string) ([]brokerrpc.ListDirEntry, error) {
-	return a.c.ListDirectoryAll(ctx, path)
-}
-
-func (a *brokerClientAdapter) ReadMetadata(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
-	return a.c.ReadMetadata(ctx, path)
-}
-
-func (a *brokerClientAdapter) Download(ctx context.Context, uuid string) (io.ReadCloser, error) {
-	return a.c.Download(ctx, uuid)
-}
-
-func (a *brokerClientAdapter) DownloadRange(ctx context.Context, uuid string, offset, length int64) (io.ReadCloser, error) {
-	return a.c.DownloadRange(ctx, uuid, offset, length)
-}
-
-func (a *brokerClientAdapter) Upload(ctx context.Context, path string, src io.Reader, totalBytes int64, overwrite bool) error {
-	return a.c.Upload(ctx, path, src, totalBytes, overwrite)
-}
-
-func (a *brokerClientAdapter) CopyFile(ctx context.Context, sourcePath, destinationPath string) (*brokerrpc.AckResponse, error) {
-	return a.c.CopyFile(ctx, sourcePath, destinationPath)
-}
-
-func (a *brokerClientAdapter) MoveFile(ctx context.Context, sourcePath, destinationPath string) (*brokerrpc.AckResponse, error) {
-	return a.c.MoveFile(ctx, sourcePath, destinationPath)
-}
-
-func (a *brokerClientAdapter) RemoveFile(ctx context.Context, path string) (*brokerrpc.AckResponse, error) {
-	return a.c.RemoveFile(ctx, path)
-}
-
-func (a *brokerClientAdapter) MakeDirectory(ctx context.Context, path string) (*brokerrpc.AckResponse, error) {
-	return a.c.MakeDirectory(ctx, path)
-}
-
-func (a *brokerClientAdapter) RemoveDirectory(ctx context.Context, path string) (*brokerrpc.AckResponse, error) {
-	return a.c.RemoveDirectory(ctx, path)
-}
-
-func (a *brokerClientAdapter) MoveDirectory(ctx context.Context, sourcePath, destinationPath string) (*brokerrpc.AckResponse, error) {
-	return a.c.MoveDirectory(ctx, sourcePath, destinationPath)
-}
+// *brokerrpc.Client satisfies brokerClient directly — every method matches — so
+// no forwarding adapter is needed; the Fs holds the Client through this
+// interface seam. This assertion fails to compile if the two drift.
+var _ brokerClient = (*brokerrpc.Client)(nil)

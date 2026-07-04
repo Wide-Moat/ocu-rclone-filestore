@@ -90,7 +90,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	return &Fs{
 		name:     name,
 		root:     root,
-		client:   newBrokerClientAdapter(c),
+		client:   c, // *brokerrpc.Client satisfies brokerClient directly
 		readOnly: opts.ReadOnly,
 		enc:      opts.Enc,
 	}, nil

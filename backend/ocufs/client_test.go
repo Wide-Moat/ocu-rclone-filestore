@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 // Copyright (c) 2025 Open Computer Use Contributors
 
-// Package ocufs tests — client.go production adapter forwarding.
+// Package ocufs tests — the production brokerClient seam over the fake broker.
 //
-// These tests construct a REAL brokerClientAdapter over the in-process fake
-// broker served from an httptest TLS server (fakebroker_test.go) and drive every
-// adapter method end-to-end. Each adapter method is a single forwarding call
-// into *brokerrpc.Client; exercising it against the fake confirms the method
-// reaches the wire, builds the right route, and decodes the canned response —
-// not just that the line was touched.
+// These tests construct the REAL *brokerrpc.Client (which satisfies brokerClient
+// directly, no adapter) over the in-process fake broker served from an httptest
+// TLS server (fakebroker_test.go) and drive every method end-to-end. Exercising
+// each against the fake confirms the method reaches the wire, builds the right
+// route, and decodes the canned response — not just that the line was touched.
 package ocufs
 
 import (
@@ -37,23 +36,23 @@ func newConfigMapForFake(fb fakeBroker, fsID string, readOnly bool) configmap.Si
 	return m
 }
 
-// newAdapterOverFakeBroker constructs a production brokerClientAdapter wired to
-// a real *brokerrpc.Client bound to the fake broker's HTTPS endpoint over TLS.
-// The returned brokerClient is the exact production seam NewFs installs.
-func newAdapterOverFakeBroker(t *testing.T) brokerClient {
+// newClientOverFakeBroker constructs a real *brokerrpc.Client bound to the fake
+// broker's HTTPS endpoint over TLS, returned through the brokerClient seam — the
+// exact production client NewFs installs (it satisfies brokerClient directly).
+func newClientOverFakeBroker(t *testing.T) brokerClient {
 	t.Helper()
 	fb := startFakeBroker(t)
 	c, err := brokerrpc.New(fb.url, "fs-adapter-test", fakeBrokerAuthToken, fb.certPEM)
 	if err != nil {
 		t.Fatalf("brokerrpc.New(%q): %v", fb.url, err)
 	}
-	return newBrokerClientAdapter(c)
+	return c
 }
 
 // TestAdapterListDirectoryAllForwards confirms ListDirectoryAll forwards to the
 // broker and decodes the pinned union page (one file arm + one directory arm).
 func TestAdapterListDirectoryAllForwards(t *testing.T) {
-	a := newAdapterOverFakeBroker(t)
+	a := newClientOverFakeBroker(t)
 	entries, err := a.ListDirectoryAll(context.Background(), "/testdir")
 	if err != nil {
 		t.Fatalf("ListDirectoryAll: %v", err)
@@ -72,7 +71,7 @@ func TestAdapterListDirectoryAllForwards(t *testing.T) {
 // TestAdapterReadMetadataForwards confirms ReadMetadata forwards to the broker
 // and decodes the canned file-arm response carrying the requested path.
 func TestAdapterReadMetadataForwards(t *testing.T) {
-	a := newAdapterOverFakeBroker(t)
+	a := newClientOverFakeBroker(t)
 	const path = "/meta/file.txt"
 	resp, err := a.ReadMetadata(context.Background(), path)
 	if err != nil {
@@ -92,7 +91,7 @@ func TestAdapterReadMetadataForwards(t *testing.T) {
 // TestAdapterDownloadForwards confirms Download forwards to the broker's
 // fileDownload stream and returns the canned content bytes.
 func TestAdapterDownloadForwards(t *testing.T) {
-	a := newAdapterOverFakeBroker(t)
+	a := newClientOverFakeBroker(t)
 	rc, err := a.Download(context.Background(), "uuid-download")
 	if err != nil {
 		t.Fatalf("Download: %v", err)
@@ -110,7 +109,7 @@ func TestAdapterDownloadForwards(t *testing.T) {
 // TestAdapterDownloadRangeForwards confirms DownloadRange forwards to the
 // broker and that the returned slice is clamped to the requested length.
 func TestAdapterDownloadRangeForwards(t *testing.T) {
-	a := newAdapterOverFakeBroker(t)
+	a := newClientOverFakeBroker(t)
 	const length = int64(5)
 	rc, err := a.DownloadRange(context.Background(), "uuid-range", 0, length)
 	if err != nil {
@@ -134,7 +133,7 @@ func TestAdapterDownloadRangeForwards(t *testing.T) {
 // TestAdapterUploadForwards confirms Upload forwards the client-streaming
 // fileUpload op and succeeds against the canned end-stream trailer.
 func TestAdapterUploadForwards(t *testing.T) {
-	a := newAdapterOverFakeBroker(t)
+	a := newClientOverFakeBroker(t)
 	content := []byte("adapter upload payload")
 	err := a.Upload(context.Background(), "/up/file.bin", bytes.NewReader(content), int64(len(content)), false)
 	if err != nil {
@@ -142,17 +141,18 @@ func TestAdapterUploadForwards(t *testing.T) {
 	}
 }
 
-// newCapturingAdapterOverFakeBroker constructs a production brokerClientAdapter
-// wired to a capturing fake broker, returning the adapter and the capture handle
-// so a test can assert which path reached which wire slot for the two-path ops.
-func newCapturingAdapterOverFakeBroker(t *testing.T) (brokerClient, *capturingBroker) {
+// newCapturingClientOverFakeBroker constructs a real *brokerrpc.Client wired to
+// a capturing fake broker, returning the client (through the brokerClient seam)
+// and the capture handle so a test can assert which path reached which wire slot
+// for the two-path ops.
+func newCapturingClientOverFakeBroker(t *testing.T) (brokerClient, *capturingBroker) {
 	t.Helper()
 	fb, cap := startCapturingFakeBroker(t)
 	c, err := brokerrpc.New(fb.url, "fs-adapter-cap-test", fakeBrokerAuthToken, fb.certPEM)
 	if err != nil {
 		t.Fatalf("brokerrpc.New(%q): %v", fb.url, err)
 	}
-	return newBrokerClientAdapter(c), cap
+	return c, cap
 }
 
 // TestAdapterCopyFileForwards confirms CopyFile forwards, decodes the ack, AND
@@ -161,7 +161,7 @@ func newCapturingAdapterOverFakeBroker(t *testing.T) (brokerClient, *capturingBr
 // capturing broker decodes the request body the client marshalled so a slot
 // swap in the client-to-wire mapping is caught, not silently passed.
 func TestAdapterCopyFileForwards(t *testing.T) {
-	a, cap := newCapturingAdapterOverFakeBroker(t)
+	a, cap := newCapturingClientOverFakeBroker(t)
 	const (
 		src = "/copy/source.txt"
 		dst = "/copy/destination.txt"
@@ -191,7 +191,7 @@ func TestAdapterCopyFileForwards(t *testing.T) {
 // TestAdapterMoveFileForwards confirms MoveFile forwards, decodes the ack, and
 // that source and destination reach the correct wire slots without transposition.
 func TestAdapterMoveFileForwards(t *testing.T) {
-	a, cap := newCapturingAdapterOverFakeBroker(t)
+	a, cap := newCapturingClientOverFakeBroker(t)
 	const (
 		src = "/move/source.txt"
 		dst = "/move/destination.txt"
@@ -220,7 +220,7 @@ func TestAdapterMoveFileForwards(t *testing.T) {
 
 // TestAdapterRemoveFileForwards confirms RemoveFile forwards and decodes the ack.
 func TestAdapterRemoveFileForwards(t *testing.T) {
-	a := newAdapterOverFakeBroker(t)
+	a := newClientOverFakeBroker(t)
 	ack, err := a.RemoveFile(context.Background(), "/gone.txt")
 	if err != nil {
 		t.Fatalf("RemoveFile: %v", err)
@@ -233,7 +233,7 @@ func TestAdapterRemoveFileForwards(t *testing.T) {
 // TestAdapterMakeDirectoryForwards confirms MakeDirectory forwards and decodes
 // the ack.
 func TestAdapterMakeDirectoryForwards(t *testing.T) {
-	a := newAdapterOverFakeBroker(t)
+	a := newClientOverFakeBroker(t)
 	ack, err := a.MakeDirectory(context.Background(), "/newdir")
 	if err != nil {
 		t.Fatalf("MakeDirectory: %v", err)
@@ -246,7 +246,7 @@ func TestAdapterMakeDirectoryForwards(t *testing.T) {
 // TestAdapterRemoveDirectoryForwards confirms RemoveDirectory forwards and
 // decodes the ack.
 func TestAdapterRemoveDirectoryForwards(t *testing.T) {
-	a := newAdapterOverFakeBroker(t)
+	a := newClientOverFakeBroker(t)
 	ack, err := a.RemoveDirectory(context.Background(), "/olddir")
 	if err != nil {
 		t.Fatalf("RemoveDirectory: %v", err)
@@ -260,7 +260,7 @@ func TestAdapterRemoveDirectoryForwards(t *testing.T) {
 // ack, and that the distinct source and destination directories reach the
 // correct wire slots without transposition.
 func TestAdapterMoveDirectoryForwards(t *testing.T) {
-	a, cap := newCapturingAdapterOverFakeBroker(t)
+	a, cap := newCapturingClientOverFakeBroker(t)
 	const (
 		src = "/dirs/source"
 		dst = "/dirs/destination"
@@ -323,13 +323,13 @@ func TestNewFsReadOnlyMountWired(t *testing.T) {
 	}
 }
 
-// TestNewFsConstructsAdapterOverService exercises the NewFs success path end to
+// TestNewFsConstructsClientOverService exercises the NewFs success path end to
 // end: a real config map (service_url + filesystem_id + auth_token + ca_cert_pem)
-// drives NewFs through brokerrpc.New and installs the production
-// brokerClientAdapter. A subsequent List proves the constructed Fs actually
+// drives NewFs through brokerrpc.New and installs the production *brokerrpc.Client
+// as the brokerClient seam. A subsequent List proves the constructed Fs actually
 // reaches the fake broker over TLS (NewFs does not dial synchronously; the first
 // RPC does).
-func TestNewFsConstructsAdapterOverService(t *testing.T) {
+func TestNewFsConstructsClientOverService(t *testing.T) {
 	fb := startFakeBroker(t)
 	m := newConfigMapForFake(fb, "fs-newfs-test", false)
 
