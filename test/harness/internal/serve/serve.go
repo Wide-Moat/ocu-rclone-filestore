@@ -113,6 +113,12 @@ func FetchJWKS(ctx context.Context, client *http.Client, url string, within time
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("serve: JWKS %q never reachable within %s: %w", url, within, lastErr)
 		}
-		time.Sleep(500 * time.Millisecond)
+		// Back off before the next poll, but abort immediately if the context is
+		// cancelled rather than sleeping the full interval past cancellation.
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, fmt.Errorf("serve: JWKS %q wait cancelled: %w", url, ctx.Err())
+		}
 	}
 }

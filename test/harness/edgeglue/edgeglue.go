@@ -143,10 +143,16 @@ func (e *Exchanger) Resolve(ctx context.Context, filesystemID, weakJWT string) (
 	}
 	// If an exchange for this scope is already in flight, wait for it rather than
 	// launching a second one: one exchange per session even under a stampede.
+	// Respect context cancellation while waiting so a caller that gives up (or a
+	// cancelled request) is not pinned to the leader's whole round trip.
 	if fl, ok := e.inflight[filesystemID]; ok {
 		e.mu.Unlock()
-		<-fl.done
-		return fl.cred, fl.err
+		select {
+		case <-fl.done:
+			return fl.cred, fl.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 	// This goroutine owns the exchange for this scope.
 	fl := &flight{done: make(chan struct{})}

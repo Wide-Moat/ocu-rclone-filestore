@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"time"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/jwtmint"
@@ -50,19 +51,28 @@ type CredentialIssuer interface {
 
 // MapCredentialIssuer issues random opaque credentials and records them into a
 // shared map (the filestore peer's StaticCredentialValidator.Credentials),
-// keyed by credential value to bound filesystem_id.
+// keyed by credential value to bound filesystem_id. Its Issue method runs
+// concurrently from HTTP handlers, so it must be used by pointer (&MapCredentialIssuer{…})
+// — the embedded mutex guards the map write against concurrent-map-write panics.
 type MapCredentialIssuer struct {
+	// mu guards writes to Sink so overlapping edge exchanges do not race on the
+	// map. Use MapCredentialIssuer by pointer so all handlers share one mutex.
+	mu sync.Mutex
 	// Sink is the credential->filesystem_id map the filestore peer reads. The
-	// issuer writes new entries into it.
+	// issuer writes new entries into it under mu.
 	Sink map[string]string
 }
 
 // Issue records a fresh random credential bound to filesystemID in the sink.
-func (m MapCredentialIssuer) Issue(filesystemID string) string {
+// The map write is mutex-guarded because Issue is called concurrently from the
+// exchange HTTP handlers.
+func (m *MapCredentialIssuer) Issue(filesystemID string) string {
 	buf := make([]byte, 24)
 	_, _ = rand.Read(buf)
 	cred := base64.RawURLEncoding.EncodeToString(buf)
+	m.mu.Lock()
 	m.Sink[cred] = filesystemID
+	m.mu.Unlock()
 	return cred
 }
 

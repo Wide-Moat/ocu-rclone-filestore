@@ -255,15 +255,13 @@ func TestSourceChunkSizeFloorIsThree(t *testing.T) {
 	if got := sourceChunkSize(1); got != 3 {
 		t.Errorf("sourceChunkSize(1): got %d, want 3 (floor)", got)
 	}
-	if got := sourceChunkSize(jsonEnvelopeOverhead); got != 3 {
-		t.Errorf("sourceChunkSize(overhead): got %d, want 3 (floor)", got)
+	if got := sourceChunkSize(2); got != 3 {
+		t.Errorf("sourceChunkSize(2): got %d, want 3 (floor)", got)
 	}
-	big := sourceChunkSize(64 * 1024)
-	if big%3 != 0 {
-		t.Errorf("sourceChunkSize must be a multiple of 3; got %d", big)
-	}
-	if big <= 3 {
-		t.Errorf("a large ceiling should give a chunk well above the floor; got %d", big)
+	// The file part now streams raw bytes, so the chunk is simply the ceiling
+	// once above the floor — no base64 or JSON-envelope arithmetic.
+	if got := sourceChunkSize(64 * 1024); got != 64*1024 {
+		t.Errorf("sourceChunkSize(64KiB): got %d, want %d (flat ceiling)", got, 64*1024)
 	}
 }
 

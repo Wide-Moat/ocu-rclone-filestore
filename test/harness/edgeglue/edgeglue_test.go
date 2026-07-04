@@ -65,7 +65,7 @@ func newWired(t *testing.T) (*controlplane.Server, map[string]string, *httptest.
 		JWKS:        cp,
 		Issuer:      issuer,
 		Audience:    audience,
-		Credentials: exchange.MapCredentialIssuer{Sink: sink},
+		Credentials: &exchange.MapCredentialIssuer{Sink: sink},
 		Now:         fixedNow,
 	})
 	ts := httptest.NewServer(ex.Handler())

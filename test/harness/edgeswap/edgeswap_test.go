@@ -187,7 +187,7 @@ func newChain(t *testing.T) *chain {
 	sink := map[string]string{}
 	ex := exchange.NewServer(exchange.Options{
 		JWKS: cp, Issuer: issuer, Audience: audience,
-		Credentials: exchange.MapCredentialIssuer{Sink: sink}, Now: fixedNow,
+		Credentials: &exchange.MapCredentialIssuer{Sink: sink}, Now: fixedNow,
 	})
 	exSrv := httptest.NewServer(ex.Handler())
 	t.Cleanup(exSrv.Close)
