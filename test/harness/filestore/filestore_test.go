@@ -51,7 +51,7 @@ func (e *testEnv) post(t *testing.T, cred, opName string, body any) *http.Respon
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, e.ts.URL+restBase+opName, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, e.ts.URL+restBase+opName, bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}

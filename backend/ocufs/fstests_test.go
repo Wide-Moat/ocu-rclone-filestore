@@ -191,7 +191,9 @@ func TestFakeBrokerDownloadRoundTrip(t *testing.T) {
 		}
 	}
 	if obj == nil {
-		t.Skip("no file entry in List result — skipping download round-trip")
+		// The fake broker deterministically yields a file entry in its union
+		// page, so an empty result is a real regression, not a reason to skip.
+		t.Fatalf("no file entry in List result — the fake broker must yield one")
 	}
 
 	rc, err := obj.Open(context.Background())
@@ -229,7 +231,8 @@ func TestFakeBrokerCopyAckPath(t *testing.T) {
 		}
 	}
 	if srcObj == nil {
-		t.Skip("no file entry in List — skipping Copy ack path test")
+		// Deterministic fake broker: a missing file entry is a real failure.
+		t.Fatalf("no file entry in List — the fake broker must yield one")
 	}
 
 	dstRemote := "copy-dest.txt"

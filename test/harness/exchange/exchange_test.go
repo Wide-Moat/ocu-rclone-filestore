@@ -213,7 +213,11 @@ func TestExchangeRejectsMissingSubjectToken(t *testing.T) {
 
 func TestExchangeRejectsNonPost(t *testing.T) {
 	_, _, ts := newPaired(t)
-	resp, err := http.Get(ts.URL + ExchangePath)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+ExchangePath, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}

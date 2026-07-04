@@ -18,6 +18,7 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -74,6 +75,14 @@ func mainWith(args []string) error {
 }
 
 func run(addr, certPath, keyPath, caPath, cpJWKSURL, credKeyPath string) error {
+	return runCtx(context.Background(), addr, certPath, keyPath, caPath, cpJWKSURL, credKeyPath, nil)
+}
+
+// runCtx is run with an explicit context (for graceful test shutdown) and an
+// onReady callback that reports the bound listener address once serving starts.
+// Binding through serve.RunContext lets a caller pass "127.0.0.1:0" and learn
+// the real port without a separate bind-close-reuse probe that could race.
+func runCtx(ctx context.Context, addr, certPath, keyPath, caPath, cpJWKSURL, credKeyPath string, onReady func(net.Addr)) error {
 	client, err := serve.CAClient(caPath)
 	if err != nil {
 		return err
@@ -134,7 +143,7 @@ func run(addr, certPath, keyPath, caPath, cpJWKSURL, credKeyPath string) error {
 		return err
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "exchange: serving token + credential JWKS on %s\n", addr)
-	return serve.Run(addr, tlsConf, mux)
+	return serve.RunContext(ctx, addr, tlsConf, mux, onReady)
 }
 
 // loadCredentialSigningKey reads the stable PKCS#8 EC credential signing key
