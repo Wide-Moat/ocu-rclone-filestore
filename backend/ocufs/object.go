@@ -4,11 +4,11 @@
 package ocufs
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/brokerrpc"
@@ -29,12 +29,18 @@ type Object struct {
 	fs     *Fs
 	remote string // rclone-relative path (one segment or more, no leading /)
 	path   string // absolute broker path (leading /)
-	uuid   string // broker-minted handle (D7); empty on ack-only Objects
-	size   int64
-	mtime  time.Time
-	mode   string
-	sha    string
-	mime   string
+
+	// mu guards the lazily-resolved fields below. resolve() writes them on the
+	// ack-only fallback path and ModTime/Open/Update read or clear them; rclone
+	// may drive those methods concurrently for one Object, so every access to a
+	// mu-guarded field goes through mu.
+	mu    sync.Mutex
+	uuid  string // broker-minted handle (D7); empty on ack-only Objects
+	size  int64
+	mtime time.Time
+	mode  string
+	sha   string
+	mime  string
 }
 
 // ---------------------------------------------------------------------------
@@ -54,14 +60,23 @@ func (o *Object) Remote() string { return o.remote }
 // NewObject-built Object the mtime is already populated. For a uuid-less
 // ack-only Object it calls resolve() to fetch it.
 func (o *Object) ModTime(ctx context.Context) time.Time {
-	if o.uuid == "" {
+	o.mu.Lock()
+	empty := o.uuid == ""
+	o.mu.Unlock()
+	if empty {
 		_ = o.resolve(ctx) // best-effort; return whatever we have
 	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	return o.mtime
 }
 
 // Size returns the size of the object in bytes.
-func (o *Object) Size() int64 { return o.size }
+func (o *Object) Size() int64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.size
+}
 
 // ---------------------------------------------------------------------------
 // fs.ObjectInfo
@@ -114,8 +129,10 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	// Clear uuid so the next access triggers the defensive fallback resolve
 	// (the upload ack carries no metadata). Update size optimistically from
 	// src to keep Size() meaningful until the fallback runs.
+	o.mu.Lock()
 	o.uuid = ""
 	o.size = src.Size()
+	o.mu.Unlock()
 	return nil
 }
 
@@ -151,11 +168,19 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	if err := o.resolve(ctx); err != nil {
 		return nil, err
 	}
+	// Snapshot the resolved handle and size under the lock: resolve() and a
+	// concurrent Update() write these fields, so read them once into locals and
+	// operate on the snapshot for the rest of Open.
+	o.mu.Lock()
+	uuid := o.uuid
+	size := o.size
+	o.mu.Unlock()
+
 	// resolve() can succeed while leaving uuid empty (a file arm whose uuid
 	// field is not populated). Download addresses by uuid, so guard here and
 	// emit a clear diagnostic instead of issuing Download with an empty handle
 	// and relying on the broker to reject it (WR-04).
-	if o.uuid == "" {
+	if uuid == "" {
 		return nil, fmt.Errorf("ocufs: Open %q: resolved metadata carries no uuid handle", o.path)
 	}
 
@@ -170,7 +195,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 		case *fs.SeekOption:
 			// SeekOption: offset to end.
 			offset = v.Offset
-			length = o.size - offset
+			length = size - offset
 			if length < 0 {
 				length = 0
 			}
@@ -178,11 +203,11 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 		case *fs.RangeOption:
 			// RangeOption.Decode handles all four forms and returns the
 			// inclusive-End conversion (length = End - Start + 1).
-			off, limit := v.Decode(o.size)
+			off, limit := v.Decode(size)
 			offset = off
 			if limit == -1 {
 				// "to end" sentinel from Decode: read from offset to EOF.
-				length = o.size - offset
+				length = size - offset
 				if length < 0 {
 					length = 0
 				}
@@ -199,18 +224,21 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 	}
 
 	var (
-		data []byte
-		err  error
+		rc  io.ReadCloser
+		err error
 	)
 	if fullRead {
-		data, err = o.fs.client.Download(ctx, o.uuid)
+		rc, err = o.fs.client.Download(ctx, uuid)
 	} else {
-		data, err = o.fs.client.DownloadRange(ctx, o.uuid, offset, length)
+		rc, err = o.fs.client.DownloadRange(ctx, uuid, offset, length)
 	}
 	if err != nil {
 		return nil, err // propagate unwrapped for rclone's retry layer
 	}
-	return io.NopCloser(bytes.NewReader(data)), nil
+	// Return the broker stream directly: VFS reads bytes as they arrive rather
+	// than the backend buffering the whole object into memory first. The caller
+	// (rclone's VFS) closes the reader, which releases the underlying HTTP body.
+	return rc, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -226,10 +254,15 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (io.ReadClo
 // For a List- or NewObject-built Object the uuid is already present, so
 // resolve is always a no-op on the hot path — no extra round-trip.
 func (o *Object) resolve(ctx context.Context) error {
+	o.mu.Lock()
 	if o.uuid != "" {
+		o.mu.Unlock()
 		return nil // already resolved; idempotent
 	}
+	o.mu.Unlock()
 
+	// Fetch outside the lock: ReadMetadata is a broker round-trip and must not
+	// hold mu (a concurrent Size()/ModTime() would otherwise block on the wire).
 	resp, err := o.fs.client.ReadMetadata(ctx, o.path)
 	if err != nil {
 		if errors.Is(err, brokerrpc.ErrNotFound) {
@@ -249,11 +282,16 @@ func (o *Object) resolve(ctx context.Context) error {
 		return fs.ErrorObjectNotFound
 	}
 
+	o.mu.Lock()
+	// A concurrent resolve() may have populated uuid while we were on the wire;
+	// the first writer wins and this is a harmless idempotent overwrite with the
+	// same broker-sourced values.
 	o.uuid = resp.File.UUID
 	o.size = resp.File.Size
 	o.mtime = parseMtime(resp.File.Mtime)
 	o.mode = resp.File.Mode
 	o.sha = resp.File.SHA
 	o.mime = resp.File.MIME
+	o.mu.Unlock()
 	return nil
 }

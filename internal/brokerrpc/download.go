@@ -31,28 +31,40 @@ import (
 // architecture and must never let a broker bug or a desynced stream size an
 // unbounded read into guest OOM. The cap is far above any expected single
 // object yet rejects absurd lengths.
+//
+// The cap bounds the STREAM, not a pre-read buffer: Download returns a reader
+// that yields bytes as they arrive and only fails once cumulative reads would
+// exceed the cap, so a legitimate large object streams through VFS without ever
+// being held whole in guest memory.
 const maxDownloadBytes int64 = 1 << 34 // 16 GiB
 
-// Download performs the fileDownload op and returns the full reassembled object
-// content. The object is addressed by its broker-minted uuid handle; the guest
-// never derives scope from the uuid.
-func (c *Client) Download(ctx context.Context, uuid string) ([]byte, error) {
+// Download performs the fileDownload op and returns the full object content as
+// a streaming io.ReadCloser. The object is addressed by its broker-minted uuid
+// handle; the guest never derives scope from the uuid. The caller MUST Close
+// the returned reader; closing it releases the underlying HTTP response.
+//
+// The returned reader is bounded by maxDownloadBytes: it streams normally and
+// returns an error on the read that would carry the stream past the cap, so a
+// runaway or desynced body cannot grow guest memory without limit.
+func (c *Client) Download(ctx context.Context, uuid string) (io.ReadCloser, error) {
 	fsID, am, err := c.stamp(OpFileDownload)
 	if err != nil {
 		return nil, err
 	}
-	return c.doDownload(ctx, fsID, uuid, am, nil)
+	return c.doDownload(ctx, fsID, uuid, am, nil, maxDownloadBytes)
 }
 
 // DownloadRange is a distinctly-named helper that consumes the fileDownload
-// response and returns the requested {offset, length} byte slice. It sends the
-// {offset, length} window in the request so the broker streams only those bytes
-// — a ranged read transfers just the requested window rather than the whole
-// object. The local slice that follows is a defensive clamp: a broker that
-// honours the range returns exactly the window and the slice is a no-op; a
-// broker that ignores it (returning more) is still trimmed to the contract, so
-// the caller never sees over-delivery.
-func (c *Client) DownloadRange(ctx context.Context, uuid string, offset, length int64) ([]byte, error) {
+// response and returns a streaming io.ReadCloser over the requested
+// {offset, length} window. It sends the {offset, length} window in the request
+// so the broker streams only those bytes — a ranged read transfers just the
+// requested window rather than the whole object. The returned reader is bounded
+// to length as a defensive clamp: a broker that honours the range delivers
+// exactly the window and the clamp is a no-op; a broker that ignores it
+// (returning more) is truncated to the contract, so the caller never sees
+// over-delivery. Offset is NOT re-applied locally: the broker already seeked to
+// it, so the returned stream begins at offset. The caller MUST Close the reader.
+func (c *Client) DownloadRange(ctx context.Context, uuid string, offset, length int64) (io.ReadCloser, error) {
 	if offset < 0 {
 		return nil, fmt.Errorf("brokerrpc: DownloadRange: negative offset %d", offset)
 	}
@@ -66,30 +78,25 @@ func (c *Client) DownloadRange(ctx context.Context, uuid string, offset, length 
 	}
 
 	rng := &Range{Offset: offset, Length: length}
-	content, err := c.doDownload(ctx, fsID, uuid, am, rng)
-	if err != nil {
-		return nil, err
-	}
-
-	// Defensive clamp against a broker that streamed more than the requested
-	// window. When the range was honoured, len(content) <= length and this is a
-	// no-op. Offset is NOT re-applied here: the broker already seeked to it, so
-	// the returned stream begins at offset.
-	if int64(len(content)) > length {
-		content = content[:length]
-	}
-	return content, nil
+	// Bound the returned stream to exactly the requested window. A broker that
+	// honours the range delivers <= length bytes and the bound never trips; a
+	// broker that over-delivers is truncated silently at length (a ranged read
+	// asked for a fixed window, so trailing bytes past it are simply not the
+	// caller's data — unlike the whole-object path, which errors on over-cap).
+	return c.doDownload(ctx, fsID, uuid, am, rng, length)
 }
 
-// doDownload builds and executes the fileDownload POST and reads the chunked
-// octet-stream body. rng is the optional byte window: nil streams the whole
-// object, non-nil streams only the window.
+// doDownload builds and executes the fileDownload POST and returns the chunked
+// octet-stream body as a bounded streaming reader. rng is the optional byte
+// window: nil streams the whole object, non-nil streams only the window. limit
+// bounds how many bytes the returned reader will deliver before it aborts.
 func (c *Client) doDownload(
 	ctx context.Context,
 	fsID, uuid string,
 	am AuthorizationMetadata,
 	rng *Range,
-) ([]byte, error) {
+	limit int64,
+) (io.ReadCloser, error) {
 	req := FileDownloadRequest{
 		FilesystemID:          fsID,
 		UUID:                  uuid,
@@ -112,22 +119,54 @@ func (c *Client) doDownload(
 	if err != nil {
 		return nil, fmt.Errorf("brokerrpc: fileDownload: %w", err)
 	}
-	defer func() { _ = httpResp.Body.Close() }()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
-		// Read the error body for diagnostics, then map by status.
+		// Read the error body for diagnostics, then map by status. This path
+		// owns the body fully, so close it here — success returns the body to
+		// the caller instead, who closes it via the returned ReadCloser.
 		errBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 64*1024))
+		_ = httpResp.Body.Close()
 		return nil, MapHTTPStatus(httpResp.StatusCode, errBody, httpResp.Header.Get("Retry-After"))
 	}
 
-	// 2xx: read the chunked octet-stream body to completion, bounded by the
-	// download cap so a runaway stream cannot OOM the guest.
-	content, err := io.ReadAll(io.LimitReader(httpResp.Body, maxDownloadBytes+1))
-	if err != nil {
-		return nil, fmt.Errorf("brokerrpc: fileDownload: read body: %w", err)
-	}
-	if int64(len(content)) > maxDownloadBytes {
-		return nil, fmt.Errorf("brokerrpc: fileDownload: response exceeds %d bytes", maxDownloadBytes)
-	}
-	return content, nil
+	// 2xx: hand the caller a bounded stream over the chunked octet-stream body.
+	// Nothing is read into guest memory here; bytes flow as the caller reads.
+	return newBoundedBody(httpResp.Body, rng == nil, limit), nil
 }
+
+// boundedBody wraps an HTTP response body as an io.ReadCloser that delivers at
+// most limit bytes. On the whole-object path (strict=true) a stream that tries
+// to carry more than the cap is a broker bug or a desync, so Read returns an
+// error rather than silently truncating. On the ranged path (strict=false) the
+// caller asked for a fixed window, so over-delivery past the window is simply
+// truncated. Closing releases the underlying body.
+type boundedBody struct {
+	body      io.ReadCloser
+	remaining int64
+	strict    bool
+}
+
+func newBoundedBody(body io.ReadCloser, strict bool, limit int64) *boundedBody {
+	return &boundedBody{body: body, remaining: limit, strict: strict}
+}
+
+func (b *boundedBody) Read(p []byte) (int, error) {
+	if b.remaining <= 0 {
+		if b.strict {
+			// The stream still has bytes past the cap: reject rather than OOM.
+			var probe [1]byte
+			if n, _ := b.body.Read(probe[:]); n > 0 {
+				return 0, fmt.Errorf("brokerrpc: fileDownload: response exceeds %d bytes", maxDownloadBytes)
+			}
+		}
+		return 0, io.EOF
+	}
+	if int64(len(p)) > b.remaining {
+		p = p[:b.remaining]
+	}
+	n, err := b.body.Read(p)
+	b.remaining -= int64(n)
+	return n, err
+}
+
+func (b *boundedBody) Close() error { return b.body.Close() }

@@ -161,7 +161,27 @@ func (f *Fs) Features() *fs.Features {
 func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 	dirPath := f.absPath(dir)
 
-	all, err := f.client.ListDirectoryAll(ctx, dirPath)
+	// Stream the recursive listing and filter to depth-1 as each page arrives,
+	// so the full recursive tree is never held in memory just to surface the
+	// immediate children (design decision 6). Only the surviving depth-1 slice
+	// grows — as required by rclone's List contract, which returns a slice.
+	var entries fs.DirEntries
+	err := f.client.ListDirectoryStream(ctx, dirPath, func(entry brokerrpc.ListDirEntry) error {
+		remote, ok := f.immediateChildRemote(dir, entry)
+		if !ok {
+			return nil // deeper descendant — filtered per design decision 6
+		}
+		switch {
+		case entry.File != nil:
+			entries = append(entries, objectFromFile(f, remote, entry.File))
+		case entry.Directory != nil:
+			mtime := parseMtime(entry.Directory.Mtime)
+			entries = append(entries, fs.NewDir(remote, mtime))
+		}
+		// Both arms nil: tolerate silently (unknown union variant from future
+		// broker field pin — stays tolerant per D6).
+		return nil
+	})
 	if err != nil {
 		// rclone's List contract: listing a directory that does not exist must
 		// return fs.ErrorDirNotFound, so the VFS can distinguish a missing
@@ -172,24 +192,6 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 			return nil, fs.ErrorDirNotFound
 		}
 		return nil, fmt.Errorf("ocufs: List %q: %w", dirPath, err)
-	}
-
-	var entries fs.DirEntries
-	for _, entry := range all {
-		remote, ok := f.immediateChildRemote(dir, entry)
-		if !ok {
-			continue // deeper descendant — filtered per design decision 6
-		}
-		switch {
-		case entry.File != nil:
-			obj := objectFromFile(f, remote, entry.File)
-			entries = append(entries, obj)
-		case entry.Directory != nil:
-			mtime := parseMtime(entry.Directory.Mtime)
-			entries = append(entries, fs.NewDir(remote, mtime))
-		}
-		// Both arms nil: tolerate silently (unknown union variant from future
-		// broker field pin — stays tolerant per D6).
 	}
 	return entries, nil
 }

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,8 +29,14 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeClient struct {
-	listDirectoryAllCount int
-	readMetadataCount     int
+	// mu guards the call counters and last-arg captures so the double is honest
+	// under the concurrent-access tests (the production code fans parallel FUSE
+	// ops through one client); without it the -race run flags the double, not
+	// the code under test.
+	mu                       sync.Mutex
+	listDirectoryAllCount    int
+	listDirectoryStreamCount int
+	readMetadataCount        int
 	downloadCount         int
 	downloadRangeCount    int
 	uploadCount           int
@@ -95,32 +102,70 @@ func (f *fakeClient) ListDirectoryAll(ctx context.Context, path string) ([]broke
 	return nil, nil
 }
 
+// ListDirectoryStream drives yield from the same listDirectoryAllResult stub so
+// existing tests that configure ListDirectoryAll behaviour also exercise the
+// streaming path Fs.List now uses. A yield error stops iteration.
+func (f *fakeClient) ListDirectoryStream(ctx context.Context, path string, yield func(brokerrpc.ListDirEntry) error) error {
+	f.listDirectoryStreamCount++
+	var entries []brokerrpc.ListDirEntry
+	var err error
+	if f.listDirectoryAllResult != nil {
+		entries, err = f.listDirectoryAllResult(ctx, path)
+	}
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if yErr := yield(e); yErr != nil {
+			return yErr
+		}
+	}
+	return nil
+}
+
 func (f *fakeClient) ReadMetadata(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+	f.mu.Lock()
 	f.readMetadataCount++
-	if f.readMetadataResult != nil {
-		return f.readMetadataResult(ctx, path)
+	result := f.readMetadataResult
+	f.mu.Unlock()
+	if result != nil {
+		return result(ctx, path)
 	}
 	return &brokerrpc.ReadMetadataResponse{}, nil
 }
 
-func (f *fakeClient) Download(ctx context.Context, uuid string) ([]byte, error) {
+func (f *fakeClient) Download(ctx context.Context, uuid string) (io.ReadCloser, error) {
+	f.mu.Lock()
 	f.downloadCount++
 	f.lastDownloadUUID = uuid
-	if f.downloadResult != nil {
-		return f.downloadResult(ctx, uuid)
+	result := f.downloadResult
+	f.mu.Unlock()
+	if result != nil {
+		data, err := result(ctx, uuid)
+		if err != nil {
+			return nil, err
+		}
+		return io.NopCloser(bytes.NewReader(data)), nil
 	}
-	return []byte("hello world"), nil
+	return io.NopCloser(bytes.NewReader([]byte("hello world"))), nil
 }
 
-func (f *fakeClient) DownloadRange(ctx context.Context, uuid string, offset, length int64) ([]byte, error) {
+func (f *fakeClient) DownloadRange(ctx context.Context, uuid string, offset, length int64) (io.ReadCloser, error) {
+	f.mu.Lock()
 	f.downloadRangeCount++
 	f.lastDownloadRangeUUID = uuid
 	f.lastDownloadRangeOffset = offset
 	f.lastDownloadRangeLength = length
-	if f.downloadRangeResult != nil {
-		return f.downloadRangeResult(ctx, uuid, offset, length)
+	result := f.downloadRangeResult
+	f.mu.Unlock()
+	if result != nil {
+		data, err := result(ctx, uuid, offset, length)
+		if err != nil {
+			return nil, err
+		}
+		return io.NopCloser(bytes.NewReader(data)), nil
 	}
-	return []byte("bytes"), nil
+	return io.NopCloser(bytes.NewReader([]byte("bytes"))), nil
 }
 
 func (f *fakeClient) Upload(ctx context.Context, path string, src io.Reader, totalBytes int64, overwrite bool) error {

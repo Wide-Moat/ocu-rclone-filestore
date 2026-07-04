@@ -14,6 +14,7 @@ package ocufs
 import (
 	"bytes"
 	"context"
+	"io"
 	"testing"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/brokerrpc"
@@ -92,9 +93,14 @@ func TestAdapterReadMetadataForwards(t *testing.T) {
 // fileDownload stream and returns the canned content bytes.
 func TestAdapterDownloadForwards(t *testing.T) {
 	a := newAdapterOverFakeBroker(t)
-	data, err := a.Download(context.Background(), "uuid-download")
+	rc, err := a.Download(context.Background(), "uuid-download")
 	if err != nil {
 		t.Fatalf("Download: %v", err)
+	}
+	defer func() { _ = rc.Close() }()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("Download read: %v", err)
 	}
 	if !bytes.Equal(data, fakeBrokerContentBytes) {
 		t.Errorf("Download returned %q, want %q", data, fakeBrokerContentBytes)
@@ -106,9 +112,14 @@ func TestAdapterDownloadForwards(t *testing.T) {
 func TestAdapterDownloadRangeForwards(t *testing.T) {
 	a := newAdapterOverFakeBroker(t)
 	const length = int64(5)
-	data, err := a.DownloadRange(context.Background(), "uuid-range", 0, length)
+	rc, err := a.DownloadRange(context.Background(), "uuid-range", 0, length)
 	if err != nil {
 		t.Fatalf("DownloadRange: %v", err)
+	}
+	defer func() { _ = rc.Close() }()
+	data, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("DownloadRange read: %v", err)
 	}
 	// The fake serves the full canned bytes; DownloadRange's defensive clamp
 	// trims to the requested length.

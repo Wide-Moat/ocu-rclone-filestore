@@ -10,11 +10,23 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/rclone/rclone/fs/fserrors"
 )
+
+// readAllClose drains a download ReadCloser to bytes and closes it. Download and
+// DownloadRange now return a streaming reader, so a test that asserts on the
+// content reads it here; a read error (e.g. a truncated stream) surfaces from
+// io.ReadAll, mirroring how the real VFS caller observes it.
+func readAllClose(t *testing.T, rc io.ReadCloser) ([]byte, error) {
+	t.Helper()
+	if rc == nil {
+		return nil, nil
+	}
+	defer func() { _ = rc.Close() }()
+	return io.ReadAll(rc)
+}
 
 // readDownloadRequest decodes the JSON fileDownload request body.
 func readDownloadRequest(t *testing.T, r *http.Request) FileDownloadRequest {
@@ -93,9 +105,13 @@ func TestDownloadFullReassembly(t *testing.T) {
 		_, _ = io.ReadAll(r.Body)
 		chunkedOctetStream(w, content)
 	})
-	got, err := c.Download(context.Background(), "uuid-abc")
+	rc, err := c.Download(context.Background(), "uuid-abc")
 	if err != nil {
 		t.Fatalf("Download: %v", err)
+	}
+	got, err := readAllClose(t, rc)
+	if err != nil {
+		t.Fatalf("Download read: %v", err)
 	}
 	if !bytes.Equal(got, content) {
 		t.Errorf("content = %q, want %q", got, content)
@@ -124,9 +140,13 @@ func TestDownloadRangeSendsRangeAndReturnsWindow(t *testing.T) {
 		chunkedOctetStream(w, out)
 	})
 
-	got, err := c.DownloadRange(context.Background(), "uuid-abc", 2, 3)
+	rc, err := c.DownloadRange(context.Background(), "uuid-abc", 2, 3)
 	if err != nil {
 		t.Fatalf("DownloadRange: %v", err)
+	}
+	got, err := readAllClose(t, rc)
+	if err != nil {
+		t.Fatalf("DownloadRange read: %v", err)
 	}
 	if want := content[2:5]; !bytes.Equal(got, want) {
 		t.Errorf("range slice = %q, want %q", got, want)
@@ -167,9 +187,13 @@ func TestDownloadRangeClampsOverDelivery(t *testing.T) {
 		_, _ = io.ReadAll(r.Body)
 		chunkedOctetStream(w, []byte("abcdefghij")) // ignores range, returns 10
 	})
-	got, err := c.DownloadRange(context.Background(), "uuid-abc", 0, 3)
+	rc, err := c.DownloadRange(context.Background(), "uuid-abc", 0, 3)
 	if err != nil {
 		t.Fatalf("DownloadRange: %v", err)
+	}
+	got, err := readAllClose(t, rc)
+	if err != nil {
+		t.Fatalf("DownloadRange read: %v", err)
 	}
 	if len(got) != 3 {
 		t.Errorf("over-delivery not clamped: got %d bytes, want 3", len(got))
@@ -229,9 +253,13 @@ func TestDownloadRangePastEOF(t *testing.T) {
 		}
 		chunkedOctetStream(w, out)
 	})
-	got, err := c.DownloadRange(context.Background(), "uuid-abc", 7, 100)
+	rc, err := c.DownloadRange(context.Background(), "uuid-abc", 7, 100)
 	if err != nil {
 		t.Fatalf("DownloadRange past EOF: %v", err)
+	}
+	got, err := readAllClose(t, rc)
+	if err != nil {
+		t.Fatalf("DownloadRange past EOF read: %v", err)
 	}
 	if want := content[7:]; !bytes.Equal(got, want) {
 		t.Errorf("range past EOF: got %q, want %q", got, want)
@@ -257,9 +285,13 @@ func TestDownloadRangeEmptyWindow(t *testing.T) {
 		}
 		chunkedOctetStream(w, out)
 	})
-	got, err := c.DownloadRange(context.Background(), "uuid-eof", int64(len(content)), 0)
+	rc, err := c.DownloadRange(context.Background(), "uuid-eof", int64(len(content)), 0)
 	if err != nil {
 		t.Fatalf("DownloadRange empty window: %v", err)
+	}
+	got, err := readAllClose(t, rc)
+	if err != nil {
+		t.Fatalf("DownloadRange empty window read: %v", err)
 	}
 	if len(got) != 0 {
 		t.Errorf("empty window: got %d bytes (%q), want 0", len(got), got)
@@ -311,11 +343,13 @@ func TestDownloadServiceUnavailableIsRetryable(t *testing.T) {
 	}
 }
 
-// TestDownloadBodyReadFailureSurfaces drives doDownload's io.ReadAll error arm:
+// TestDownloadBodyReadFailureSurfaces drives the streaming body-read error arm:
 // a 2xx handler that promises a long Content-Length but writes fewer bytes and
-// hangs up makes the body read fail with an unexpected EOF, which must surface as
-// a read-body error rather than a silent short success (silent truncation would
-// be file corruption on a FUSE-backed mount).
+// hangs up mid-body makes the body read fail with an unexpected EOF. Download
+// now returns a streaming reader, so the error surfaces when the caller reads
+// the stream (exactly where the real VFS caller sees it) rather than being
+// swallowed as a silent short success — silent truncation would be file
+// corruption on a FUSE-backed mount.
 func TestDownloadBodyReadFailureSurfaces(t *testing.T) {
 	c, _ := newTLSTestClient(t, "fs-dl-shortbody", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
@@ -334,11 +368,12 @@ func TestDownloadBodyReadFailureSurfaces(t *testing.T) {
 			}
 		}
 	})
-	_, err := c.Download(context.Background(), "uuid-short")
-	if err == nil {
-		t.Fatal("expected a body-read error from a truncated stream, got nil")
+	rc, err := c.Download(context.Background(), "uuid-short")
+	if err != nil {
+		t.Fatalf("Download returned an error before streaming: %v", err)
 	}
-	if !strings.Contains(err.Error(), "fileDownload") {
-		t.Errorf("error %q does not name fileDownload", err.Error())
+	defer func() { _ = rc.Close() }()
+	if _, err := io.ReadAll(rc); err == nil {
+		t.Fatal("expected a body-read error from a truncated stream, got nil")
 	}
 }

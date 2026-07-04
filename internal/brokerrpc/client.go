@@ -18,6 +18,13 @@ import (
 // routes to <service_url>/v1/filestore/fs/<operation>.
 const restBase = "v1/filestore/fs/"
 
+// maxJSONResponseBytes bounds how many bytes a unary JSON response body may
+// deliver before decoding aborts. Metadata and single listing-page responses
+// are small; the bound is far above any legitimate response yet stops a runaway
+// or desynced body from growing guest memory during decode. Content bytes never
+// travel this path — fileDownload streams through the octet-stream body instead.
+const maxJSONResponseBytes int64 = 64 << 20 // 64 MiB
+
 // defaultMessageCeiling is the default maximum payload size for a single
 // streaming chunk frame, measured on the ENCODED frame payload. The chunker
 // sizes each source read so the base64-plus-JSON-envelope frame payload stays
@@ -130,24 +137,23 @@ func (c *Client) call(ctx context.Context, op Op, req, resp interface{}) error {
 	if err != nil {
 		return fmt.Errorf("brokerrpc: %s: %w", op, err)
 	}
-	// The body is fully drained by io.ReadAll below, so a Close error carries no
-	// information the caller can act on; discard it explicitly.
+	// The body is consumed below (streamed on 2xx, bounded-read on error), so a
+	// Close error carries no information the caller can act on; discard it.
 	defer func() { _ = httpResp.Body.Close() }()
 
-	respBody, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return fmt.Errorf("brokerrpc: read %s response body: %w", op, err)
-	}
-
 	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
-		// Non-2xx error: the HTTP status drives the typed mapping. The body is
-		// carried for diagnostics; the Retry-After header is honoured only on
-		// 429 inside MapHTTPStatus.
-		return MapHTTPStatus(httpResp.StatusCode, respBody, httpResp.Header.Get("Retry-After"))
+		// Non-2xx error: the HTTP status drives the typed mapping. Read a bounded
+		// prefix of the body for diagnostics; the Retry-After header is honoured
+		// only on 429 inside MapHTTPStatus.
+		errBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxJSONResponseBytes))
+		return MapHTTPStatus(httpResp.StatusCode, errBody, httpResp.Header.Get("Retry-After"))
 	}
 
 	if resp != nil {
-		if err := json.Unmarshal(respBody, resp); err != nil {
+		// Stream-decode the JSON body bounded by maxJSONResponseBytes rather than
+		// buffering the whole response first: a unary metadata response is small,
+		// and the bound stops a runaway or desynced body from growing guest memory.
+		if err := json.NewDecoder(io.LimitReader(httpResp.Body, maxJSONResponseBytes)).Decode(resp); err != nil {
 			return fmt.Errorf("brokerrpc: unmarshal %s response: %w", op, err)
 		}
 	}
