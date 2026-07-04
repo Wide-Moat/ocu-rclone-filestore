@@ -42,7 +42,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, dstRemote string) (fs.Obje
 	dstPath := f.absPath(dstRemote)
 
 	if _, err := f.client.CopyFile(ctx, srcPath, dstPath); err != nil {
-		return nil, fmt.Errorf("ocufs: Copy %q → %q: %w", srcPath, dstPath, err)
+		return nil, fmt.Errorf("ocufs: Copy %q → %q: %w", srcPath, dstPath, mapBrokerError(err))
 	}
 
 	// Build a uuid-less destination Object. The broker ack carries no File
@@ -78,7 +78,7 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, dstRemote string) (fs.Obje
 	dstPath := f.absPath(dstRemote)
 
 	if _, err := f.client.MoveFile(ctx, srcPath, dstPath); err != nil {
-		return nil, fmt.Errorf("ocufs: Move %q → %q: %w", srcPath, dstPath, err)
+		return nil, fmt.Errorf("ocufs: Move %q → %q: %w", srcPath, dstPath, mapBrokerError(err))
 	}
 
 	return &Object{
@@ -119,7 +119,7 @@ func (f *Fs) DirMove(ctx context.Context, srcFs fs.Fs, srcRemote, dstRemote stri
 	dstPath := f.absPath(dstRemote)
 
 	if _, err := f.client.MoveDirectory(ctx, srcPath, dstPath); err != nil {
-		return fmt.Errorf("ocufs: DirMove %q → %q: %w", srcPath, dstPath, err)
+		return fmt.Errorf("ocufs: DirMove %q → %q: %w", srcPath, dstPath, mapBrokerError(err))
 	}
 	return nil
 }

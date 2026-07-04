@@ -61,7 +61,7 @@ func newWired(t *testing.T) (*controlplane.Server, map[string]string, *httptest.
 		t.Fatalf("control-plane: %v", err)
 	}
 	sink := map[string]string{}
-	ex := exchange.NewServer(exchange.Options{
+	ex := exchange.MustNewServer(exchange.Options{
 		JWKS:        cp,
 		Issuer:      issuer,
 		Audience:    audience,

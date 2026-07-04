@@ -112,12 +112,15 @@ func run(addr, certPath, keyPath, caPath, cpJWKSURL, credKeyPath string) error {
 		return fmt.Errorf("build credential issuer: %w", err)
 	}
 
-	exSrv := exchange.NewServer(exchange.Options{
+	exSrv, err := exchange.NewServer(exchange.Options{
 		JWKS:        staticJWKS{keys: cpKeys},
 		Issuer:      cpIssuer,
 		Audience:    cpAudience,
 		Credentials: issuer,
 	})
+	if err != nil {
+		return fmt.Errorf("build exchange server: %w", err)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle(exchange.ExchangePath, exSrv.Handler())

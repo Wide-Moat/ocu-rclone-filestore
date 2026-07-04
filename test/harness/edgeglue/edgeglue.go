@@ -234,11 +234,11 @@ func filesystemIDClaim(token string) (string, error) {
 	}
 	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", fmt.Errorf("payload is not base64url")
+		return "", fmt.Errorf("payload is not base64url: %w", err)
 	}
 	var sc scopeClaims
 	if err := json.Unmarshal(payloadJSON, &sc); err != nil {
-		return "", fmt.Errorf("payload is not JSON")
+		return "", fmt.Errorf("payload is not JSON: %w", err)
 	}
 	if sc.FilesystemID == "" {
 		return "", fmt.Errorf("subject token carries no filesystem_id")

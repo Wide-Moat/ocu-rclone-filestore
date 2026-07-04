@@ -24,6 +24,7 @@
 package brokerrpc
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -38,18 +39,18 @@ import (
 
 // ErrPermissionDenied is the sentinel for permission-denied outcomes
 // (HTTP 401 token expiry and HTTP 403 foreign scope both collapse here).
-var ErrPermissionDenied = fmt.Errorf("brokerrpc: permission denied")
+var ErrPermissionDenied = errors.New("brokerrpc: permission denied")
 
 // ErrInvalidArgument is the sentinel for permanent invalid-input errors
 // (HTTP 400 / 422; includes size-policy failures).
-var ErrInvalidArgument = fmt.Errorf("brokerrpc: invalid argument")
+var ErrInvalidArgument = errors.New("brokerrpc: invalid argument")
 
 // ErrNotFound is the sentinel for missing-object errors (HTTP 404; includes
 // the cross-scope anti-enumeration degrade — the client treats it uniformly).
-var ErrNotFound = fmt.Errorf("brokerrpc: not found")
+var ErrNotFound = errors.New("brokerrpc: not found")
 
 // ErrAlreadyExists is the sentinel for path-collision errors (HTTP 409).
-var ErrAlreadyExists = fmt.Errorf("brokerrpc: already exists")
+var ErrAlreadyExists = errors.New("brokerrpc: already exists")
 
 // maxRetryAfterSeconds bounds an accepted Retry-After hint. A value at or above
 // this (or non-finite) is treated as no usable hint: the error is still

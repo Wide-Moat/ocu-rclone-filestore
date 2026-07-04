@@ -48,7 +48,7 @@ func TestPerOpThrottle_RefusesOverBudgetBurstAndRecovers(t *testing.T) {
 	nowNanos.Store(time.Unix(1_700_000_000, 0).UnixNano())
 	clock := func() time.Time { return time.Unix(0, nowNanos.Load()) }
 
-	srv := NewServer(Options{
+	srv := MustNewServer(Options{
 		Scopes: []Scope{
 			{FilesystemID: throttleFSID, Root: throttleDir, ReadOnly: false},
 			{FilesystemID: rwFSID, Root: rwDir, ReadOnly: false},

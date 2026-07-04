@@ -144,18 +144,22 @@ func (s *Server) handleReadMetadata(w http.ResponseWriter, scope Scope, body com
 		writeMetaError(w, statErr)
 		return
 	}
+	// Pointer arms with omitempty so the ABSENT arm is dropped from the wire: a
+	// file response carries only {"file":{…}}, a directory only {"directory":{…}}
+	// — value structs would serialise an empty {"directory":{}} for a file (and
+	// vice versa), muddying the file-XOR-directory union the guest decodes.
 	resp := struct {
-		File      wireFile `json:"file"`
-		Directory wireDir  `json:"directory"`
+		File      *wireFile `json:"file,omitempty"`
+		Directory *wireDir  `json:"directory,omitempty"`
 	}{}
 	if info.IsDir() {
-		resp.Directory = wireDir{
+		resp.Directory = &wireDir{
 			Path:  rel,
 			Mode:  info.Mode().String(),
 			Mtime: info.ModTime().UTC().Format(time.RFC3339Nano),
 		}
 	} else {
-		resp.File = wireFile{
+		resp.File = &wireFile{
 			Path:  rel,
 			Size:  info.Size(),
 			Mtime: info.ModTime().UTC().Format(time.RFC3339Nano),

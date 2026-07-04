@@ -93,7 +93,7 @@ func run(addr, certPath, keyPath, caPath, credJWKSURL, root string) error {
 		}
 	}
 
-	srv := filestore.NewServer(filestore.Options{
+	srv, err := filestore.NewServer(filestore.Options{
 		Scopes: scopes,
 		Credentials: filestore.JWTCredentialValidator{
 			JWKS: credKeys, Issuer: credIssuer, Audience: credAudience,
@@ -106,6 +106,9 @@ func run(addr, certPath, keyPath, caPath, credJWKSURL, root string) error {
 			FilesystemID: fsThrottle, Rate: 2, Burst: 2,
 		},
 	})
+	if err != nil {
+		return fmt.Errorf("filestored: build server: %w", err)
+	}
 
 	tlsConf, err := serve.LoadServerTLS(certPath, keyPath)
 	if err != nil {

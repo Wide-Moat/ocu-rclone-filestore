@@ -94,10 +94,12 @@ func TestCopyClientErrorWrapped(t *testing.T) {
 	srcObj := &Object{fs: f, path: "/src.txt", remote: "src.txt", uuid: "u"}
 	got, err := f.Copy(context.Background(), srcObj, "dst.txt")
 	if err == nil {
-		t.Fatal("Copy with client error returned nil error, want a wrapped error")
+		t.Fatal("Copy with client error returned nil error, want a mapped error")
 	}
-	if !errors.Is(err, brokerrpc.ErrPermissionDenied) {
-		t.Errorf("Copy error = %v, want it to wrap brokerrpc.ErrPermissionDenied", err)
+	// The broker permission-denied is mapped to the rclone fs sentinel so rclone
+	// recognises it (mapBrokerError); it must no longer surface as an opaque error.
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("Copy error = %v, want it to map to fs.ErrorPermissionDenied", err)
 	}
 	if got != nil {
 		t.Errorf("Copy with client error returned object %v, want nil", got)
@@ -144,10 +146,10 @@ func TestMoveClientErrorWrapped(t *testing.T) {
 	srcObj := &Object{fs: f, path: "/src.txt", remote: "src.txt", uuid: "u"}
 	got, err := f.Move(context.Background(), srcObj, "dst.txt")
 	if err == nil {
-		t.Fatal("Move with client error returned nil error, want a wrapped error")
+		t.Fatal("Move with client error returned nil error, want a mapped error")
 	}
-	if !errors.Is(err, brokerrpc.ErrNotFound) {
-		t.Errorf("Move error = %v, want it to wrap brokerrpc.ErrNotFound", err)
+	if !errors.Is(err, fs.ErrorObjectNotFound) {
+		t.Errorf("Move error = %v, want it to map to fs.ErrorObjectNotFound", err)
 	}
 	if got != nil {
 		t.Errorf("Move with client error returned object %v, want nil", got)
@@ -196,10 +198,10 @@ func TestUpdateClientErrorWrapped(t *testing.T) {
 
 	err := obj.Update(context.Background(), bytes.NewReader([]byte("data!")), src)
 	if err == nil {
-		t.Fatal("Update with Upload error returned nil error, want a wrapped error")
+		t.Fatal("Update with Upload error returned nil error, want a mapped error")
 	}
-	if !errors.Is(err, brokerrpc.ErrPermissionDenied) {
-		t.Errorf("Update error = %v, want it to wrap brokerrpc.ErrPermissionDenied", err)
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("Update error = %v, want it to map to fs.ErrorPermissionDenied", err)
 	}
 	// On the error path the success-only state mutations must not run.
 	if obj.uuid != "keep-uuid" {
@@ -219,10 +221,10 @@ func TestRemoveClientErrorWrapped(t *testing.T) {
 	obj := &Object{fs: f, path: "/gone.txt", uuid: "u", size: 1}
 	err := obj.Remove(context.Background())
 	if err == nil {
-		t.Fatal("Remove with client error returned nil error, want a wrapped error")
+		t.Fatal("Remove with client error returned nil error, want a mapped error")
 	}
-	if !errors.Is(err, brokerrpc.ErrNotFound) {
-		t.Errorf("Remove error = %v, want it to wrap brokerrpc.ErrNotFound", err)
+	if !errors.Is(err, fs.ErrorObjectNotFound) {
+		t.Errorf("Remove error = %v, want it to map to fs.ErrorObjectNotFound", err)
 	}
 }
 
@@ -521,10 +523,10 @@ func TestRmdirClientErrorWrapped(t *testing.T) {
 
 	err := f.Rmdir(context.Background(), "olddir")
 	if err == nil {
-		t.Fatal("Rmdir with client error returned nil error, want a wrapped error")
+		t.Fatal("Rmdir with client error returned nil error, want a mapped error")
 	}
-	if !errors.Is(err, brokerrpc.ErrNotFound) {
-		t.Errorf("Rmdir error = %v, want it to wrap brokerrpc.ErrNotFound", err)
+	if !errors.Is(err, fs.ErrorObjectNotFound) {
+		t.Errorf("Rmdir error = %v, want it to map to fs.ErrorObjectNotFound", err)
 	}
 }
 

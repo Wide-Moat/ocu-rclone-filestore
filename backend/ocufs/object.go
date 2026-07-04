@@ -124,7 +124,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		return fs.ErrorPermissionDenied
 	}
 	if err := o.fs.client.Upload(ctx, o.path, in, src.Size(), true); err != nil {
-		return fmt.Errorf("ocufs: Update %q: %w", o.path, err)
+		return fmt.Errorf("ocufs: Update %q: %w", o.path, mapBrokerError(err))
 	}
 	// Clear uuid so the next access triggers the defensive fallback resolve
 	// (the upload ack carries no metadata). Update size optimistically from
@@ -143,7 +143,7 @@ func (o *Object) Remove(ctx context.Context) error {
 		return fs.ErrorPermissionDenied
 	}
 	if _, err := o.fs.client.RemoveFile(ctx, o.path); err != nil {
-		return fmt.Errorf("ocufs: Remove %q: %w", o.path, err)
+		return fmt.Errorf("ocufs: Remove %q: %w", o.path, mapBrokerError(err))
 	}
 	return nil
 }

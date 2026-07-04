@@ -83,13 +83,13 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// fresh forwarded request that never copies the inbound Authorization.)
 	cred, err := e.exchanger.Resolve(r.Context(), claims.FilesystemID, weak)
 	if err != nil {
-		http.Error(w, "exchange failed", http.StatusUnauthorized)
+		http.Error(w, fmt.Sprintf("exchange failed: %v", err), http.StatusUnauthorized)
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
 	if err != nil {
-		http.Error(w, "read request body", http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("read request body: %v", err), http.StatusBadRequest)
 		return
 	}
 	_ = r.Body.Close()

@@ -257,7 +257,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	// overwrite=false: Put is the create-new write path, so a colliding
 	// destination is a conflict rather than a silent in-place replacement.
 	if err := f.client.Upload(ctx, dstPath, in, src.Size(), false); err != nil {
-		return nil, fmt.Errorf("ocufs: Put %q: %w", dstPath, err)
+		return nil, fmt.Errorf("ocufs: Put %q: %w", dstPath, mapBrokerError(err))
 	}
 	// The upload response carries no metadata on the current wire contract;
 	// the returned Object is uuid-less. Object.resolve() is the defensive
@@ -288,7 +288,7 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 		if errors.Is(err, brokerrpc.ErrAlreadyExists) {
 			return nil
 		}
-		return fmt.Errorf("ocufs: Mkdir %q: %w", p, err)
+		return fmt.Errorf("ocufs: Mkdir %q: %w", p, mapBrokerError(err))
 	}
 	return nil
 }
@@ -302,7 +302,7 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 	p := f.absPath(dir)
 	_, err := f.client.RemoveDirectory(ctx, p)
 	if err != nil {
-		return fmt.Errorf("ocufs: Rmdir %q: %w", p, err)
+		return fmt.Errorf("ocufs: Rmdir %q: %w", p, mapBrokerError(err))
 	}
 	return nil
 }

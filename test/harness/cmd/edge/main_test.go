@@ -83,13 +83,13 @@ func fullChain(t *testing.T, ca *localca.CA) (cp *controlplane.Server, cpJWKS, e
 	if err != nil {
 		t.Fatalf("issuer: %v", err)
 	}
-	ex := exchange.NewServer(exchange.Options{
+	ex := exchange.MustNewServer(exchange.Options{
 		JWKS: cp, Issuer: cpIssuer, Audience: cpAudience, Credentials: issuer,
 	})
 	exSrv := tlsSrv(t, ca, ex.Handler())
 	exchangeURL = exSrv.URL + exchange.ExchangePath
 
-	fs := filestore.NewServer(filestore.Options{
+	fs := filestore.MustNewServer(filestore.Options{
 		Scopes:      []filestore.Scope{{FilesystemID: "fsrw", Root: t.TempDir(), ReadOnly: false}},
 		Credentials: filestore.JWTCredentialValidator{JWKS: issuer.JWKS(), Issuer: "https://exchange.test", Audience: "filestore"},
 	})

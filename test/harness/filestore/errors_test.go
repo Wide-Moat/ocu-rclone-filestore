@@ -297,7 +297,7 @@ func TestUnknownFilesystemIDForbidden(t *testing.T) {
 	// resolves subject==requested but the scope lookup misses, yielding 403.
 	uploadsDir := t.TempDir()
 	outputsDir := t.TempDir()
-	srv := NewServer(Options{
+	srv := MustNewServer(Options{
 		Scopes:      DefaultE2EScopes(uploadsDir, outputsDir, fsUploads, fsOutputs),
 		Credentials: StaticCredentialValidator{Credentials: map[string]string{"ghost": "fs-ghost"}},
 	})

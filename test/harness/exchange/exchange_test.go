@@ -49,7 +49,7 @@ func newPaired(t *testing.T) (*controlplane.Server, map[string]string, *httptest
 		t.Fatalf("control-plane: %v", err)
 	}
 	sink := map[string]string{}
-	ex := NewServer(Options{
+	ex := MustNewServer(Options{
 		JWKS:        cp,
 		Issuer:      issuer,
 		Audience:    audience,
@@ -165,7 +165,7 @@ func TestExchangeRejectsExpired(t *testing.T) {
 	cp, _, _ := newPaired(t)
 	// Mint with the fixed clock, then exchange under a clock far in the future.
 	weak, _ := cp.Mint("fs-outputs", "write", false)
-	ex := NewServer(Options{
+	ex := MustNewServer(Options{
 		JWKS:        cp,
 		Issuer:      issuer,
 		Audience:    audience,
@@ -226,7 +226,7 @@ func TestExchangeRejectsNonPost(t *testing.T) {
 func TestExchangeRejectsWrongAudience(t *testing.T) {
 	cp, _, _ := newPaired(t)
 	// Build an exchange that expects a different audience than the token carries.
-	ex := NewServer(Options{
+	ex := MustNewServer(Options{
 		JWKS:        cp,
 		Issuer:      issuer,
 		Audience:    "some-other-aud",
@@ -280,21 +280,26 @@ func TestMapCredentialIssuerConcurrent(t *testing.T) {
 	}
 }
 
-func TestNewServerPanicsOnMissingDeps(t *testing.T) {
+func TestNewServerErrorsOnMissingDeps(t *testing.T) {
 	cases := []Options{
-		{Credentials: &MapCredentialIssuer{Sink: map[string]string{}}},
-		{JWKS: staticJWKS{}},
+		{Credentials: &MapCredentialIssuer{Sink: map[string]string{}}}, // no JWKS
+		{JWKS: staticJWKS{}},                                            // no Credentials
 	}
 	for i, opts := range cases {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Fatalf("case %d: expected panic", i)
-				}
-			}()
-			_ = NewServer(opts)
-		}()
+		if _, err := NewServer(opts); err == nil {
+			t.Fatalf("case %d: expected an error for a missing dependency, got nil", i)
+		}
 	}
+
+	// MustNewServer panics on the same missing dependency.
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("MustNewServer with a missing dependency did not panic")
+			}
+		}()
+		_ = MustNewServer(Options{})
+	}()
 }
 
 func TestNewServerDefaultsClock(t *testing.T) {
@@ -303,7 +308,7 @@ func TestNewServerDefaultsClock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cp: %v", err)
 	}
-	ex := NewServer(Options{
+	ex := MustNewServer(Options{
 		JWKS:        cp,
 		Issuer:      issuer,
 		Audience:    audience,
@@ -322,7 +327,7 @@ func TestNewServerDefaultsClock(t *testing.T) {
 func TestTLSServerExposesCert(t *testing.T) {
 	_, _, _ = newPaired(t)
 	cp, _ := controlplane.NewServer(controlplane.Options{Issuer: issuer, Audience: audience, Kid: "k"})
-	ex := NewServer(Options{JWKS: cp, Issuer: issuer, Audience: audience, Credentials: &MapCredentialIssuer{Sink: map[string]string{}}})
+	ex := MustNewServer(Options{JWKS: cp, Issuer: issuer, Audience: audience, Credentials: &MapCredentialIssuer{Sink: map[string]string{}}})
 	ts, der := ex.TLSServer()
 	defer ts.Close()
 	if len(der) == 0 {

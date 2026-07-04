@@ -35,7 +35,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		"cred-uploads": fsUploads,
 		"cred-outputs": fsOutputs,
 	}
-	srv := NewServer(Options{
+	srv := MustNewServer(Options{
 		Scopes:      DefaultE2EScopes(uploadsDir, outputsDir, fsUploads, fsOutputs),
 		Credentials: StaticCredentialValidator{Credentials: creds},
 	})
@@ -407,7 +407,7 @@ func TestUploadZeroDeclaredSizeRejectsNonEmptyBody(t *testing.T) {
 func TestUploadThrottle(t *testing.T) {
 	uploadsDir := t.TempDir()
 	outputsDir := t.TempDir()
-	srv := NewServer(Options{
+	srv := MustNewServer(Options{
 		Scopes:        DefaultE2EScopes(uploadsDir, outputsDir, fsUploads, fsOutputs),
 		Credentials:   StaticCredentialValidator{Credentials: map[string]string{"c": fsOutputs}},
 		ThrottleEvery: 2,
@@ -432,13 +432,18 @@ func TestUploadThrottle(t *testing.T) {
 	}
 }
 
-func TestNewServerPanicsWithoutValidator(t *testing.T) {
+func TestNewServerErrorsWithoutValidator(t *testing.T) {
+	if _, err := NewServer(Options{}); err == nil {
+		t.Fatalf("expected an error for a nil validator, got nil")
+	}
+
+	// MustNewServer panics on the same missing validator.
 	defer func() {
 		if recover() == nil {
-			t.Fatalf("expected panic for nil validator")
+			t.Fatalf("MustNewServer without a validator did not panic")
 		}
 	}()
-	_ = NewServer(Options{})
+	_ = MustNewServer(Options{})
 }
 
 func TestRouteRejectsNonPost(t *testing.T) {
@@ -465,7 +470,7 @@ func TestTraversalGuard(t *testing.T) {
 }
 
 func TestTLSServerExposesCert(t *testing.T) {
-	srv := NewServer(Options{
+	srv := MustNewServer(Options{
 		Scopes:      []Scope{{FilesystemID: fsOutputs, Root: t.TempDir(), ReadOnly: false}},
 		Credentials: StaticCredentialValidator{Credentials: map[string]string{"c": fsOutputs}},
 	})

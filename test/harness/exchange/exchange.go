@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -101,15 +102,16 @@ type Server struct {
 	mux         *http.ServeMux
 }
 
-// NewServer constructs a Server. It panics if the JWKS provider or credential
-// issuer is missing: an exchange that cannot verify or cannot issue is useless
-// and would mask a wiring bug.
-func NewServer(opts Options) *Server {
+// NewServer constructs a Server. It returns an error if the JWKS provider or
+// credential issuer is missing: an exchange that cannot verify or cannot issue
+// is useless and would mask a wiring bug, but a library constructor should hand
+// that back to the caller rather than crash the process.
+func NewServer(opts Options) (*Server, error) {
 	if opts.JWKS == nil {
-		panic("exchange.NewServer: a JWKS provider is required")
+		return nil, errors.New("exchange.NewServer: a JWKS provider is required")
 	}
 	if opts.Credentials == nil {
-		panic("exchange.NewServer: a CredentialIssuer is required")
+		return nil, errors.New("exchange.NewServer: a CredentialIssuer is required")
 	}
 	now := opts.Now
 	if now == nil {
@@ -124,6 +126,16 @@ func NewServer(opts Options) *Server {
 	}
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc(ExchangePath, s.handleExchange)
+	return s, nil
+}
+
+// MustNewServer is the panic-on-error convenience wrapper for tests and wiring
+// where a missing dependency is a programming error that should fail fast.
+func MustNewServer(opts Options) *Server {
+	s, err := NewServer(opts)
+	if err != nil {
+		panic(err)
+	}
 	return s
 }
 
