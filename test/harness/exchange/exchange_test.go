@@ -287,7 +287,7 @@ func TestMapCredentialIssuerConcurrent(t *testing.T) {
 func TestNewServerErrorsOnMissingDeps(t *testing.T) {
 	cases := []Options{
 		{Credentials: &MapCredentialIssuer{Sink: map[string]string{}}}, // no JWKS
-		{JWKS: staticJWKS{}},                                            // no Credentials
+		{JWKS: staticJWKS{}}, // no Credentials
 	}
 	for i, opts := range cases {
 		if _, err := NewServer(opts); err == nil {

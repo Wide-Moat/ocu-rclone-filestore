@@ -37,15 +37,15 @@ type fakeClient struct {
 	listDirectoryAllCount    int
 	listDirectoryStreamCount int
 	readMetadataCount        int
-	downloadCount         int
-	downloadRangeCount    int
-	uploadCount           int
-	makeDirectoryCount    int
-	removeDirectoryCount  int
-	moveDirectoryCount    int
-	copyFileCount         int
-	moveFileCount         int
-	removeFileCount       int
+	downloadCount            int
+	downloadRangeCount       int
+	uploadCount              int
+	makeDirectoryCount       int
+	removeDirectoryCount     int
+	moveDirectoryCount       int
+	copyFileCount            int
+	moveFileCount            int
+	removeFileCount          int
 
 	// Stubs — set by individual tests to control returned values.
 	listDirectoryAllResult func(ctx context.Context, path string) ([]brokerrpc.ListDirEntry, error)
