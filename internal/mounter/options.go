@@ -82,15 +82,24 @@ func buildVFSOptions(m mountcfg.Mount, readOnly bool) (vfscommon.Options, error)
 
 // buildMountOptions maps one config mount to the FUSE mount options. The result
 // starts from a copy of the registered defaults (mountlib.Opt) so AttrTimeout,
-// MaxReadAhead, AsyncRead and the rest keep their sane defaults; only
-// AllowOther is overridden.
+// MaxReadAhead, AsyncRead and the rest keep their sane defaults; AllowOther and
+// AllowNonEmpty are overridden.
 //
 // AllowOther is set true so a non-root process serving the VFS can let other
-// uids read the mount. No config field controls this today; the choice is
-// pinned here and in the test.
+// uids read the mount.
+//
+// AllowNonEmpty is set true because the co-located guest image bakes the mount
+// destination as an empty scaffold (e.g. /mnt/user-data with empty outputs/ and
+// uploads/ subdirs). rclone's CheckAllowNonEmpty gate otherwise refuses to mount
+// over any non-empty directory to avoid shadowing data — but the scaffold holds
+// no files, so the FUSE mount shadows nothing. Without this the guest's managed
+// mount boot-child exits before its ready-file appears and the whole session
+// fails to serve. No config field controls either flag today; both are pinned
+// here and in the test.
 func buildMountOptions(_ mountcfg.Mount) (mountlib.Options, error) {
 	opt := mountlib.Opt // copy of the registered defaults
 	opt.AllowOther = true
+	opt.AllowNonEmpty = true
 	return opt, nil
 }
 
