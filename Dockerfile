@@ -77,6 +77,16 @@ COPY --from=builder /ocu-rclone-filestore /ocu-rclone-filestore
 # binary so the production mount path is untouched.
 COPY --from=builder /ocu-posture-probe /ocu-posture-probe
 
+# HOME is set so the rclone VFS disk-cache directory (os.UserCacheDir ->
+# $HOME/.cache) resolves onto the writable tmpfs the posture mounts at
+# /root/.cache, rather than a root-level /.cache the read-only rootfs rejects.
+# The distroless base sets no HOME, so without this the cache silently disables
+# and the SEC-46 hold-data-across-throttle path degrades. This is the image-level
+# half of the invariant; the binary re-establishes it defensively at startup
+# (EnsureWritableCacheDir) so a launch that drops this ENV still gets a writable
+# cache.
+ENV HOME=/root
+
 # The container is invoked as the mount binary; the host supplies --config and
 # optionally --ready-file (or OCU_READY_FILE) as args/env per the shipped
 # entrypoint contract. The transport is config-derived (service_url + ca_cert_pem

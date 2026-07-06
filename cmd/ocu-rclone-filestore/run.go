@@ -76,6 +76,16 @@ func runWith(args []string, stderr io.Writer, mount mountFunc) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	// Guarantee the VFS disk cache has a writable directory before any mount
+	// starts, independent of HOME/env. The hardened posture's read-only rootfs
+	// leaves only a tmpfs writable, and a missing HOME resolves the rclone cache
+	// dir onto a read-only root-level path where the disk cache silently disables
+	// (SEC-46 degrade). This binary-owned invariant redirects only when the
+	// resolved default is not writable; an already-writable dir is left as-is.
+	if err := mounter.EnsureWritableCacheDir(); err != nil {
+		return fmt.Errorf("ensure VFS cache dir: %w", err)
+	}
+
 	// This process owns signal handling: the orchestrator's channel below is
 	// the SOLE handler, and the clean-shutdown contract (ordered unmount of
 	// every mount, ready-file removal, return nil -> exit 0) depends on it.
