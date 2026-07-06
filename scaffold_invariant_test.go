@@ -28,7 +28,7 @@ func TestMountScaffoldStaysEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open Dockerfile: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// A COPY or ADD whose destination lands anywhere under the mount root. The
 	// scaffold is created only by mkdir; any COPY/ADD into it stages a file and
