@@ -194,6 +194,22 @@ func TestBuildMountOptionsAllowOther(t *testing.T) {
 	}
 }
 
+// TestBuildMountOptionsAllowNonEmpty pins AllowNonEmpty=true. The co-located
+// guest image bakes the mount destination as an empty scaffold (outputs/,
+// uploads/), so rclone's CheckAllowNonEmpty gate would otherwise refuse to mount
+// over it and the guest's mount boot-child would exit before its ready-file
+// appears — failing the whole session. Shadowing is safe: the scaffold holds no
+// files. Neuter the pin (drop opt.AllowNonEmpty = true) and this reds.
+func TestBuildMountOptionsAllowNonEmpty(t *testing.T) {
+	mopt, err := buildMountOptions(writableMount())
+	if err != nil {
+		t.Fatalf("buildMountOptions: %v", err)
+	}
+	if !mopt.AllowNonEmpty {
+		t.Errorf("AllowNonEmpty = false; want true (guest bakes an empty mount scaffold; the FUSE mount must tolerate it)")
+	}
+}
+
 func TestBuildOcufsConfigmap(t *testing.T) {
 	m := writableMount()
 	cm, err := buildOcufsConfigmap(m, false, "https://broker.internal", "pem-bytes")
