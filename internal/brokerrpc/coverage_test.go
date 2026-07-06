@@ -255,15 +255,13 @@ func TestSourceChunkSizeFloorIsThree(t *testing.T) {
 	if got := sourceChunkSize(1); got != 3 {
 		t.Errorf("sourceChunkSize(1): got %d, want 3 (floor)", got)
 	}
-	if got := sourceChunkSize(jsonEnvelopeOverhead); got != 3 {
-		t.Errorf("sourceChunkSize(overhead): got %d, want 3 (floor)", got)
+	if got := sourceChunkSize(2); got != 3 {
+		t.Errorf("sourceChunkSize(2): got %d, want 3 (floor)", got)
 	}
-	big := sourceChunkSize(64 * 1024)
-	if big%3 != 0 {
-		t.Errorf("sourceChunkSize must be a multiple of 3; got %d", big)
-	}
-	if big <= 3 {
-		t.Errorf("a large ceiling should give a chunk well above the floor; got %d", big)
+	// The file part now streams raw bytes, so the chunk is simply the ceiling
+	// once above the floor — no base64 or JSON-envelope arithmetic.
+	if got := sourceChunkSize(64 * 1024); got != 64*1024 {
+		t.Errorf("sourceChunkSize(64KiB): got %d, want %d (flat ceiling)", got, 64*1024)
 	}
 }
 
@@ -388,24 +386,50 @@ func TestListFilesAllCallErrorSurfaces(t *testing.T) {
 }
 
 // TestDownloadOversizedBodyIsError drives the download cap branch: a body over
-// the cap is rejected rather than read unbounded. A small body under the cap is
-// the control. We cannot cheaply stream 16 GiB, so this asserts the bound logic
-// via a normal-sized success and documents the cap constant.
+// the cap is rejected rather than read unbounded, while a body under the cap
+// round-trips. The 16 GiB production cap cannot be streamed cheaply, so the
+// over-cap arm exercises the same boundedBody logic Download returns, with a
+// tiny limit — a real assertion, not a documented placeholder.
 func TestDownloadOversizedBodyIsError(t *testing.T) {
-	if maxDownloadBytes <= 0 {
-		t.Fatal("maxDownloadBytes must be a positive cap")
+	if defaultMaxDownloadBytes <= 0 {
+		t.Fatal("defaultMaxDownloadBytes must be a positive cap")
 	}
-	// Control: a normal body under the cap round-trips.
+
+	// Control: a normal body under the cap round-trips through the real client.
 	c, _ := newTLSTestClient(t, "fs-dl-ok", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("small body"))
 	})
-	got, err := c.Download(context.Background(), "uuid")
+	rc, err := c.Download(context.Background(), "uuid")
 	if err != nil {
 		t.Fatalf("Download under cap: %v", err)
 	}
+	got, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil {
+		t.Fatalf("Download under cap read: %v", err)
+	}
 	if string(got) != "small body" {
 		t.Errorf("got %q, want %q", got, "small body")
+	}
+
+	// Over-cap: a whole-object stream that carries more bytes than the bound
+	// must fail on read rather than deliver unbounded content. boundedBody with
+	// strict=true is exactly what Download returns on the full-read path.
+	over := newBoundedBody(io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("A"), 100))), true, 10)
+	if _, err := io.ReadAll(over); err == nil {
+		t.Error("over-cap whole-object stream must fail on read, got no error")
+	}
+
+	// A ranged stream (strict=false) over-delivering is truncated to the window,
+	// not errored: the caller asked for a fixed byte count.
+	ranged := newBoundedBody(io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("B"), 100))), false, 10)
+	rangedGot, err := io.ReadAll(ranged)
+	if err != nil {
+		t.Fatalf("ranged over-delivery must truncate, not error: %v", err)
+	}
+	if len(rangedGot) != 10 {
+		t.Errorf("ranged stream = %d bytes, want 10 (truncated to window)", len(rangedGot))
 	}
 }

@@ -63,9 +63,14 @@ func TestConcurrentOpsOneSharedClient(t *testing.T) {
 		g.Go(func() error {
 			switch i % 3 {
 			case 0:
-				got, err := c.Download(ctx, fmt.Sprintf("uuid-%d", i))
+				rc, err := c.Download(ctx, fmt.Sprintf("uuid-%d", i))
 				if err != nil {
 					return fmt.Errorf("Download #%d: %w", i, err)
+				}
+				got, rErr := io.ReadAll(rc)
+				_ = rc.Close()
+				if rErr != nil {
+					return fmt.Errorf("Download #%d read: %w", i, rErr)
 				}
 				if !bytes.Equal(got, []byte("DL-payload")) {
 					return fmt.Errorf("Download #%d: got %q", i, got)

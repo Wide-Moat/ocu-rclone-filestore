@@ -113,6 +113,21 @@ func TestCopyMoveConflictAndMissingSource(t *testing.T) {
 		t.Fatalf("movedir missing source: got %d want 404", resp.StatusCode)
 	}
 	_ = resp.Body.Close()
+
+	// Move a directory onto an existing destination without overwrite is a
+	// conflict, mirroring moveFile — without the OverwriteExisting guard this
+	// would silently clobber the destination.
+	for _, d := range []string{"/src-dir", "/dst-existing"} {
+		r := e.post(t, e.outputsCred, string(opMakeDirectory), jsonBody(fsOutputs, "write", map[string]any{"path": d}))
+		_ = r.Body.Close()
+	}
+	resp = e.post(t, e.outputsCred, string(opMoveDirectory), jsonBody(fsOutputs, "write", map[string]any{
+		"source": "/src-dir", "destination": "/dst-existing", "overwrite_existing": false,
+	}))
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("movedir conflict: got %d want 409", resp.StatusCode)
+	}
+	_ = resp.Body.Close()
 }
 
 func TestCopyMoveMkdirParentFails(t *testing.T) {
@@ -282,7 +297,7 @@ func TestUnknownFilesystemIDForbidden(t *testing.T) {
 	// resolves subject==requested but the scope lookup misses, yielding 403.
 	uploadsDir := t.TempDir()
 	outputsDir := t.TempDir()
-	srv := NewServer(Options{
+	srv := MustNewServer(Options{
 		Scopes:      DefaultE2EScopes(uploadsDir, outputsDir, fsUploads, fsOutputs),
 		Credentials: StaticCredentialValidator{Credentials: map[string]string{"ghost": "fs-ghost"}},
 	})

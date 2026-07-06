@@ -81,6 +81,7 @@ Top-level:
 | `service_url` | literal `https://` prefix, then a parseable URI (`Reason` says which failed) | `ErrServiceURL` |
 | `ca_cert_pem` | non-empty | `ErrMissingField` |
 | `mounts` | key present (nil slice rejected) | `ErrMissingField` |
+| `backend_cache_ttl` | optional; accepted but not consumed by the guest (decoded only so strict decode and the frozen schema reach the same accept verdict) | — |
 | any field | unknown to the guest shape, or malformed JSON | `ErrDecode` |
 
 `ErrDecode` implements `Unwrap`, so the underlying `json` error stays reachable.

@@ -20,8 +20,10 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"time"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/jwtmint"
@@ -50,19 +52,28 @@ type CredentialIssuer interface {
 
 // MapCredentialIssuer issues random opaque credentials and records them into a
 // shared map (the filestore peer's StaticCredentialValidator.Credentials),
-// keyed by credential value to bound filesystem_id.
+// keyed by credential value to bound filesystem_id. Its Issue method runs
+// concurrently from HTTP handlers, so it must be used by pointer (&MapCredentialIssuer{…})
+// — the embedded mutex guards the map write against concurrent-map-write panics.
 type MapCredentialIssuer struct {
+	// mu guards writes to Sink so overlapping edge exchanges do not race on the
+	// map. Use MapCredentialIssuer by pointer so all handlers share one mutex.
+	mu sync.Mutex
 	// Sink is the credential->filesystem_id map the filestore peer reads. The
-	// issuer writes new entries into it.
+	// issuer writes new entries into it under mu.
 	Sink map[string]string
 }
 
 // Issue records a fresh random credential bound to filesystemID in the sink.
-func (m MapCredentialIssuer) Issue(filesystemID string) string {
+// The map write is mutex-guarded because Issue is called concurrently from the
+// exchange HTTP handlers.
+func (m *MapCredentialIssuer) Issue(filesystemID string) string {
 	buf := make([]byte, 24)
 	_, _ = rand.Read(buf)
 	cred := base64.RawURLEncoding.EncodeToString(buf)
+	m.mu.Lock()
 	m.Sink[cred] = filesystemID
+	m.mu.Unlock()
 	return cred
 }
 
@@ -91,15 +102,16 @@ type Server struct {
 	mux         *http.ServeMux
 }
 
-// NewServer constructs a Server. It panics if the JWKS provider or credential
-// issuer is missing: an exchange that cannot verify or cannot issue is useless
-// and would mask a wiring bug.
-func NewServer(opts Options) *Server {
+// NewServer constructs a Server. It returns an error if the JWKS provider or
+// credential issuer is missing: an exchange that cannot verify or cannot issue
+// is useless and would mask a wiring bug, but a library constructor should hand
+// that back to the caller rather than crash the process.
+func NewServer(opts Options) (*Server, error) {
 	if opts.JWKS == nil {
-		panic("exchange.NewServer: a JWKS provider is required")
+		return nil, errors.New("exchange.NewServer: a JWKS provider is required")
 	}
 	if opts.Credentials == nil {
-		panic("exchange.NewServer: a CredentialIssuer is required")
+		return nil, errors.New("exchange.NewServer: a CredentialIssuer is required")
 	}
 	now := opts.Now
 	if now == nil {
@@ -114,6 +126,16 @@ func NewServer(opts Options) *Server {
 	}
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc(ExchangePath, s.handleExchange)
+	return s, nil
+}
+
+// MustNewServer is the panic-on-error convenience wrapper for tests and wiring
+// where a missing dependency is a programming error that should fail fast.
+func MustNewServer(opts Options) *Server {
+	s, err := NewServer(opts)
+	if err != nil {
+		panic(err)
+	}
 	return s
 }
 

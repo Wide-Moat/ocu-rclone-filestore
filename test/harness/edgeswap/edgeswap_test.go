@@ -185,14 +185,14 @@ func newChain(t *testing.T) *chain {
 	// The exchange issues credentials into this sink; the filestore validates
 	// against it. The same shared map is the seam the swap rides on.
 	sink := map[string]string{}
-	ex := exchange.NewServer(exchange.Options{
+	ex := exchange.MustNewServer(exchange.Options{
 		JWKS: cp, Issuer: issuer, Audience: audience,
-		Credentials: exchange.MapCredentialIssuer{Sink: sink}, Now: fixedNow,
+		Credentials: &exchange.MapCredentialIssuer{Sink: sink}, Now: fixedNow,
 	})
 	exSrv := httptest.NewServer(ex.Handler())
 	t.Cleanup(exSrv.Close)
 
-	fs := filestore.NewServer(filestore.Options{
+	fs := filestore.MustNewServer(filestore.Options{
 		Scopes: []filestore.Scope{
 			{FilesystemID: rwFSID, Root: rwDir, ReadOnly: false},
 			{FilesystemID: roFSID, Root: roDir, ReadOnly: true},

@@ -54,6 +54,31 @@ jobs:
           fi
           echo "all tracked Go files are gofmt-clean"
 
+  go-mod-tidy:
+    name: go mod tidy (modules must be tidy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify go.mod/go.sum are tidy
+        # A drifting go.mod/go.sum (a stale require, a missing sum, a dep that
+        # moved test-only) causes module-resolution surprises and irreproducible
+        # builds. Run tidy and fail if it changes anything, so the committed
+        # module files always match the actual import graph.
+        run: |
+          set -euo pipefail
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "::error::go.mod/go.sum are not tidy; run 'go mod tidy' and commit the result"
+            exit 1
+          fi
+          echo "go.mod/go.sum are tidy"
+
   golangci-lint:
     name: golangci-lint
     runs-on: ubuntu-latest

@@ -40,7 +40,7 @@ while IFS= read -r f; do
   if ! head -n 10 "${f}" | grep -qF "${HEADER}"; then
     missing+=("${f}")
   fi
-done < <(git ls-files '*.go' '*.sh' '*.yml')
+done < <(git ls-files '*.go' '*.sh' '*.yml' '*.yaml' 'Dockerfile' '*.Dockerfile')
 
 if [[ ${#missing[@]} -gt 0 ]]; then
   echo "error: the following authored file(s) are missing the FSL header line:" >&2
@@ -49,5 +49,5 @@ if [[ ${#missing[@]} -gt 0 ]]; then
   exit 1
 fi
 
-echo "ok: all authored *.go/*.sh/*.yml files carry the FSL header (vendored schema exempt)."
+echo "ok: all authored *.go/*.sh/*.yml/*.yaml/Dockerfile files carry the FSL header (vendored schema exempt)."
 exit 0

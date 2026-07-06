@@ -5,9 +5,11 @@
 package ocufs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,15 +36,15 @@ type fakeOpenClient struct {
 	calls []openCallRecord
 }
 
-func (f *fakeOpenClient) DownloadRange(ctx context.Context, uuid string, offset, length int64) ([]byte, error) {
+func (f *fakeOpenClient) DownloadRange(ctx context.Context, uuid string, offset, length int64) (io.ReadCloser, error) {
 	f.calls = append(f.calls, openCallRecord{uuid: uuid, offset: offset, length: length})
-	// Return a slice of the expected length so the test can verify byte count.
-	return make([]byte, length), nil
+	// Return a reader of the expected length so the test can verify byte count.
+	return io.NopCloser(bytes.NewReader(make([]byte, length))), nil
 }
 
-func (f *fakeOpenClient) Download(ctx context.Context, uuid string) ([]byte, error) {
+func (f *fakeOpenClient) Download(ctx context.Context, uuid string) (io.ReadCloser, error) {
 	f.calls = append(f.calls, openCallRecord{uuid: uuid, full: true})
-	return make([]byte, 1000), nil
+	return io.NopCloser(bytes.NewReader(make([]byte, 1000))), nil
 }
 
 // objectWithSize is a helper that builds a List-derived Object with a known
@@ -340,4 +342,48 @@ func TestListDerivedObjectOpenNoResolve(t *testing.T) {
 	if c.lastDownloadRangeLength != 50 { // End(49) - Start(0) + 1 = 50
 		t.Errorf("DownloadRange length = %d, want 50 (inclusive-End)", c.lastDownloadRangeLength)
 	}
+}
+
+// TestObjectResolveConcurrentNoRace hammers ModTime, Size, and Open concurrently
+// on a single uuid-less (ack-only) Object. resolve() and the accessors all touch
+// the lazily-resolved fields, so without mu this fans a data race that -race
+// flags; with mu the run is clean. The point of this test IS the -race run.
+func TestObjectResolveConcurrentNoRace(t *testing.T) {
+	c := &fakeClient{}
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		return &brokerrpc.ReadMetadataResponse{
+			File: brokerrpc.File{
+				UUID:  "resolved-uuid",
+				Size:  128,
+				Path:  path,
+				Mtime: "2026-01-01T00:00:00Z",
+			},
+		}, nil
+	}
+	f := newTestFs(t, c, false)
+
+	// A single ack-only Object shared across goroutines: uuid empty forces the
+	// first accessor to resolve() and race the others reading the fields.
+	obj := &Object{fs: f, path: "/docs/file.bin"}
+
+	const workers = 24
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			switch i % 3 {
+			case 0:
+				_ = obj.ModTime(context.Background())
+			case 1:
+				_ = obj.Size()
+			default:
+				if rc, err := obj.Open(context.Background()); err == nil {
+					_, _ = io.ReadAll(rc)
+					_ = rc.Close()
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
 }

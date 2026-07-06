@@ -33,7 +33,8 @@ proxies nothing, exposes no HTTP/S3 facade.
 | Knob | Note | Source |
 |---|---|---|
 | VFS cache mode | per-mount, direction-appropriate (read-only mounts cache aggressively; writable mounts bound write-back) | mount-config contract (`vfs_cache_mode`) |
-| Backend cache TTL | per-mount | mount-config contract (`backend_cache_ttl`, `cache_duration_s`) |
+| VFS cache duration | per-mount | mount-config contract (`cache_duration_s`) |
+| Backend cache TTL | top-level, accepted but not consumed by the guest (kept so strict decode and the frozen schema agree) | mount-config contract (`backend_cache_ttl`) |
 | Dir/file permissions | per-mount | mount-config contract (`dir_perms`, `file_perms`) |
 | VFS cache size ceiling | per-mount | mount-config contract (`vfs_cache_max_size`) |
 

@@ -52,12 +52,12 @@ func FuzzDownloadBodyRead(f *testing.F) {
 	f.Add([]byte{0x00, 0xFF, 0x7F, 0x80})
 
 	f.Fuzz(func(t *testing.T, body []byte) {
-		got, err := io.ReadAll(io.LimitReader(bytes.NewReader(body), maxDownloadBytes+1))
+		got, err := io.ReadAll(io.LimitReader(bytes.NewReader(body), defaultMaxDownloadBytes+1))
 		if err != nil {
 			t.Fatalf("bounded read of an in-memory body must not error: %v", err)
 		}
-		if int64(len(got)) > maxDownloadBytes {
-			t.Fatalf("read %d bytes exceeds the cap %d", len(got), maxDownloadBytes)
+		if int64(len(got)) > defaultMaxDownloadBytes {
+			t.Fatalf("read %d bytes exceeds the cap %d", len(got), defaultMaxDownloadBytes)
 		}
 		if !bytes.Equal(got, body) {
 			t.Fatalf("bounded read did not round-trip: %d vs %d bytes", len(got), len(body))

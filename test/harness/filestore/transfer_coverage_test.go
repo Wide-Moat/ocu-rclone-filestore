@@ -16,7 +16,7 @@ import (
 // happy paths plus a couple of error arms, against the real server.
 func TestUploadAndDownloadArms(t *testing.T) {
 	root := t.TempDir()
-	srv := NewServer(Options{
+	srv := MustNewServer(Options{
 		Scopes:      []Scope{{FilesystemID: "fsrw", Root: root, ReadOnly: false}},
 		Credentials: StaticCredentialValidator{Credentials: map[string]string{"rw-cred": "fsrw"}},
 	})

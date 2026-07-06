@@ -16,7 +16,7 @@ import (
 func opServer(t *testing.T) (*Server, string) {
 	t.Helper()
 	root := t.TempDir()
-	srv := NewServer(Options{
+	srv := MustNewServer(Options{
 		Scopes:      []Scope{{FilesystemID: "fsrw", Root: root, ReadOnly: false}},
 		Credentials: StaticCredentialValidator{Credentials: map[string]string{"rw-cred": "fsrw"}},
 	})

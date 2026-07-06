@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -69,8 +70,24 @@ func CAClient(caPath string) (*http.Client, error) {
 // Run serves handler over TLS on addr until the process is signalled. It blocks;
 // a serve error other than the clean shutdown sentinel is returned.
 func Run(addr string, tlsConf *tls.Config, handler http.Handler) error {
+	return RunContext(context.Background(), addr, tlsConf, handler, nil)
+}
+
+// RunContext serves handler over TLS on addr and blocks until ctx is cancelled
+// (clean shutdown) or the server fails. It binds the listener up front, so
+// passing "127.0.0.1:0" yields a real ephemeral port with NO bind-close-reuse
+// gap; the bound address is reported to onReady (if non-nil) once the listener
+// is live, letting a caller learn the port without racing a separate probe bind.
+// A ctx cancellation triggers a graceful shutdown and returns nil.
+func RunContext(ctx context.Context, addr string, tlsConf *tls.Config, handler http.Handler, onReady func(net.Addr)) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("serve %q: listen: %w", addr, err)
+	}
+	if onReady != nil {
+		onReady(ln.Addr())
+	}
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           handler,
 		TLSConfig:         tlsConf,
 		ReadHeaderTimeout: 30 * time.Second,
@@ -78,12 +95,20 @@ func Run(addr string, tlsConf *tls.Config, handler http.Handler) error {
 	errCh := make(chan error, 1)
 	go func() {
 		// The cert+key are already in TLSConfig, so the empty path args are unused.
-		errCh <- srv.ListenAndServeTLS("", "")
+		errCh <- srv.ServeTLS(ln, "", "")
 	}()
-	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("serve %q: %w", addr, err)
+	select {
+	case <-ctx.Done():
+		// Graceful shutdown on cancellation; ServeTLS then returns ErrServerClosed.
+		_ = srv.Close()
+		<-errCh
+		return nil
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve %q: %w", addr, err)
+		}
+		return nil
 	}
-	return nil
 }
 
 // FetchJWKS GETs a JWKS document from url using client and returns the raw
@@ -113,6 +138,12 @@ func FetchJWKS(ctx context.Context, client *http.Client, url string, within time
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("serve: JWKS %q never reachable within %s: %w", url, within, lastErr)
 		}
-		time.Sleep(500 * time.Millisecond)
+		// Back off before the next poll, but abort immediately if the context is
+		// cancelled rather than sleeping the full interval past cancellation.
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, fmt.Errorf("serve: JWKS %q wait cancelled: %w", url, ctx.Err())
+		}
 	}
 }

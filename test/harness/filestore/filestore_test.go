@@ -35,7 +35,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		"cred-uploads": fsUploads,
 		"cred-outputs": fsOutputs,
 	}
-	srv := NewServer(Options{
+	srv := MustNewServer(Options{
 		Scopes:      DefaultE2EScopes(uploadsDir, outputsDir, fsUploads, fsOutputs),
 		Credentials: StaticCredentialValidator{Credentials: creds},
 	})
@@ -51,7 +51,7 @@ func (e *testEnv) post(t *testing.T, cred, opName string, body any) *http.Respon
 	if err != nil {
 		t.Fatalf("marshal body: %v", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, e.ts.URL+restBase+opName, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, e.ts.URL+restBase+opName, bytes.NewReader(raw))
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -372,10 +372,42 @@ func TestUploadDeclaredSizeMismatch(t *testing.T) {
 	}
 }
 
+// TestUploadZeroDeclaredSizeRejectsNonEmptyBody pins the size-match fix: a body
+// streamed against declared_size_bytes=0 must be rejected, not silently
+// accepted. Before the fix the size check was skipped whenever the declared size
+// was 0, so a non-empty stream slipped through against a 0 declaration.
+func TestUploadZeroDeclaredSizeRejectsNonEmptyBody(t *testing.T) {
+	e := newTestEnv(t)
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	params := map[string]any{
+		"filesystem_id":          fsOutputs,
+		"path":                   "/zero-decl.bin",
+		"declared_size_bytes":    0,
+		"authorization_metadata": map[string]any{"intent": "write", "downloadable": false},
+	}
+	raw, _ := json.Marshal(params)
+	_ = mw.WriteField("params", string(raw))
+	fp, _ := mw.CreateFormFile("file", "upload")
+	_, _ = fp.Write([]byte("not empty")) // 9 bytes against a declared 0
+	_ = mw.Close()
+	req, _ := http.NewRequest(http.MethodPost, e.ts.URL+restBase+string(opFileUpload), &buf)
+	req.Header.Set("Authorization", "Bearer "+e.outputsCred)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("non-empty body against declared 0: got %d want 422", resp.StatusCode)
+	}
+}
+
 func TestUploadThrottle(t *testing.T) {
 	uploadsDir := t.TempDir()
 	outputsDir := t.TempDir()
-	srv := NewServer(Options{
+	srv := MustNewServer(Options{
 		Scopes:        DefaultE2EScopes(uploadsDir, outputsDir, fsUploads, fsOutputs),
 		Credentials:   StaticCredentialValidator{Credentials: map[string]string{"c": fsOutputs}},
 		ThrottleEvery: 2,
@@ -400,13 +432,18 @@ func TestUploadThrottle(t *testing.T) {
 	}
 }
 
-func TestNewServerPanicsWithoutValidator(t *testing.T) {
+func TestNewServerErrorsWithoutValidator(t *testing.T) {
+	if _, err := NewServer(Options{}); err == nil {
+		t.Fatalf("expected an error for a nil validator, got nil")
+	}
+
+	// MustNewServer panics on the same missing validator.
 	defer func() {
 		if recover() == nil {
-			t.Fatalf("expected panic for nil validator")
+			t.Fatalf("MustNewServer without a validator did not panic")
 		}
 	}()
-	_ = NewServer(Options{})
+	_ = MustNewServer(Options{})
 }
 
 func TestRouteRejectsNonPost(t *testing.T) {
@@ -433,7 +470,7 @@ func TestTraversalGuard(t *testing.T) {
 }
 
 func TestTLSServerExposesCert(t *testing.T) {
-	srv := NewServer(Options{
+	srv := MustNewServer(Options{
 		Scopes:      []Scope{{FilesystemID: fsOutputs, Root: t.TempDir(), ReadOnly: false}},
 		Credentials: StaticCredentialValidator{Credentials: map[string]string{"c": fsOutputs}},
 	})

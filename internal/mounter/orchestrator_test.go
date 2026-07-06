@@ -235,9 +235,18 @@ func TestOrchestratorReadinessOrdering(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- o.run(context.Background(), cfg) }()
 
-	// Give the orchestrator time to start the first point and block on the
-	// second; the ready-file must NOT exist while the last point is pending.
-	time.Sleep(100 * time.Millisecond)
+	// Poll until the orchestrator has STARTED both points (the fake bumps
+	// mountCount before the last point blocks on releaseReady), rather than
+	// sleeping a fixed interval and hoping the scheduler reached that state. At
+	// this point the last point is provably pending, so the ready-file must not
+	// exist yet.
+	deadline := time.Now().Add(2 * time.Second)
+	for fake.mountCount() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("orchestrator never started both points")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	if _, statErr := os.Stat(readyFile); !os.IsNotExist(statErr) {
 		t.Fatalf("ready-file exists before the last point is ready; want absent")
 	}

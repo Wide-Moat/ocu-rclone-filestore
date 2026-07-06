@@ -21,6 +21,7 @@ package filestore
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -141,12 +142,13 @@ type Server struct {
 	perOpBucket *tokenBucket
 }
 
-// NewServer constructs a Server from the given options. It panics on a missing
-// credential validator: a peer that accepts unvalidated requests would defeat
-// the test's entire point.
-func NewServer(opts Options) *Server {
+// NewServer constructs a Server from the given options. It returns an error on
+// a missing credential validator: a peer that accepts unvalidated requests would
+// defeat the test's entire point, but a library constructor should return that
+// to the caller rather than crash the process.
+func NewServer(opts Options) (*Server, error) {
 	if opts.Credentials == nil {
-		panic("filestore.NewServer: a CredentialValidator is required")
+		return nil, errors.New("filestore.NewServer: a CredentialValidator is required")
 	}
 	s := &Server{
 		scopes:        make(map[string]Scope, len(opts.Scopes)),
@@ -162,6 +164,16 @@ func NewServer(opts Options) *Server {
 	}
 	s.mux = http.NewServeMux()
 	s.mux.HandleFunc(restBase, s.route)
+	return s, nil
+}
+
+// MustNewServer is the panic-on-error convenience wrapper for tests and wiring
+// where a missing dependency is a programming error that should fail fast.
+func MustNewServer(opts Options) *Server {
+	s, err := NewServer(opts)
+	if err != nil {
+		panic(err)
+	}
 	return s
 }
 

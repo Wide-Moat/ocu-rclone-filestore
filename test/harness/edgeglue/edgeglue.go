@@ -143,10 +143,16 @@ func (e *Exchanger) Resolve(ctx context.Context, filesystemID, weakJWT string) (
 	}
 	// If an exchange for this scope is already in flight, wait for it rather than
 	// launching a second one: one exchange per session even under a stampede.
+	// Respect context cancellation while waiting so a caller that gives up (or a
+	// cancelled request) is not pinned to the leader's whole round trip.
 	if fl, ok := e.inflight[filesystemID]; ok {
 		e.mu.Unlock()
-		<-fl.done
-		return fl.cred, fl.err
+		select {
+		case <-fl.done:
+			return fl.cred, fl.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 	// This goroutine owns the exchange for this scope.
 	fl := &flight{done: make(chan struct{})}
@@ -228,11 +234,11 @@ func filesystemIDClaim(token string) (string, error) {
 	}
 	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "", fmt.Errorf("payload is not base64url")
+		return "", fmt.Errorf("payload is not base64url: %w", err)
 	}
 	var sc scopeClaims
 	if err := json.Unmarshal(payloadJSON, &sc); err != nil {
-		return "", fmt.Errorf("payload is not JSON")
+		return "", fmt.Errorf("payload is not JSON: %w", err)
 	}
 	if sc.FilesystemID == "" {
 		return "", fmt.Errorf("subject token carries no filesystem_id")

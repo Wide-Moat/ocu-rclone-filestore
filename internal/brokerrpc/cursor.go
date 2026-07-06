@@ -51,19 +51,19 @@ type listDirectoryPageRequest struct {
 	Cursor                OpaqueCursor          `json:"cursor,omitempty"`
 }
 
-// ListDirectoryAll performs recursive listDirectory paging, echoing the
-// opaque cursor across pages, and returns the full accumulated entry list.
-// The returned []ListDirEntry reflects the pinned union shape (file XOR
-// directory per D6); the published return type was raised from []Directory in
-// Phase 3. This is a response-decoder correction only — no new transport,
-// op, or auth path was added (SEC-25).
-func (c *Client) ListDirectoryAll(ctx context.Context, path string) ([]ListDirEntry, error) {
+// ListDirectoryStream performs recursive listDirectory paging, echoing the
+// opaque cursor across pages, and invokes yield once per entry AS EACH PAGE
+// ARRIVES. It never accumulates the full recursive tree in memory: a caller
+// that only wants a depth-1 slice (Fs.List) can filter inside yield and keep
+// just the survivors, so a huge recursive listing does not force a monolithic
+// allocation inside the guest. A yield that returns a non-nil error stops
+// pagination and surfaces that error to the caller.
+func (c *Client) ListDirectoryStream(ctx context.Context, path string, yield func(ListDirEntry) error) error {
 	fsID, am, err := c.stamp(OpListDirectory)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var all []ListDirEntry
 	var cursor OpaqueCursor
 
 	for {
@@ -76,10 +76,14 @@ func (c *Client) ListDirectoryAll(ctx context.Context, path string) ([]ListDirEn
 
 		var resp listDirectoryPageResponse
 		if err := c.call(ctx, OpListDirectory, req, &resp); err != nil {
-			return nil, fmt.Errorf("brokerrpc: ListDirectoryAll: %w", err)
+			return fmt.Errorf("brokerrpc: ListDirectoryAll: %w", err)
 		}
 
-		all = append(all, resp.Entries...)
+		for _, e := range resp.Entries {
+			if err := yield(e); err != nil {
+				return err
+			}
+		}
 
 		if resp.Cursor == "" {
 			break
@@ -88,11 +92,29 @@ func (c *Client) ListDirectoryAll(ctx context.Context, path string) ([]ListDirEn
 		// the listing is not advancing. Without this, a broker bug would spin
 		// this loop forever with unbounded memory growth inside the mount.
 		if cursor != "" && resp.Cursor == cursor {
-			return nil, fmt.Errorf("brokerrpc: ListDirectoryAll: cursor did not advance (%q) — aborting non-progressing pagination", string(resp.Cursor))
+			return fmt.Errorf("brokerrpc: ListDirectoryAll: cursor did not advance (%q) — aborting non-progressing pagination", string(resp.Cursor))
 		}
 		cursor = resp.Cursor
 	}
 
+	return nil
+}
+
+// ListDirectoryAll is the buffering convenience wrapper over
+// ListDirectoryStream: it collects every entry into one slice and returns it.
+// Callers that can process entries incrementally should prefer the stream form
+// so a large recursive listing is never held whole. The returned []ListDirEntry
+// reflects the pinned union shape (file XOR directory per D6); the published
+// return type was raised from []Directory in Phase 3. This is a response-decoder
+// correction only — no new transport, op, or auth path was added (SEC-25).
+func (c *Client) ListDirectoryAll(ctx context.Context, path string) ([]ListDirEntry, error) {
+	var all []ListDirEntry
+	if err := c.ListDirectoryStream(ctx, path, func(e ListDirEntry) error {
+		all = append(all, e)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	return all, nil
 }
 
@@ -115,15 +137,16 @@ type listFilesPageRequest struct {
 	AfterUUID             OpaqueCursor          `json:"after_uuid,omitempty"`
 }
 
-// ListFilesAll performs uuid-paginated listFiles paging, echoing the opaque
-// after_uuid cursor across pages, and returns the full accumulated file list.
-func (c *Client) ListFilesAll(ctx context.Context, uuid string) ([]FilesystemFile, error) {
+// ListFilesStream performs uuid-paginated listFiles paging, echoing the opaque
+// after_uuid cursor across pages, and invokes yield once per file as each page
+// arrives — the listFiles analogue of ListDirectoryStream. A yield returning a
+// non-nil error stops pagination and surfaces that error.
+func (c *Client) ListFilesStream(ctx context.Context, uuid string, yield func(FilesystemFile) error) error {
 	fsID, am, err := c.stamp(OpListFiles)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	var all []FilesystemFile
 	var afterUUID OpaqueCursor
 
 	for {
@@ -136,21 +159,39 @@ func (c *Client) ListFilesAll(ctx context.Context, uuid string) ([]FilesystemFil
 
 		var resp listFilesPageResponse
 		if err := c.call(ctx, OpListFiles, req, &resp); err != nil {
-			return nil, fmt.Errorf("brokerrpc: ListFilesAll: %w", err)
+			return fmt.Errorf("brokerrpc: ListFilesAll: %w", err)
 		}
 
-		all = append(all, resp.Files...)
+		for _, fEntry := range resp.Files {
+			if err := yield(fEntry); err != nil {
+				return err
+			}
+		}
 
 		if resp.AfterUUID == "" {
 			break
 		}
 		// Progress guard: a repeated after_uuid means the listing is not
-		// advancing; abort rather than loop forever (see ListDirectoryAll).
+		// advancing; abort rather than loop forever (see ListDirectoryStream).
 		if afterUUID != "" && resp.AfterUUID == afterUUID {
-			return nil, fmt.Errorf("brokerrpc: ListFilesAll: after_uuid did not advance (%q) — aborting non-progressing pagination", string(resp.AfterUUID))
+			return fmt.Errorf("brokerrpc: ListFilesAll: after_uuid did not advance (%q) — aborting non-progressing pagination", string(resp.AfterUUID))
 		}
 		afterUUID = resp.AfterUUID
 	}
 
+	return nil
+}
+
+// ListFilesAll is the buffering convenience wrapper over ListFilesStream: it
+// collects every file into one slice. Callers that can process files
+// incrementally should prefer the stream form.
+func (c *Client) ListFilesAll(ctx context.Context, uuid string) ([]FilesystemFile, error) {
+	var all []FilesystemFile
+	if err := c.ListFilesStream(ctx, uuid, func(f FilesystemFile) error {
+		all = append(all, f)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	return all, nil
 }

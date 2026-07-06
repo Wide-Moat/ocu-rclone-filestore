@@ -88,6 +88,11 @@ func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBy
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.opURL(OpFileUpload), pr)
 	if err != nil {
+		// Nothing will read pr on this path, so the writer goroutine would block
+		// forever on mw.Write. Close the read end (unblocking the writer with
+		// io.ErrClosedPipe) and drain errCh so the goroutine exits cleanly.
+		_ = pr.CloseWithError(err)
+		<-errCh
 		return fmt.Errorf("brokerrpc: build upload request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", mw.FormDataContentType())
@@ -138,22 +143,16 @@ func isPipeClosure(err error) bool {
 	return errors.Is(err, io.ErrClosedPipe)
 }
 
-// jsonEnvelopeOverhead is retained for the chunk-size arithmetic below. It
-// reflects the byte cost of the previous chunk envelope plus a safety margin;
-// the multipart file part now streams raw bytes, so the chunker only bounds how
-// many source bytes are read per Write call.
-const jsonEnvelopeOverhead = len(`{"chunk":""}`) + 1
-
-// sourceChunkSize returns the number of raw source bytes to read per chunk so
-// that a single write stays comfortably under the message ceiling. The result
-// is always at least 3 so progress is guaranteed even for a tiny ceiling.
+// sourceChunkSize returns the number of raw source bytes to read per file-part
+// write so a single write stays under the message ceiling. The file part now
+// streams raw bytes (no base64 expansion, no per-chunk JSON envelope), so the
+// buffer is just the ceiling bounded below to guarantee forward progress even
+// for a tiny ceiling.
 func sourceChunkSize(ceiling int) int {
-	budget := ceiling - jsonEnvelopeOverhead
-	n := 3 * (budget / 4)
-	if n < 3 {
-		n = 3
+	if ceiling < 3 {
+		return 3
 	}
-	return n
+	return ceiling
 }
 
 // writeUploadMultipart writes the "params" form field followed by the file part

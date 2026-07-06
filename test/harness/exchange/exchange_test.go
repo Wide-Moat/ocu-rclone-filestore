@@ -9,10 +9,12 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,11 +49,11 @@ func newPaired(t *testing.T) (*controlplane.Server, map[string]string, *httptest
 		t.Fatalf("control-plane: %v", err)
 	}
 	sink := map[string]string{}
-	ex := NewServer(Options{
+	ex := MustNewServer(Options{
 		JWKS:        cp,
 		Issuer:      issuer,
 		Audience:    audience,
-		Credentials: MapCredentialIssuer{Sink: sink},
+		Credentials: &MapCredentialIssuer{Sink: sink},
 		Now:         fixedNow,
 	})
 	ts := httptest.NewServer(ex.Handler())
@@ -163,11 +165,11 @@ func TestExchangeRejectsExpired(t *testing.T) {
 	cp, _, _ := newPaired(t)
 	// Mint with the fixed clock, then exchange under a clock far in the future.
 	weak, _ := cp.Mint("fs-outputs", "write", false)
-	ex := NewServer(Options{
+	ex := MustNewServer(Options{
 		JWKS:        cp,
 		Issuer:      issuer,
 		Audience:    audience,
-		Credentials: MapCredentialIssuer{Sink: map[string]string{}},
+		Credentials: &MapCredentialIssuer{Sink: map[string]string{}},
 		Now:         func() time.Time { return time.Unix(1_700_000_000, 0).Add(time.Hour) },
 	})
 	future := httptest.NewServer(ex.Handler())
@@ -211,7 +213,11 @@ func TestExchangeRejectsMissingSubjectToken(t *testing.T) {
 
 func TestExchangeRejectsNonPost(t *testing.T) {
 	_, _, ts := newPaired(t)
-	resp, err := http.Get(ts.URL + ExchangePath)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+ExchangePath, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -224,11 +230,11 @@ func TestExchangeRejectsNonPost(t *testing.T) {
 func TestExchangeRejectsWrongAudience(t *testing.T) {
 	cp, _, _ := newPaired(t)
 	// Build an exchange that expects a different audience than the token carries.
-	ex := NewServer(Options{
+	ex := MustNewServer(Options{
 		JWKS:        cp,
 		Issuer:      issuer,
 		Audience:    "some-other-aud",
-		Credentials: MapCredentialIssuer{Sink: map[string]string{}},
+		Credentials: &MapCredentialIssuer{Sink: map[string]string{}},
 		Now:         fixedNow,
 	})
 	ts := httptest.NewServer(ex.Handler())
@@ -243,7 +249,7 @@ func TestExchangeRejectsWrongAudience(t *testing.T) {
 
 func TestMapCredentialIssuerUnique(t *testing.T) {
 	sink := map[string]string{}
-	iss := MapCredentialIssuer{Sink: sink}
+	iss := &MapCredentialIssuer{Sink: sink}
 	a := iss.Issue("fs-1")
 	b := iss.Issue("fs-1")
 	if a == b {
@@ -254,21 +260,50 @@ func TestMapCredentialIssuerUnique(t *testing.T) {
 	}
 }
 
-func TestNewServerPanicsOnMissingDeps(t *testing.T) {
+// TestMapCredentialIssuerConcurrent proves Issue is safe under the concurrent
+// calls the exchange HTTP handlers make: many goroutines issuing against one
+// shared issuer must not panic on a concurrent map write. The -race run is the
+// point; without the mutex this fatally races the Sink map.
+func TestMapCredentialIssuerConcurrent(t *testing.T) {
+	sink := map[string]string{}
+	iss := &MapCredentialIssuer{Sink: sink}
+
+	const workers = 64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			defer wg.Done()
+			_ = iss.Issue(fmt.Sprintf("fs-%d", i))
+		}(i)
+	}
+	wg.Wait()
+
+	if len(sink) != workers {
+		t.Fatalf("sink has %d entries, want %d (every concurrent Issue recorded)", len(sink), workers)
+	}
+}
+
+func TestNewServerErrorsOnMissingDeps(t *testing.T) {
 	cases := []Options{
-		{Credentials: MapCredentialIssuer{Sink: map[string]string{}}},
-		{JWKS: staticJWKS{}},
+		{Credentials: &MapCredentialIssuer{Sink: map[string]string{}}}, // no JWKS
+		{JWKS: staticJWKS{}}, // no Credentials
 	}
 	for i, opts := range cases {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Fatalf("case %d: expected panic", i)
-				}
-			}()
-			_ = NewServer(opts)
-		}()
+		if _, err := NewServer(opts); err == nil {
+			t.Fatalf("case %d: expected an error for a missing dependency, got nil", i)
+		}
 	}
+
+	// MustNewServer panics on the same missing dependency.
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("MustNewServer with a missing dependency did not panic")
+			}
+		}()
+		_ = MustNewServer(Options{})
+	}()
 }
 
 func TestNewServerDefaultsClock(t *testing.T) {
@@ -277,11 +312,11 @@ func TestNewServerDefaultsClock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cp: %v", err)
 	}
-	ex := NewServer(Options{
+	ex := MustNewServer(Options{
 		JWKS:        cp,
 		Issuer:      issuer,
 		Audience:    audience,
-		Credentials: MapCredentialIssuer{Sink: map[string]string{}},
+		Credentials: &MapCredentialIssuer{Sink: map[string]string{}},
 	})
 	ts := httptest.NewServer(ex.Handler())
 	defer ts.Close()
@@ -296,7 +331,7 @@ func TestNewServerDefaultsClock(t *testing.T) {
 func TestTLSServerExposesCert(t *testing.T) {
 	_, _, _ = newPaired(t)
 	cp, _ := controlplane.NewServer(controlplane.Options{Issuer: issuer, Audience: audience, Kid: "k"})
-	ex := NewServer(Options{JWKS: cp, Issuer: issuer, Audience: audience, Credentials: MapCredentialIssuer{Sink: map[string]string{}}})
+	ex := MustNewServer(Options{JWKS: cp, Issuer: issuer, Audience: audience, Credentials: &MapCredentialIssuer{Sink: map[string]string{}}})
 	ts, der := ex.TLSServer()
 	defer ts.Close()
 	if len(der) == 0 {

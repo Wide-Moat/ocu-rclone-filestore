@@ -62,14 +62,6 @@ func startControlPlane(t *testing.T, ca *localca.CA) string {
 	return srv.URL + "/.well-known/jwks.json"
 }
 
-func ephemeralAddr(t *testing.T) string {
-	t.Helper()
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
-}
-
 func TestExchangeRunServesCredentialJWKS(t *testing.T) {
 	ca, err := localca.New()
 	if err != nil {
@@ -78,15 +70,32 @@ func TestExchangeRunServesCredentialJWKS(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath, caPath := leafFiles(t, ca, dir)
 	cpJWKS := startControlPlane(t, ca)
-	addr := ephemeralAddr(t)
 
-	go func() { _ = run(addr, certPath, keyPath, caPath, cpJWKS, "") }()
+	// Serve on an OS-assigned ephemeral port bound INSIDE runCtx: there is no
+	// bind-close-reuse gap, and onReady reports the real bound address. A
+	// cancellable context plus t.Cleanup shuts the server down so no goroutine or
+	// socket leaks past the test.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	addrCh := make(chan string, 1)
+	go func() {
+		_ = runCtx(ctx, "127.0.0.1:0", certPath, keyPath, caPath, cpJWKS, "", func(a net.Addr) {
+			addrCh <- a.String()
+		})
+	}()
+
+	var addr string
+	select {
+	case addr = <-addrCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("exchange server never reported a bound address")
+	}
 
 	client, err := serve.CAClient(caPath)
 	if err != nil {
 		t.Fatalf("CAClient: %v", err)
 	}
-	body, err := serve.FetchJWKS(context.Background(), client, "https://"+addr+credentialJWKSPath, 10*time.Second)
+	body, err := serve.FetchJWKS(ctx, client, "https://"+addr+credentialJWKSPath, 10*time.Second)
 	if err != nil {
 		t.Fatalf("exchange credential JWKS never came up: %v", err)
 	}
@@ -122,7 +131,8 @@ func TestRunRejectsBadCA(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad-ca.pem")
 	_ = os.WriteFile(bad, []byte("not a cert"), 0o600)
-	if err := run(ephemeralAddr(t), "c", "k", bad, "https://127.0.0.1:1/jwks", ""); err == nil {
+	// run fails at CAClient before it ever binds, so a fixed unused port is fine.
+	if err := run("127.0.0.1:0", "c", "k", bad, "https://127.0.0.1:1/jwks", ""); err == nil {
 		t.Fatal("run accepted a CA file with no certificate")
 	}
 }

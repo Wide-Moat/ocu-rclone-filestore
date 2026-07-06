@@ -90,7 +90,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	return &Fs{
 		name:     name,
 		root:     root,
-		client:   newBrokerClientAdapter(c),
+		client:   c, // *brokerrpc.Client satisfies brokerClient directly
 		readOnly: opts.ReadOnly,
 		enc:      opts.Enc,
 	}, nil
@@ -161,7 +161,27 @@ func (f *Fs) Features() *fs.Features {
 func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 	dirPath := f.absPath(dir)
 
-	all, err := f.client.ListDirectoryAll(ctx, dirPath)
+	// Stream the recursive listing and filter to depth-1 as each page arrives,
+	// so the full recursive tree is never held in memory just to surface the
+	// immediate children (design decision 6). Only the surviving depth-1 slice
+	// grows — as required by rclone's List contract, which returns a slice.
+	var entries fs.DirEntries
+	err := f.client.ListDirectoryStream(ctx, dirPath, func(entry brokerrpc.ListDirEntry) error {
+		remote, ok := f.immediateChildRemote(dir, entry)
+		if !ok {
+			return nil // deeper descendant — filtered per design decision 6
+		}
+		switch {
+		case entry.File != nil:
+			entries = append(entries, objectFromFile(f, remote, entry.File))
+		case entry.Directory != nil:
+			mtime := parseMtime(entry.Directory.Mtime)
+			entries = append(entries, fs.NewDir(remote, mtime))
+		}
+		// Both arms nil: tolerate silently (unknown union variant from future
+		// broker field pin — stays tolerant per D6).
+		return nil
+	})
 	if err != nil {
 		// rclone's List contract: listing a directory that does not exist must
 		// return fs.ErrorDirNotFound, so the VFS can distinguish a missing
@@ -172,24 +192,6 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 			return nil, fs.ErrorDirNotFound
 		}
 		return nil, fmt.Errorf("ocufs: List %q: %w", dirPath, err)
-	}
-
-	var entries fs.DirEntries
-	for _, entry := range all {
-		remote, ok := f.immediateChildRemote(dir, entry)
-		if !ok {
-			continue // deeper descendant — filtered per design decision 6
-		}
-		switch {
-		case entry.File != nil:
-			obj := objectFromFile(f, remote, entry.File)
-			entries = append(entries, obj)
-		case entry.Directory != nil:
-			mtime := parseMtime(entry.Directory.Mtime)
-			entries = append(entries, fs.NewDir(remote, mtime))
-		}
-		// Both arms nil: tolerate silently (unknown union variant from future
-		// broker field pin — stays tolerant per D6).
 	}
 	return entries, nil
 }
@@ -255,7 +257,7 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	// overwrite=false: Put is the create-new write path, so a colliding
 	// destination is a conflict rather than a silent in-place replacement.
 	if err := f.client.Upload(ctx, dstPath, in, src.Size(), false); err != nil {
-		return nil, fmt.Errorf("ocufs: Put %q: %w", dstPath, err)
+		return nil, fmt.Errorf("ocufs: Put %q: %w", dstPath, mapBrokerError(err))
 	}
 	// The upload response carries no metadata on the current wire contract;
 	// the returned Object is uuid-less. Object.resolve() is the defensive
@@ -286,7 +288,7 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 		if errors.Is(err, brokerrpc.ErrAlreadyExists) {
 			return nil
 		}
-		return fmt.Errorf("ocufs: Mkdir %q: %w", p, err)
+		return fmt.Errorf("ocufs: Mkdir %q: %w", p, mapBrokerError(err))
 	}
 	return nil
 }
@@ -300,7 +302,7 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 	p := f.absPath(dir)
 	_, err := f.client.RemoveDirectory(ctx, p)
 	if err != nil {
-		return fmt.Errorf("ocufs: Rmdir %q: %w", p, err)
+		return fmt.Errorf("ocufs: Rmdir %q: %w", p, mapBrokerError(err))
 	}
 	return nil
 }
@@ -347,6 +349,15 @@ func (f *Fs) immediateChildRemote(dir string, entry brokerrpc.ListDirEntry) (str
 	}
 	entryPath = cleanPath(entryPath)
 	parentPath := f.absPath(dir)
+
+	// An entry equal to the directory being listed is that directory itself, not
+	// a child. Without this guard a root listing whose entries include an entry
+	// with Path "/" (== parentPath for the root) would fall through the special
+	// case below and surface the directory inside its own listing with an empty
+	// remote. Reject self before the child checks.
+	if entryPath == parentPath {
+		return "", false
+	}
 
 	// The entry must sit directly below parentPath.
 	if !strings.HasPrefix(entryPath, parentPath+"/") {

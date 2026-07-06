@@ -75,23 +75,23 @@ jobs:
           cache: true
       # Bounded fuzz of the two untrusted-byte trust surfaces: the host-supplied
       # mount config (mountcfg) and the broker wire frames/headers (brokerrpc).
-      # Each target runs the committed seed corpus PLUS a short fuzztime so a
-      # newly-reachable crash fails the PR rather than only the seeds. Go fuzzing
-      # runs one FuzzXxx target per package invocation, so each is listed
-      # explicitly. -fuzztime is fixed for determinism; any crash exits non-zero.
-      - name: Fuzz broker-wire parsers (brokerrpc)
+      # The PR gate runs ONLY the committed seed corpus (deterministic): a seed
+      # regression fails the PR, but no stochastic exploration runs here, so an
+      # unrelated PR can never trip a newly-discovered crash and go red at random.
+      # Exploratory fuzzing with a time budget belongs in a scheduled/nightly job
+      # (tracked separately), not in the per-PR gate.
+      - name: Fuzz-seed broker-wire parsers (brokerrpc)
         run: |
           set -euo pipefail
-          for target in FuzzReadFrame FuzzReadFrameRoundTrip \
-                        FuzzReassembleDownloadStream FuzzMapConnectError; do
-            echo "::group::brokerrpc ${target}"
-            go test ./internal/brokerrpc/ -run='^$' -fuzz="^${target}$" -fuzztime=30s
-            echo "::endgroup::"
-          done
-      - name: Fuzz host-config loader (mountcfg)
+          # -run=Fuzz.* executes EVERY FuzzXxx target's committed seed corpus as a
+          # normal test in one invocation (deterministic). Naming targets by an
+          # allowlist risks drift — a renamed target would silently stop running —
+          # so match them all and let the run cover whatever fuzz targets exist.
+          go test ./internal/brokerrpc/ -run='Fuzz'
+      - name: Fuzz-seed host-config loader (mountcfg)
         run: |
           set -euo pipefail
-          go test ./internal/mountcfg/ -run='^$' -fuzz='^FuzzLoad$' -fuzztime=30s
+          go test ./internal/mountcfg/ -run='Fuzz'
 
   denylist:
     name: build-graph denylist

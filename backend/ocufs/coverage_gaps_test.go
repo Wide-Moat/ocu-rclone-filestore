@@ -57,16 +57,15 @@ func (o *foreignObjectInfoReal) Remove(ctx context.Context) error { return nil }
 // Copy — foreign src and error branch.
 // ---------------------------------------------------------------------------
 
-// TestCopyForeignSrcDerivesPathFromRemote verifies that when src is NOT an
-// *Object from this backend, Copy derives the source broker path from
-// src.Remote() relative to the Fs root (absPath), not from a stored *Object.
-func TestCopyForeignSrcDerivesPathFromRemote(t *testing.T) {
+// TestCopyForeignSrcRejected verifies that when src is NOT an *Object bound to
+// this Fs, Copy returns fs.ErrorCantCopy and issues NO CopyFile call — so rclone
+// falls back to download+upload across the scope boundary rather than the broker
+// server-side copying a path that does not exist in this filesystem_id.
+func TestCopyForeignSrcRejected(t *testing.T) {
 	c := &fakeClient{}
-	var gotSrc, gotDst string
 	c.copyFileResult = func(ctx context.Context, srcPath, dstPath string) (*brokerrpc.AckResponse, error) {
-		gotSrc = srcPath
-		gotDst = dstPath
-		return &brokerrpc.AckResponse{}, nil
+		t.Fatalf("CopyFile must not be called for a foreign src (got %q → %q)", srcPath, dstPath)
+		return nil, nil
 	}
 
 	f := newTestFsWithRoot(t, c, "/data", false)
@@ -74,14 +73,11 @@ func TestCopyForeignSrcDerivesPathFromRemote(t *testing.T) {
 
 	src := &foreignObjectInfoReal{remote: "a/foreign.txt"}
 	_, err := f.Copy(context.Background(), src, "b/dst.txt")
-	if err != nil {
-		t.Fatalf("Copy with foreign src: %v", err)
+	if !errors.Is(err, fs.ErrorCantCopy) {
+		t.Fatalf("Copy with foreign src = %v, want fs.ErrorCantCopy", err)
 	}
-	if gotSrc != "/data/a/foreign.txt" {
-		t.Errorf("CopyFile sourcePath = %q, want %q (derived from src.Remote())", gotSrc, "/data/a/foreign.txt")
-	}
-	if gotDst != "/data/b/dst.txt" {
-		t.Errorf("CopyFile destinationPath = %q, want %q", gotDst, "/data/b/dst.txt")
+	if c.copyFileCount != 0 {
+		t.Errorf("CopyFile called %d times for a foreign src, want 0", c.copyFileCount)
 	}
 }
 
@@ -98,10 +94,12 @@ func TestCopyClientErrorWrapped(t *testing.T) {
 	srcObj := &Object{fs: f, path: "/src.txt", remote: "src.txt", uuid: "u"}
 	got, err := f.Copy(context.Background(), srcObj, "dst.txt")
 	if err == nil {
-		t.Fatal("Copy with client error returned nil error, want a wrapped error")
+		t.Fatal("Copy with client error returned nil error, want a mapped error")
 	}
-	if !errors.Is(err, brokerrpc.ErrPermissionDenied) {
-		t.Errorf("Copy error = %v, want it to wrap brokerrpc.ErrPermissionDenied", err)
+	// The broker permission-denied is mapped to the rclone fs sentinel so rclone
+	// recognises it (mapBrokerError); it must no longer surface as an opaque error.
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("Copy error = %v, want it to map to fs.ErrorPermissionDenied", err)
 	}
 	if got != nil {
 		t.Errorf("Copy with client error returned object %v, want nil", got)
@@ -112,15 +110,14 @@ func TestCopyClientErrorWrapped(t *testing.T) {
 // Move — foreign src and error branch.
 // ---------------------------------------------------------------------------
 
-// TestMoveForeignSrcDerivesPathFromRemote verifies the foreign-src path
-// derivation branch of Move.
-func TestMoveForeignSrcDerivesPathFromRemote(t *testing.T) {
+// TestMoveForeignSrcRejected verifies the foreign-src rejection branch of Move:
+// a src not bound to this Fs returns fs.ErrorCantMove and issues NO MoveFile
+// call, so rclone falls back to copy+delete across the scope boundary.
+func TestMoveForeignSrcRejected(t *testing.T) {
 	c := &fakeClient{}
-	var gotSrc, gotDst string
 	c.moveFileResult = func(ctx context.Context, srcPath, dstPath string) (*brokerrpc.AckResponse, error) {
-		gotSrc = srcPath
-		gotDst = dstPath
-		return &brokerrpc.AckResponse{}, nil
+		t.Fatalf("MoveFile must not be called for a foreign src (got %q → %q)", srcPath, dstPath)
+		return nil, nil
 	}
 
 	f := newTestFsWithRoot(t, c, "/", false)
@@ -128,14 +125,11 @@ func TestMoveForeignSrcDerivesPathFromRemote(t *testing.T) {
 
 	src := &foreignObjectInfoReal{remote: "old/name.bin"}
 	_, err := f.Move(context.Background(), src, "new/name.bin")
-	if err != nil {
-		t.Fatalf("Move with foreign src: %v", err)
+	if !errors.Is(err, fs.ErrorCantMove) {
+		t.Fatalf("Move with foreign src = %v, want fs.ErrorCantMove", err)
 	}
-	if gotSrc != "/old/name.bin" {
-		t.Errorf("MoveFile sourcePath = %q, want %q (derived from src.Remote())", gotSrc, "/old/name.bin")
-	}
-	if gotDst != "/new/name.bin" {
-		t.Errorf("MoveFile destinationPath = %q, want %q", gotDst, "/new/name.bin")
+	if c.moveFileCount != 0 {
+		t.Errorf("MoveFile called %d times for a foreign src, want 0", c.moveFileCount)
 	}
 }
 
@@ -152,10 +146,10 @@ func TestMoveClientErrorWrapped(t *testing.T) {
 	srcObj := &Object{fs: f, path: "/src.txt", remote: "src.txt", uuid: "u"}
 	got, err := f.Move(context.Background(), srcObj, "dst.txt")
 	if err == nil {
-		t.Fatal("Move with client error returned nil error, want a wrapped error")
+		t.Fatal("Move with client error returned nil error, want a mapped error")
 	}
-	if !errors.Is(err, brokerrpc.ErrNotFound) {
-		t.Errorf("Move error = %v, want it to wrap brokerrpc.ErrNotFound", err)
+	if !errors.Is(err, fs.ErrorObjectNotFound) {
+		t.Errorf("Move error = %v, want it to map to fs.ErrorObjectNotFound", err)
 	}
 	if got != nil {
 		t.Errorf("Move with client error returned object %v, want nil", got)
@@ -204,10 +198,10 @@ func TestUpdateClientErrorWrapped(t *testing.T) {
 
 	err := obj.Update(context.Background(), bytes.NewReader([]byte("data!")), src)
 	if err == nil {
-		t.Fatal("Update with Upload error returned nil error, want a wrapped error")
+		t.Fatal("Update with Upload error returned nil error, want a mapped error")
 	}
-	if !errors.Is(err, brokerrpc.ErrPermissionDenied) {
-		t.Errorf("Update error = %v, want it to wrap brokerrpc.ErrPermissionDenied", err)
+	if !errors.Is(err, fs.ErrorPermissionDenied) {
+		t.Errorf("Update error = %v, want it to map to fs.ErrorPermissionDenied", err)
 	}
 	// On the error path the success-only state mutations must not run.
 	if obj.uuid != "keep-uuid" {
@@ -227,10 +221,10 @@ func TestRemoveClientErrorWrapped(t *testing.T) {
 	obj := &Object{fs: f, path: "/gone.txt", uuid: "u", size: 1}
 	err := obj.Remove(context.Background())
 	if err == nil {
-		t.Fatal("Remove with client error returned nil error, want a wrapped error")
+		t.Fatal("Remove with client error returned nil error, want a mapped error")
 	}
-	if !errors.Is(err, brokerrpc.ErrNotFound) {
-		t.Errorf("Remove error = %v, want it to wrap brokerrpc.ErrNotFound", err)
+	if !errors.Is(err, fs.ErrorObjectNotFound) {
+		t.Errorf("Remove error = %v, want it to map to fs.ErrorObjectNotFound", err)
 	}
 }
 
@@ -529,10 +523,10 @@ func TestRmdirClientErrorWrapped(t *testing.T) {
 
 	err := f.Rmdir(context.Background(), "olddir")
 	if err == nil {
-		t.Fatal("Rmdir with client error returned nil error, want a wrapped error")
+		t.Fatal("Rmdir with client error returned nil error, want a mapped error")
 	}
-	if !errors.Is(err, brokerrpc.ErrNotFound) {
-		t.Errorf("Rmdir error = %v, want it to wrap brokerrpc.ErrNotFound", err)
+	if !errors.Is(err, fs.ErrorObjectNotFound) {
+		t.Errorf("Rmdir error = %v, want it to map to fs.ErrorObjectNotFound", err)
 	}
 }
 

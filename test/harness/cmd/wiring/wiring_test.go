@@ -18,6 +18,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -89,7 +90,7 @@ func (e *liveEdge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	cred, err := e.exchanger.Resolve(r.Context(), claims.FilesystemID, weak)
 	if err != nil {
-		http.Error(w, "exchange failed", http.StatusUnauthorized)
+		http.Error(w, fmt.Sprintf("exchange failed: %v", err), http.StatusUnauthorized)
 		return
 	}
 	body, _ := io.ReadAll(r.Body)
@@ -166,7 +167,7 @@ func newChain(t *testing.T, throttle *filestore.PerOpThrottle) *chain {
 	}
 
 	// Exchange peer (validates weak JWT against the CP JWKS, issues credential JWT).
-	exSrv := exchange.NewServer(exchange.Options{
+	exSrv := exchange.MustNewServer(exchange.Options{
 		JWKS: cp, Issuer: cpIssuer, Audience: cpAudience, Credentials: issuer,
 	})
 	exTS := tlsServer(t, ca, exSrv.Handler())
@@ -182,7 +183,7 @@ func newChain(t *testing.T, throttle *filestore.PerOpThrottle) *chain {
 		Credentials:   filestore.JWTCredentialValidator{JWKS: issuer.JWKS(), Issuer: credIssuer, Audience: credAudience},
 		PerOpThrottle: throttle,
 	}
-	fs := filestore.NewServer(fsOpts)
+	fs := filestore.MustNewServer(fsOpts)
 	rec := &recordingFilestore{delegate: fs.Handler()}
 	fsTS := tlsServer(t, ca, rec)
 
