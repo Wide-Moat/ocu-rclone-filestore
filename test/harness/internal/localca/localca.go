@@ -31,20 +31,37 @@ import (
 	"time"
 )
 
-// certTTL is the validity window stamped on the CA and every leaf. It is far
-// longer than any harness run and short enough to be unmistakably test-only.
-const certTTL = 24 * time.Hour
+// DefaultCertTTL is the validity window stamped on the CA and every leaf when a
+// caller does not choose one. It is far longer than any harness run and short
+// enough to be unmistakably test-only. A long-lived stand (CI, a demo left up
+// past a day) overrides it via NewWithTTL so the harness PKI does not expire
+// mid-run; the bringup keystone re-issues an expiring set regardless.
+const DefaultCertTTL = 24 * time.Hour
 
 // CA is a self-signed certificate authority that issues leaf serving certs. The
-// zero value is unusable; construct one with New.
+// zero value is unusable; construct one with New or NewWithTTL.
 type CA struct {
 	cert    *x509.Certificate
 	key     *ecdsa.PrivateKey
 	certPEM []byte
+	// leafTTL is the validity window IssueLeaf stamps on each leaf, carried from
+	// construction so every leaf's lifetime matches the CA's.
+	leafTTL time.Duration
 }
 
-// New generates a fresh CA keypair and self-signed CA certificate.
+// New generates a fresh CA keypair and self-signed CA certificate with the
+// default TTL.
 func New() (*CA, error) {
+	return NewWithTTL(DefaultCertTTL)
+}
+
+// NewWithTTL generates a fresh CA with an explicit validity window stamped on
+// the CA and inherited by every leaf it issues. A non-positive ttl falls back to
+// DefaultCertTTL so a zero-value caller cannot mint an already-expired anchor.
+func NewWithTTL(ttl time.Duration) (*CA, error) {
+	if ttl <= 0 {
+		ttl = DefaultCertTTL
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("localca: generate CA key: %w", err)
@@ -58,7 +75,7 @@ func New() (*CA, error) {
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "ocu-harness-local-ca"},
 		NotBefore:             now.Add(-time.Minute),
-		NotAfter:              now.Add(certTTL),
+		NotAfter:              now.Add(ttl),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
@@ -76,6 +93,7 @@ func New() (*CA, error) {
 		cert:    cert,
 		key:     key,
 		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		leafTTL: ttl,
 	}, nil
 }
 
@@ -108,7 +126,7 @@ func (c *CA) IssueLeaf(dnsNames []string, ipAddrs []net.IP) (tls.Certificate, er
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: cn},
 		NotBefore:    now.Add(-time.Minute),
-		NotAfter:     now.Add(certTTL),
+		NotAfter:     now.Add(c.leafTTL),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:     dnsNames,
