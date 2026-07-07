@@ -79,31 +79,50 @@ func mainWith(args []string) error {
 	edgeHost := fs.String("edge-host", "edge", "the host the guest dials in service_url (must match the edge leaf SAN)")
 	edgePort := fs.Int("edge-port", 8450, "the port the guest dials the edge on")
 	fixtureTemplate := fs.String("fixture-template", "/fixtures/guest-config.json", "the single-shape guest config to render service_url/auth_token/ca_cert_pem into")
+	certTTL := fs.Duration("cert-ttl", localca.DefaultCertTTL, "validity window stamped on the harness CA and leaves; raise it for a long-lived CI or demo stand so the PKI does not expire mid-run")
+	renewBefore := fs.Duration("cert-renew-before", 2*time.Hour, "re-issue the whole artifact set when the existing leaf expires within this window (0 disables the expiry check, restoring pure stat-idempotency)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return run(*out, *edgeHost, *edgePort, *fixtureTemplate)
+	return run(*out, *edgeHost, *edgePort, *fixtureTemplate, *certTTL, *renewBefore)
 }
 
-func run(out, edgeHost string, edgePort int, fixtureTemplate string) error {
+func run(out, edgeHost string, edgePort int, fixtureTemplate string, certTTL, renewBefore time.Duration) error {
 	if err := os.MkdirAll(out, 0o750); err != nil {
 		return fmt.Errorf("create out dir: %w", err)
 	}
 
-	// Idempotency guard: this step gates every long-running peer, but compose
-	// re-runs a service_completed_successfully dependency on every `compose run`.
-	// Re-generating the CA would rotate the trust anchor out from under the
-	// already-running edge/filestore (which loaded their leaves at startup),
-	// breaking the next dialer. If the rendered guest config already exists, the
-	// artifacts were produced by the first run; leave them untouched.
+	// Idempotency guard, now expiry-aware. This step gates every long-running
+	// peer, but compose re-runs a service_completed_successfully dependency on
+	// every `compose run`. Re-generating the CA would rotate the trust anchor out
+	// from under an already-running edge/filestore (which loaded their leaves at
+	// startup), breaking the next dialer — so when the rendered set exists AND is
+	// still valid, leave it untouched.
+	//
+	// But the test PKI carries a short TTL (DefaultCertTTL); on a stand left up
+	// past that window every leaf expires and the shared volume outlives a plain
+	// restart, so pure stat-idempotency serves a dead trust graph forever (only
+	// `down -v` cures it). When the existing leaf is within renewBefore of expiry
+	// (or already expired), re-issue the whole set. This is safe on a clean `up`:
+	// harness-init is a one-shot that completes BEFORE edge/filestore start (a
+	// service_completed_successfully dependency), so no consumer has read a leaf
+	// yet. On an already-dead stand the peers hold expired leaves regardless, so a
+	// re-issue cannot make the graph worse — it is the only cure short of down -v.
 	marker := filepath.Join(out, "guest-config.json")
-	if _, statErr := os.Stat(marker); statErr == nil {
-		_, _ = fmt.Fprintf(os.Stdout, "harness-init: artifacts already present in %s; leaving them in place (idempotent)\n", out)
+	reissue, why, err := needsReissue(out, renewBefore, time.Now())
+	if err != nil {
+		return err
+	}
+	if !reissue {
+		_, _ = fmt.Fprintf(os.Stdout, "harness-init: artifacts already present in %s and valid; leaving them in place (idempotent)\n", out)
 		return nil
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		_, _ = fmt.Fprintf(os.Stdout, "harness-init: re-issuing artifacts in %s (%s)\n", out, why)
 	}
 
 	// 1. The CA.
-	ca, err := localca.New()
+	ca, err := localca.NewWithTTL(certTTL)
 	if err != nil {
 		return err
 	}
@@ -195,6 +214,64 @@ func run(out, edgeHost string, edgePort int, fixtureTemplate string) error {
 
 	_, _ = fmt.Fprintf(os.Stdout, "harness-init: wrote CA, %d leaf certs, weak tokens, and guest-config.json to %s\n", len(serviceNames), out)
 	return nil
+}
+
+// needsReissue decides whether the artifact set in out must be produced. It
+// returns true (with a human-readable reason) when there is no rendered set yet,
+// or when the set exists but its leaf is missing, unparseable, or within
+// renewBefore of expiry (relative to now). It returns false when the set exists
+// and its leaf is comfortably valid — the idempotent leave-in-place path.
+//
+// A non-positive renewBefore disables the expiry check: an existing marker is
+// then always left in place, restoring the original pure stat-idempotency (the
+// documented opt-out for a caller that manages cert lifetime itself).
+//
+// The representative leaf is the first service leaf; every leaf is issued in the
+// same run with the same TTL, so one leaf's remaining validity speaks for the
+// set.
+func needsReissue(out string, renewBefore time.Duration, now time.Time) (bool, string, error) {
+	marker := filepath.Join(out, "guest-config.json")
+	if _, statErr := os.Stat(marker); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return true, "no rendered set present", nil
+		}
+		return false, "", fmt.Errorf("stat guest-config marker: %w", statErr)
+	}
+	if renewBefore <= 0 {
+		// Expiry check disabled: honour the pre-existing set unconditionally.
+		return false, "", nil
+	}
+
+	leafPath := filepath.Join(out, serviceNames[0]+".cert.pem")
+	notAfter, err := leafNotAfter(leafPath)
+	if err != nil {
+		// A present marker but an unreadable/unparseable leaf is a torn or partial
+		// set; re-issue rather than serve a broken trust graph.
+		return true, fmt.Sprintf("leaf %s unreadable (%v)", filepath.Base(leafPath), err), nil
+	}
+	if remaining := notAfter.Sub(now); remaining < renewBefore {
+		return true, fmt.Sprintf("leaf expires in %s (< renew-before %s)", remaining.Round(time.Second), renewBefore), nil
+	}
+	return false, "", nil
+}
+
+// leafNotAfter reads a PEM leaf certificate file and returns its NotAfter. It
+// errors on a missing file, a file with no CERTIFICATE block, or an unparseable
+// certificate — each a reason the caller treats as "re-issue".
+func leafNotAfter(path string) (time.Time, error) {
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: harness-controlled path under the shared volume
+	if err != nil {
+		return time.Time{}, err
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return time.Time{}, fmt.Errorf("no CERTIFICATE PEM block in %s", filepath.Base(path))
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+	}
+	return cert.NotAfter, nil
 }
 
 // issueLeafPEM issues a leaf for the service name (plus localhost) and returns

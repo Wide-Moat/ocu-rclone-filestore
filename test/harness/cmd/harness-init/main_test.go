@@ -8,6 +8,17 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/localca"
+)
+
+// The default cert TTL and renew-before window the existing behavioural tests
+// run under: a fresh set carries a full-TTL leaf, well outside the renew window,
+// so the second run stays idempotent.
+const (
+	testCertTTL     = localca.DefaultCertTTL
+	testRenewBefore = 2 * time.Hour
 )
 
 const fixtureTemplate = `{
@@ -29,7 +40,7 @@ func TestRunGeneratesAllArtifacts(t *testing.T) {
 	}
 	out := filepath.Join(dir, "shared")
 
-	if err := run(out, "edge", 8450, tmpl); err != nil {
+	if err := run(out, "edge", 8450, tmpl, testCertTTL, testRenewBefore); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 
@@ -80,7 +91,7 @@ func TestRunIsIdempotent(t *testing.T) {
 		t.Fatalf("write template: %v", err)
 	}
 	out := filepath.Join(dir, "shared")
-	if err := run(out, "edge", 8450, tmpl); err != nil {
+	if err := run(out, "edge", 8450, tmpl, testCertTTL, testRenewBefore); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	caFirst, err := os.ReadFile(filepath.Join(out, "ca.pem"))
@@ -88,7 +99,7 @@ func TestRunIsIdempotent(t *testing.T) {
 		t.Fatalf("read ca after first run: %v", err)
 	}
 	// A second run must NOT rotate the CA (the idempotency guard).
-	if err := run(out, "edge", 8450, tmpl); err != nil {
+	if err := run(out, "edge", 8450, tmpl, testCertTTL, testRenewBefore); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
 	caSecond, err := os.ReadFile(filepath.Join(out, "ca.pem"))
@@ -102,7 +113,7 @@ func TestRunIsIdempotent(t *testing.T) {
 
 func TestRunRejectsMissingTemplate(t *testing.T) {
 	dir := t.TempDir()
-	if err := run(filepath.Join(dir, "shared"), "edge", 8450, filepath.Join(dir, "missing.json")); err == nil {
+	if err := run(filepath.Join(dir, "shared"), "edge", 8450, filepath.Join(dir, "missing.json"), testCertTTL, testRenewBefore); err == nil {
 		t.Fatal("run accepted a missing fixture template")
 	}
 }

@@ -9,7 +9,58 @@ import (
 	"encoding/pem"
 	"net"
 	"testing"
+	"time"
 )
+
+// TestNewWithTTLStampsTheWindow checks an explicit TTL is stamped on the CA and
+// inherited by leaves it issues.
+func TestNewWithTTLStampsTheWindow(t *testing.T) {
+	const ttl = 72 * time.Hour
+	ca, err := NewWithTTL(ttl)
+	if err != nil {
+		t.Fatalf("NewWithTTL: %v", err)
+	}
+	block, _ := pem.Decode(ca.CertPEM())
+	if block == nil {
+		t.Fatal("CA PEM did not decode")
+	}
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse CA: %v", err)
+	}
+	// The window should be ~ttl (slack for the -1m NotBefore skew).
+	if window := caCert.NotAfter.Sub(caCert.NotBefore); window < ttl || window > ttl+2*time.Minute {
+		t.Fatalf("CA validity window = %s, want ~%s", window, ttl)
+	}
+	leaf, err := ca.IssueLeaf([]string{"svc"}, nil)
+	if err != nil {
+		t.Fatalf("IssueLeaf: %v", err)
+	}
+	if leaf.Leaf == nil {
+		t.Fatal("issued leaf has no parsed certificate")
+	}
+	if window := leaf.Leaf.NotAfter.Sub(leaf.Leaf.NotBefore); window < ttl || window > ttl+2*time.Minute {
+		t.Fatalf("leaf validity window = %s, want the CA's ~%s", window, ttl)
+	}
+}
+
+// TestNewWithTTLNonPositiveFallsBack pins the guard against a zero/negative TTL:
+// the anchor must be valid into the future, not already expired.
+func TestNewWithTTLNonPositiveFallsBack(t *testing.T) {
+	for _, ttl := range []time.Duration{0, -time.Hour} {
+		ca, err := NewWithTTL(ttl)
+		if err != nil {
+			t.Fatalf("NewWithTTL(%s): %v", ttl, err)
+		}
+		leaf, err := ca.IssueLeaf([]string{"svc"}, nil)
+		if err != nil {
+			t.Fatalf("IssueLeaf: %v", err)
+		}
+		if !leaf.Leaf.NotAfter.After(time.Now()) {
+			t.Fatalf("NewWithTTL(%s) minted an already-expired leaf (NotAfter=%s)", ttl, leaf.Leaf.NotAfter)
+		}
+	}
+}
 
 // TestNewProducesAParsableCAPEM checks the constructor yields a CA whose PEM is
 // a single parsable CA certificate — the trust anchor the guest and the peers
