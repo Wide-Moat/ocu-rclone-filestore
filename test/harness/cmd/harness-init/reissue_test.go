@@ -181,6 +181,34 @@ func TestRunLeavesFreshSet(t *testing.T) {
 	}
 }
 
+// TestLeafNotAfterRejectsBadInput pins leafNotAfter's error paths: a missing
+// file, a file with no CERTIFICATE block, and a CERTIFICATE block with garbage
+// DER each return an error so needsReissue treats the set as torn.
+func TestLeafNotAfterRejectsBadInput(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := leafNotAfter(filepath.Join(dir, "absent.pem")); err == nil {
+		t.Fatal("a missing leaf file must error")
+	}
+
+	noBlock := filepath.Join(dir, "noblock.pem")
+	if err := os.WriteFile(noBlock, []byte("not pem at all"), 0o600); err != nil {
+		t.Fatalf("write noblock: %v", err)
+	}
+	if _, err := leafNotAfter(noBlock); err == nil {
+		t.Fatal("a file with no CERTIFICATE PEM block must error")
+	}
+
+	badDER := filepath.Join(dir, "badder.pem")
+	garbage := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("not a certificate")})
+	if err := os.WriteFile(badDER, garbage, 0o600); err != nil {
+		t.Fatalf("write badder: %v", err)
+	}
+	if _, err := leafNotAfter(badDER); err == nil {
+		t.Fatal("a CERTIFICATE block with unparseable DER must error")
+	}
+}
+
 // readLeafNotAfter parses a PEM leaf file and returns its NotAfter.
 func readLeafNotAfter(t *testing.T, path string) time.Time {
 	t.Helper()
