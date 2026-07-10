@@ -225,14 +225,20 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 	switch classifyReadMetadata(resp) {
 	case metaArmFile:
 		return &Object{
-			fs:    f,
-			path:  p,
-			uuid:  resp.File.UUID,
-			size:  resp.File.Size,
-			mtime: parseMtime(resp.File.Mtime),
-			mode:  resp.File.Mode,
-			sha:   resp.File.SHA,
-			mime:  resp.File.MIME,
+			fs: f,
+			// remote is the rclone-relative path this Object was requested by —
+			// what Remote() must return per rclone's fs.Object contract. rclone
+			// core routes the destination of an overwriting move through
+			// dst.Remote(), so omitting it here collapses that move target to
+			// the Fs root after the destination has already been deleted.
+			remote: remote,
+			path:   p,
+			uuid:   resp.File.UUID,
+			size:   resp.File.Size,
+			mtime:  parseMtime(resp.File.Mtime),
+			mode:   resp.File.Mode,
+			sha:    resp.File.SHA,
+			mime:   resp.File.MIME,
 		}, nil
 	case metaArmDirectory:
 		return nil, fs.ErrorIsDir
