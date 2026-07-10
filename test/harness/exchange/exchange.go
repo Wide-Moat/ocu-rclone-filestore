@@ -42,12 +42,16 @@ type JWKSProvider interface {
 }
 
 // CredentialIssuer mints and records the real filestore credential bound to a
-// validated filesystem_id. The filestore peer's StaticCredentialValidator map is
-// the typical sink.
+// validated filesystem_id and the weak JWT's minted intent claim (ADR-0029:
+// the exchange is keyed per {filesystem_id, intent} and the claim must reach
+// the engine). The filestore peer's StaticCredentialValidator map is the
+// typical sink.
 type CredentialIssuer interface {
-	// Issue records a fresh credential value bound to filesystemID and returns
-	// it. The filestore peer accepts exactly this value for that scope.
-	Issue(filesystemID string) string
+	// Issue records a fresh credential value bound to filesystemID, carrying
+	// the given intent claim when the credential shape can express one, and
+	// returns it. The filestore peer accepts exactly this value for that scope.
+	// An empty intent issues a credential without an intent claim.
+	Issue(filesystemID, intent string) string
 }
 
 // MapCredentialIssuer issues random opaque credentials and records them into a
@@ -66,8 +70,9 @@ type MapCredentialIssuer struct {
 
 // Issue records a fresh random credential bound to filesystemID in the sink.
 // The map write is mutex-guarded because Issue is called concurrently from the
-// exchange HTTP handlers.
-func (m *MapCredentialIssuer) Issue(filesystemID string) string {
+// exchange HTTP handlers. An opaque credential carries no claims, so the
+// intent is accepted and dropped here; only the JWT issuer can express it.
+func (m *MapCredentialIssuer) Issue(filesystemID, _ string) string {
 	buf := make([]byte, 24)
 	_, _ = rand.Read(buf)
 	cred := base64.RawURLEncoding.EncodeToString(buf)
@@ -193,7 +198,7 @@ func (s *Server) handleExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cred := s.credentials.Issue(claims.FilesystemID)
+	cred := s.credentials.Issue(claims.FilesystemID, claims.Intent)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(tokenResponse{ //nolint:gosec // G117: access_token is the RFC-8693 response field name, the value is the freshly issued test credential

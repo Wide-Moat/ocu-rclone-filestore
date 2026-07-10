@@ -250,8 +250,8 @@ func TestExchangeRejectsWrongAudience(t *testing.T) {
 func TestMapCredentialIssuerUnique(t *testing.T) {
 	sink := map[string]string{}
 	iss := &MapCredentialIssuer{Sink: sink}
-	a := iss.Issue("fs-1")
-	b := iss.Issue("fs-1")
+	a := iss.Issue("fs-1", "read")
+	b := iss.Issue("fs-1", "read")
 	if a == b {
 		t.Fatalf("issuer produced identical credentials")
 	}
@@ -274,7 +274,7 @@ func TestMapCredentialIssuerConcurrent(t *testing.T) {
 	for i := 0; i < workers; i++ {
 		go func(i int) {
 			defer wg.Done()
-			_ = iss.Issue(fmt.Sprintf("fs-%d", i))
+			_ = iss.Issue(fmt.Sprintf("fs-%d", i), "read")
 		}(i)
 	}
 	wg.Wait()
@@ -336,5 +336,98 @@ func TestTLSServerExposesCert(t *testing.T) {
 	defer ts.Close()
 	if len(der) == 0 {
 		t.Fatalf("empty cert DER")
+	}
+}
+
+// newJWTPaired wires a control-plane token source and an exchange server whose
+// credential issuer mints JWT credentials (the fleet shape), so a test can
+// decode the issued credential's claims.
+func newJWTPaired(t *testing.T) (*controlplane.Server, *httptest.Server) {
+	t.Helper()
+	cp, err := controlplane.NewServer(controlplane.Options{
+		Issuer:   issuer,
+		Audience: audience,
+		Kid:      "kid-cp",
+		Now:      fixedNow,
+	})
+	if err != nil {
+		t.Fatalf("control-plane: %v", err)
+	}
+	ci, err := NewJWTCredentialIssuer(CredentialIssuerOptions{
+		Issuer:   "https://exchange.test",
+		Audience: "filestore",
+		Kid:      "kid-cred",
+		Now:      fixedNow,
+	})
+	if err != nil {
+		t.Fatalf("credential issuer: %v", err)
+	}
+	ex := MustNewServer(Options{
+		JWKS:        cp,
+		Issuer:      issuer,
+		Audience:    audience,
+		Credentials: ci,
+		Now:         fixedNow,
+	})
+	ts := httptest.NewServer(ex.Handler())
+	t.Cleanup(ts.Close)
+	return cp, ts
+}
+
+// decodeJWTPayload base64url-decodes the payload segment of a compact JWT.
+func decodeJWTPayload(t *testing.T, tok string) map[string]any {
+	t.Helper()
+	parts := strings.Split(tok, ".")
+	if len(parts) != 3 {
+		t.Fatalf("credential is not a compact JWT (%d segments)", len(parts))
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	return claims
+}
+
+// TestExchangeIssuedCredentialCarriesIntent pins the ADR-0029 seam: the intent
+// claim minted on the weak session JWT survives the exchange onto the issued
+// real credential, so the engine's claims-bind mode sees a single-intent grant
+// per mount. A weak JWT without an intent yields a credential without one.
+func TestExchangeIssuedCredentialCarriesIntent(t *testing.T) {
+	cp, ts := newJWTPaired(t)
+
+	for _, tc := range []struct {
+		name   string
+		intent string
+	}{
+		{name: "write intent propagates", intent: "write"},
+		{name: "read intent propagates", intent: "read"},
+		{name: "absent intent stays absent", intent: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			weak, err := cp.Mint("fsrw", tc.intent, false)
+			if err != nil {
+				t.Fatalf("mint weak JWT: %v", err)
+			}
+			resp := exchangeToken(t, ts, weak)
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("exchange status = %d, want 200", resp.StatusCode)
+			}
+			var body struct {
+				AccessToken string `json:"access_token"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			claims := decodeJWTPayload(t, body.AccessToken)
+			got, _ := claims["intent"].(string)
+			if got != tc.intent {
+				t.Fatalf("issued credential intent = %q, want %q (the exchange must carry the weak JWT's minted claim)", got, tc.intent)
+			}
+		})
 	}
 }

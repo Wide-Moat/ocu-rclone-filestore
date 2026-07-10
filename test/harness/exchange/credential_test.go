@@ -38,7 +38,7 @@ func newTestJWTIssuer(t *testing.T) (*JWTCredentialIssuer, func() time.Time) {
 func TestJWTCredentialIssuerIssueVerifies(t *testing.T) {
 	iss, clock := newTestJWTIssuer(t)
 
-	tok := iss.Issue("fs-outputs")
+	tok := iss.Issue("fs-outputs", "write")
 	if tok == "" {
 		t.Fatal("Issue returned an empty token; want a signed credential JWT")
 	}
@@ -63,8 +63,8 @@ func TestJWTCredentialIssuerIssueVerifies(t *testing.T) {
 func TestJWTCredentialIssuerIssueUniquePerScope(t *testing.T) {
 	iss, clock := newTestJWTIssuer(t)
 
-	a := iss.Issue("fs-a")
-	b := iss.Issue("fs-b")
+	a := iss.Issue("fs-a", "read")
+	b := iss.Issue("fs-b", "write")
 	if a == b {
 		t.Fatal("distinct scopes produced identical credentials")
 	}
@@ -86,7 +86,7 @@ func TestJWTCredentialIssuerIssueUniquePerScope(t *testing.T) {
 // stamp is real, not cosmetic.
 func TestJWTCredentialIssuerExpiredRejected(t *testing.T) {
 	iss, clock := newTestJWTIssuer(t)
-	tok := iss.Issue("fs-outputs")
+	tok := iss.Issue("fs-outputs", "write")
 
 	future := clock().Add(defaultCredentialTTL + time.Minute)
 	if _, err := jwtmint.Verify(tok, iss.JWKS(), "https://exchange.test", "filestore", future); err == nil {

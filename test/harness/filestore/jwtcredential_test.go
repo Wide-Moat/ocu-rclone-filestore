@@ -37,7 +37,7 @@ func newCredPair(t *testing.T) (*exchange.JWTCredentialIssuer, JWTCredentialVali
 // for a scope validates back to exactly that filesystem_id with no shared map.
 func TestJWTCredentialValidator_RoundTrip(t *testing.T) {
 	iss, v := newCredPair(t)
-	cred := iss.Issue("fsrw")
+	cred := iss.Issue("fsrw", "write")
 	if cred == "" {
 		t.Fatal("issuer returned empty credential")
 	}
@@ -71,7 +71,7 @@ func TestJWTCredentialValidator_Rejects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("foreign issuer: %v", err)
 	}
-	if _, err := v.Validate("Bearer " + foreign.Issue("fsrw")); err == nil {
+	if _, err := v.Validate("Bearer " + foreign.Issue("fsrw", "write")); err == nil {
 		t.Fatal("a credential from a foreign key set validated; want rejection")
 	}
 }
@@ -87,7 +87,7 @@ func TestJWTCredentialValidator_RejectsExpired(t *testing.T) {
 		t.Fatalf("new issuer: %v", err)
 	}
 	v := JWTCredentialValidator{JWKS: iss.JWKS(), Issuer: credIssuer, Audience: credAudience, Now: credNow}
-	if _, err := v.Validate("Bearer " + iss.Issue("fsrw")); err == nil {
+	if _, err := v.Validate("Bearer " + iss.Issue("fsrw", "write")); err == nil {
 		t.Fatal("expired credential accepted; want rejection")
 	}
 }
