@@ -409,6 +409,148 @@ func TestListFilesAllErrorsMidPagination(t *testing.T) {
 	}
 }
 
+// TestListDirectoryStreamAbortsCursorCycle verifies the progress guard catches
+// a cursor cycle LONGER than one: a broker paging bug that alternates two
+// cursor values (A,B,A,B,...) never repeats the immediately-preceding cursor,
+// yet the listing makes no progress — pagination must abort with the
+// non-advancing-cursor error instead of looping forever re-yielding the same
+// pages with unbounded memory growth.
+func TestListDirectoryStreamAbortsCursorCycle(t *testing.T) {
+	callCount := 0
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		// Alternate two cursor values forever.
+		next := "cursor-A"
+		if callCount%2 == 0 {
+			next = "cursor-B"
+		}
+		// Self-terminate after 64 pages so a guardless run ends in a completed
+		// listing (failing the error assertion) instead of spinning the test.
+		if callCount > 64 {
+			next = ""
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(dirPage(callCount-1, 1, next))
+	}
+
+	c, _ := newTLSTestClient(t, "fs-cycle-dir", handler)
+	err := c.ListDirectoryStream(context.Background(), "/d", func(ListDirEntry) error { return nil })
+	if err == nil {
+		t.Fatalf("an A,B,A,B cursor cycle must abort pagination, got nil error after %d pages", callCount)
+	}
+	if !strings.Contains(err.Error(), "did not advance") {
+		t.Errorf("error %q does not name the non-advancing-cursor abort", err.Error())
+	}
+	if !strings.Contains(err.Error(), "ListDirectoryStream") {
+		t.Errorf("error %q does not name the emitting function ListDirectoryStream", err.Error())
+	}
+	// Page 1 (sent "") returns A, page 2 (sent A) returns B, page 3 (sent B)
+	// returns A again — the repeat is detectable at page 3.
+	if callCount > 4 {
+		t.Errorf("cycle caught after %d page calls, want it caught at the first repeated cursor", callCount)
+	}
+}
+
+// TestListFilesStreamAbortsCursorCycle is the uuid-paginated analogue: an
+// alternating after_uuid cycle must abort rather than loop forever.
+func TestListFilesStreamAbortsCursorCycle(t *testing.T) {
+	callCount := 0
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		next := "after-A"
+		if callCount%2 == 0 {
+			next = "after-B"
+		}
+		if callCount > 64 {
+			next = ""
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(filePage(callCount-1, 1, next))
+	}
+
+	c, _ := newTLSTestClient(t, "fs-cycle-files", handler)
+	err := c.ListFilesStream(context.Background(), "root-uuid", func(FilesystemFile) error { return nil })
+	if err == nil {
+		t.Fatalf("an A,B,A,B after_uuid cycle must abort pagination, got nil error after %d pages", callCount)
+	}
+	if !strings.Contains(err.Error(), "did not advance") {
+		t.Errorf("error %q does not name the non-advancing-cursor abort", err.Error())
+	}
+	if !strings.Contains(err.Error(), "ListFilesStream") {
+		t.Errorf("error %q does not name the emitting function ListFilesStream", err.Error())
+	}
+	if callCount > 4 {
+		t.Errorf("cycle caught after %d page calls, want it caught at the first repeated cursor", callCount)
+	}
+}
+
+// TestListStreamsEnforcePageCeiling verifies the hard page ceiling: a broker
+// that mints a DISTINCT cursor on every page forever defeats any repeat
+// detection, so the loop must abort at the client's page ceiling instead of
+// paging (and growing the caller's aggregate) without bound.
+func TestListStreamsEnforcePageCeiling(t *testing.T) {
+	const ceiling = 8
+
+	t.Run("listDirectory", func(t *testing.T) {
+		callCount := 0
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+			// A fresh cursor every page, never repeating, never ending.
+			next := fmt.Sprintf("cursor-%d", callCount)
+			// Self-terminate after 64 pages so a ceiling-less run completes and
+			// fails the error assertion instead of spinning the test.
+			if callCount > 64 {
+				next = ""
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(dirPage(callCount-1, 1, next))
+		}
+
+		c, _ := newTLSTestClient(t, "fs-ceiling-dir", handler)
+		c.maxListPages = ceiling
+		err := c.ListDirectoryStream(context.Background(), "/d", func(ListDirEntry) error { return nil })
+		if err == nil {
+			t.Fatalf("a never-ending distinct-cursor listing must hit the page ceiling, got nil error after %d pages", callCount)
+		}
+		if !strings.Contains(err.Error(), "ceiling") {
+			t.Errorf("error %q does not name the page ceiling", err.Error())
+		}
+		if callCount > ceiling {
+			t.Errorf("made %d page calls, the %d-page ceiling must bound the loop", callCount, ceiling)
+		}
+	})
+
+	t.Run("listFiles", func(t *testing.T) {
+		callCount := 0
+		handler := func(w http.ResponseWriter, r *http.Request) {
+			callCount++
+			next := fmt.Sprintf("after-%d", callCount)
+			if callCount > 64 {
+				next = ""
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(filePage(callCount-1, 1, next))
+		}
+
+		c, _ := newTLSTestClient(t, "fs-ceiling-files", handler)
+		c.maxListPages = ceiling
+		err := c.ListFilesStream(context.Background(), "root-uuid", func(FilesystemFile) error { return nil })
+		if err == nil {
+			t.Fatalf("a never-ending distinct-after_uuid listing must hit the page ceiling, got nil error after %d pages", callCount)
+		}
+		if !strings.Contains(err.Error(), "ceiling") {
+			t.Errorf("error %q does not name the page ceiling", err.Error())
+		}
+		if callCount > ceiling {
+			t.Errorf("made %d page calls, the %d-page ceiling must bound the loop", callCount, ceiling)
+		}
+	})
+}
+
 // dirPage renders a listDirectory page of perPage directory entries whose paths
 // are globally unique and monotonically increasing, so a caller can check both
 // completeness and order. cursor, when non-empty, is set on the response.
