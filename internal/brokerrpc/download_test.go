@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/rclone/rclone/fs/fserrors"
@@ -181,26 +182,6 @@ func TestDownloadRangeRequestShape(t *testing.T) {
 	}
 }
 
-// TestDownloadRangeClampsOverDelivery verifies the defensive clamp trims a
-// broker that streamed more than the requested length.
-func TestDownloadRangeClampsOverDelivery(t *testing.T) {
-	c, _ := newTLSTestClient(t, "fs-dl-06", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.ReadAll(r.Body)
-		chunkedOctetStream(w, []byte("abcdefghij")) // ignores range, returns 10
-	})
-	rc, err := c.DownloadRange(context.Background(), "uuid-abc", 0, 3)
-	if err != nil {
-		t.Fatalf("DownloadRange: %v", err)
-	}
-	got, err := readAllClose(t, rc)
-	if err != nil {
-		t.Fatalf("DownloadRange read: %v", err)
-	}
-	if len(got) != 3 {
-		t.Errorf("over-delivery not clamped: got %d bytes, want 3", len(got))
-	}
-}
-
 // TestDownloadNotFoundMapsSentinel verifies a 404 maps to ErrNotFound.
 func TestDownloadNotFoundMapsSentinel(t *testing.T) {
 	c, _ := newTLSTestClient(t, "fs-dl-07", func(w http.ResponseWriter, r *http.Request) {
@@ -344,6 +325,133 @@ func TestDownloadServiceUnavailableIsRetryable(t *testing.T) {
 	}
 }
 
+// TestDownloadRangeZeroLengthWindowIsEmptyReadWithoutRPC pins the length-0
+// short-circuit: a zero-length window is trivially the empty read (the POSIX
+// at-EOF answer — Object.Open clamps at/past-EOF windows to length 0), and this
+// broker family reads a length-0 fileDownload as "full file", so issuing the
+// RPC would stream the whole object only to discard it. DownloadRange must
+// return an immediately-EOF reader without touching the wire.
+func TestDownloadRangeZeroLengthWindowIsEmptyReadWithoutRPC(t *testing.T) {
+	var calls atomic.Int32
+	c, _ := newTLSTestClient(t, "fs-dl-zerowin", func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = io.ReadAll(r.Body)
+		// The broker family's length-0 semantics: the full file comes back.
+		chunkedOctetStream(w, []byte("abcdefghij"))
+	})
+	rc, err := c.DownloadRange(context.Background(), "uuid-zerowin", 5, 0)
+	if err != nil {
+		t.Fatalf("DownloadRange length 0: %v", err)
+	}
+	got, err := readAllClose(t, rc)
+	if err != nil {
+		t.Fatalf("zero-length window read: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("zero-length window delivered %d bytes (%q), want 0", len(got), got)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("zero-length window issued %d fileDownload RPCs, want 0 — the empty window needs no wire call", n)
+	}
+}
+
+// TestDownloadRangeOverDeliveryIsAnError pins the fail-closed window bound: the
+// wire carries no range echo (the fileDownload response field set is TBD in the
+// frozen contract), so the requested offset itself is unverifiable — but byte
+// count is. A broker that ignores the range and streams from byte 0
+// over-delivers whenever the requested window ends before EOF, so over-delivery
+// must surface as an ERROR, never as a silent truncation that relabels the
+// object's head as the requested window (wrong bytes passed to the VFS as a
+// successful read). This deliberately reverses the earlier truncate-to-window
+// behaviour.
+func TestDownloadRangeOverDeliveryIsAnError(t *testing.T) {
+	content := bytes.Repeat([]byte("Z"), 100)
+
+	t.Run("declared_length_fast_fail", func(t *testing.T) {
+		// The response declares its full length up front (the harness south
+		// face answers ranged downloads with a plain 200 + Content-Length), so
+		// the dishonoured range is provable before any body byte is read.
+		c, _ := newTLSTestClient(t, "fs-dl-over-cl", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Header().Set("Content-Length", "100")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(content)
+		})
+		rc, err := c.DownloadRange(context.Background(), "uuid-over-cl", 50, 10)
+		if err == nil {
+			got, rerr := readAllClose(t, rc)
+			t.Fatalf("a declared 100-byte body for a 10-byte window must fail, got a reader (read %d bytes, read err %v)", len(got), rerr)
+		}
+		if !strings.Contains(err.Error(), "window") {
+			t.Errorf("error %q does not name the dishonoured window", err.Error())
+		}
+	})
+
+	t.Run("chunked_overdelivery_errors_on_read", func(t *testing.T) {
+		// No declared length (chunked): over-delivery is only observable while
+		// streaming, so the error must surface from the reader, and the caller
+		// must never see a clean EOF carrying just the window-sized prefix.
+		c, _ := newTLSTestClient(t, "fs-dl-over-chunk", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			chunkedOctetStream(w, content)
+		})
+		rc, err := c.DownloadRange(context.Background(), "uuid-over-chunk", 50, 10)
+		if err != nil {
+			t.Fatalf("DownloadRange with an undeclared-length response must hand out a reader: %v", err)
+		}
+		got, err := readAllClose(t, rc)
+		if err == nil {
+			t.Fatalf("reading a 100-byte stream for a 10-byte window must error, got clean EOF with %d bytes", len(got))
+		}
+		if !strings.Contains(err.Error(), "over-delivered") {
+			t.Errorf("error %q does not name the over-delivery", err.Error())
+		}
+	})
+
+	t.Run("offset_zero_overdelivery_still_errors", func(t *testing.T) {
+		// The offset-0 flavour of the same dishonour (previously pinned as
+		// silent truncation): a broker returning the whole object for a
+		// 3-byte window at offset 0 must also fail on read.
+		c, _ := newTLSTestClient(t, "fs-dl-over-zero", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			chunkedOctetStream(w, []byte("abcdefghij"))
+		})
+		rc, err := c.DownloadRange(context.Background(), "uuid-over-zero", 0, 3)
+		if err != nil {
+			t.Fatalf("DownloadRange: %v", err)
+		}
+		if got, err := readAllClose(t, rc); err == nil {
+			t.Fatalf("a 10-byte stream for a 3-byte window must error on read, got clean EOF with %d bytes", len(got))
+		}
+	})
+
+	t.Run("honest_window_reads_clean", func(t *testing.T) {
+		// Control: a broker delivering exactly the window reads clean to EOF —
+		// the strict bound must not misfire on an honest range.
+		c, _ := newTLSTestClient(t, "fs-dl-honest", func(w http.ResponseWriter, r *http.Request) {
+			req := readDownloadRequest(t, r)
+			if req.Range == nil {
+				t.Error("ranged request carried no range field")
+				chunkedOctetStream(w, nil)
+				return
+			}
+			chunkedOctetStream(w, content[req.Range.Offset:req.Range.Offset+req.Range.Length])
+		})
+		rc, err := c.DownloadRange(context.Background(), "uuid-honest", 50, 10)
+		if err != nil {
+			t.Fatalf("DownloadRange: %v", err)
+		}
+		got, err := readAllClose(t, rc)
+		if err != nil {
+			t.Fatalf("an honest 10-byte window must read clean, got %v", err)
+		}
+		if len(got) != 10 {
+			t.Errorf("honest window delivered %d bytes, want 10", len(got))
+		}
+	})
+}
+
 // scriptedBody is an io.ReadCloser that first serves its data bytes, then
 // replays the scripted tail results one Read at a time (a step with n == 1
 // yields its payload byte), and finally reports io.EOF. It lets a test place
@@ -380,7 +488,7 @@ func (s *scriptedBody) Read(p []byte) (int, error) {
 func (s *scriptedBody) Close() error { return nil }
 
 // TestBoundedBodyPropagatesErrorAtCapBoundary pins that a transport failure
-// landing exactly at the byte cap surfaces as an error: the strict path's
+// landing exactly at the byte cap surfaces as an error: the cap-boundary
 // one-byte probe must never relabel a mid-body fault as clean end-of-stream,
 // or a truncated prefix of a larger object would pass to the caller as the
 // complete file content.
@@ -390,7 +498,7 @@ func TestBoundedBodyPropagatesErrorAtCapBoundary(t *testing.T) {
 		data: bytes.Repeat([]byte("D"), limit),
 		tail: []scriptedRead{{n: 0, err: errors.New("connection reset mid-body")}},
 	}
-	bb := newBoundedBody(body, true, limit)
+	bb := newBoundedBody(body, false, limit)
 	got, err := io.ReadAll(bb)
 	if len(got) != limit {
 		t.Errorf("delivered %d in-cap bytes, want %d", len(got), limit)
@@ -413,7 +521,7 @@ func TestBoundedBodyProbeRetriesTransientZeroRead(t *testing.T) {
 		data: bytes.Repeat([]byte("D"), limit),
 		tail: []scriptedRead{{n: 0, err: nil}, {n: 1, b: 'X', err: nil}},
 	}
-	bb := newBoundedBody(body, true, limit)
+	bb := newBoundedBody(body, false, limit)
 	got, err := io.ReadAll(bb)
 	if err == nil {
 		t.Fatalf("over-cap bytes behind a transient (0, nil) read must error, got clean EOF with %d bytes", len(got))

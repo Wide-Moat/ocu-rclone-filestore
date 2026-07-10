@@ -138,12 +138,33 @@ func serveAck(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, `{}`)
 }
 
-// serveFileDownload streams the canned content as a chunked octet-stream body.
+// serveFileDownload streams the canned content as a chunked octet-stream body,
+// honouring an optional {offset, length} request window clamped to the content
+// size. The client fails ranged over-delivery closed, so the fake must serve
+// exactly the requested window, as the real south face does.
 func serveFileDownload(w http.ResponseWriter, r *http.Request) {
-	_, _ = io.ReadAll(r.Body)
+	body, _ := io.ReadAll(r.Body)
+	var req struct {
+		Range *struct {
+			Offset int64 `json:"offset"`
+			Length int64 `json:"length"`
+		} `json:"range"`
+	}
+	_ = json.Unmarshal(body, &req)
+	out := fakeBrokerContentBytes
+	if req.Range != nil {
+		start, end := req.Range.Offset, req.Range.Offset+req.Range.Length
+		if start > int64(len(out)) {
+			start = int64(len(out))
+		}
+		if end > int64(len(out)) {
+			end = int64(len(out))
+		}
+		out = out[start:end]
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(fakeBrokerContentBytes)
+	_, _ = w.Write(out)
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
 	}

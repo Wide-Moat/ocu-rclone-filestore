@@ -185,11 +185,20 @@ Two entry points consume the same op:
   `range` key and its request body is byte-identical to the no-range form.
 - `DownloadRange(uuid, offset, length)` — sends the window so the broker streams
   only those bytes; a ranged read transfers just the requested window, not the
-  whole object. Negative offset or length is rejected locally. After the read the
-  result is defensively clamped to `length`: a broker that honoured the range
-  returns exactly the window and the clamp is a no-op; a broker that over-delivers
-  is trimmed so the caller never sees more than the contract. Offset is not
-  re-applied locally — the broker already seeked to it.
+  whole object. Negative offset or length is rejected locally, and a length-0
+  window returns an empty reader with no wire call at all: the at/past-EOF read
+  the VFS clamps to length 0 needs no bytes, and this broker family reads a
+  length-0 range as "full file". The stream is bounded strictly to `length`.
+  The wire carries no range echo (the response field set is TBD in the frozen
+  contract), so the offset itself cannot be verified — but the byte count can:
+  a broker that ignores the range and streams from byte 0 over-delivers
+  whenever the window ends before EOF, so over-delivery (declared via
+  `Content-Length` or observed while streaming) is a hard error, never a
+  truncation that would relabel the object's head as the requested window. The
+  honest residual: a broker honouring `length` but not `offset` delivers
+  exactly `length` wrong bytes and cannot be detected on this wire; closing
+  that needs a contract-level pin. Offset is not re-applied locally — the
+  broker already seeked to it.
 
 Neither helper is the unary `readFile` op; they are the chunked ranged-read path
 (D5).
