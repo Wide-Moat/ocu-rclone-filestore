@@ -832,6 +832,59 @@ func TestWritablePathPutInvokesUpload(t *testing.T) {
 	}
 }
 
+// retryUploadClient is a fakeClient whose Upload enforces the broker's
+// create-only conflict: an upload to a path that already exists fails with
+// ErrAlreadyExists unless overwrite is set. It models the
+// committed-but-unacknowledged first attempt (the broker landed the object,
+// the 2xx was lost, rclone re-drives Put).
+type retryUploadClient struct {
+	fakeClient
+	existing map[string]bool
+}
+
+func (c *retryUploadClient) Upload(ctx context.Context, path string, src io.Reader, totalBytes int64, overwrite bool) error {
+	c.uploadCount++
+	c.lastUploadPath = path
+	c.lastUploadSize = totalBytes
+	c.lastUploadOverwrite = overwrite
+	if c.existing[path] && !overwrite {
+		return fmt.Errorf("retryUploadClient: %w: path already present", brokerrpc.ErrAlreadyExists)
+	}
+	c.existing[path] = true
+	return nil
+}
+
+// TestPutIsRetrySafeOverExistingPath verifies that Put succeeds when the
+// destination path already exists — the state a retried Put finds after a
+// first attempt whose 2xx response was lost. rclone drives Put through its
+// retry layers and decides create-vs-update BEFORE calling Put, so Put must
+// be idempotent at the destination path; a create-only Put turns every retry
+// of a committed-but-unacknowledged upload into a permanent conflict and the
+// VFS writeback item stays dirty forever.
+//
+// Honesty note: the fake mirrors the create-only conflict it then observes;
+// the load-bearing assertions are nil error plus overwrite recorded true
+// (see also TestPutUsesOverwriteTrue, the direct pin).
+func TestPutIsRetrySafeOverExistingPath(t *testing.T) {
+	c := &retryUploadClient{existing: map[string]bool{
+		// The first attempt committed broker-side; its response never arrived.
+		"/report.txt": true,
+	}}
+	f := &Fs{name: "ocufs", root: "/", client: c, readOnly: false, enc: defaultEncoding}
+
+	src := &fakeObjectInfo{remote: "report.txt", size: 5}
+	obj, err := f.Put(context.Background(), bytes.NewReader([]byte("hello")), src)
+	if err != nil {
+		t.Fatalf("retried Put over an existing path must succeed (idempotent at the destination), got: %v", err)
+	}
+	if obj == nil {
+		t.Fatal("Put returned nil object")
+	}
+	if !c.lastUploadOverwrite {
+		t.Error("Put issued Upload with overwrite=false; the retried create wedges on the broker's conflict")
+	}
+}
+
 // TestWritablePathUpdateInvokesUpload verifies that Object.Update on a
 // writable Fs invokes Upload (in-place overwrite at the same path).
 func TestWritablePathUpdateInvokesUpload(t *testing.T) {

@@ -260,9 +260,16 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 		return nil, fs.ErrorPermissionDenied
 	}
 	dstPath := f.absPath(src.Remote())
-	// overwrite=false: Put is the create-new write path, so a colliding
-	// destination is a conflict rather than a silent in-place replacement.
-	if err := f.client.Upload(ctx, dstPath, in, src.Size(), false); err != nil {
+	// overwrite=true: Put must be idempotent at the destination path. rclone
+	// drives Put through its retry layers, so an ambiguous first attempt (the
+	// broker committed the object but the response was lost) is re-driven; a
+	// create-only upload turns that retry into a permanent conflict and the
+	// VFS writeback item stays dirty forever. rclone core decides
+	// create-vs-update BEFORE calling Put (it probes via NewObject or holds a
+	// destination Object and calls Update), so collision refusal inside Put is
+	// not part of the backend contract — last-writer-wins is the semantic a
+	// filesystem mount must present.
+	if err := f.client.Upload(ctx, dstPath, in, src.Size(), true); err != nil {
 		return nil, fmt.Errorf("ocufs: Put %q: %w", dstPath, mapBrokerError(err))
 	}
 	// The upload response carries no metadata on the current wire contract;
