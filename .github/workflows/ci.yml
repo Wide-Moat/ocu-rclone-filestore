@@ -116,6 +116,26 @@ jobs:
       - name: Check FSL headers
         run: bash scripts/check-fsl-headers.sh
 
+  # Frozen-contract binding for the vendored mount-config schema. Two legs run
+  # here: the hermetic checksum leg proves the vendored bytes match the
+  # committed sha256 pin (tamper-evidence: silent drift becomes a conspicuous
+  # multi-file diff), and the canon-ref leg proves the same bytes exist at the
+  # public canon commit recorded in testdata/CANON-REF (arbitrary non-canon
+  # bytes cannot pass). The canon repository is public, so the fetch needs no
+  # secret and the job is fork-safe. Non-required until the owner adds it to
+  # branch protection; the pin is also enforced by the hermetic
+  # TestVendoredSchemaChecksumPin under the required test gate.
+  contract-pin:
+    name: frozen-contract checksum pin
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Verify the vendored contract against its pin and canon ref
+        env:
+          OCU_CANON_REF_CHECK: "1"
+        run: bash scripts/check-contract-parity.sh
+
   doc-contacts:
     name: documentation contact-address gate
     runs-on: ubuntu-latest
