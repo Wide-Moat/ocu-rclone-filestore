@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/operations"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/brokerrpc"
 )
@@ -168,6 +169,133 @@ func TestMoveCallsMoveFile(t *testing.T) {
 	}
 	if dstObj.Remote() != dstRemote {
 		t.Errorf("Move returned Object.Remote()=%q, want %q", dstObj.Remote(), dstRemote)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestOperationsMoveOverExistingTargetsDestination — rename-over-existing
+// driven through rclone core, the exact shape the VFS rename path produces.
+// ---------------------------------------------------------------------------
+
+// TestOperationsMoveOverExistingTargetsDestination pins the rename-over-existing
+// data path at the Fs level. rclone core's move (fs/operations) computes the
+// move target from dst.Remote() when a destination object exists, deletes the
+// destination, and only then issues the backend Move — so a destination Object
+// whose Remote() is empty (the NewObject-built shape the VFS hands in) turns
+// "mv a.txt b.txt" into DeleteFile(b.txt) followed by a move addressed at the
+// Fs ROOT: the pre-existing destination is destroyed and the source is never
+// renamed to it. The source here is List-built (the live-VFS shape) and the
+// destination is NewObject-built, mirroring vfs File.rename exactly.
+func TestOperationsMoveOverExistingTargetsDestination(t *testing.T) {
+	c := &fakeClient{}
+	c.listDirectoryAllResult = func(ctx context.Context, path string) ([]brokerrpc.ListDirEntry, error) {
+		return []brokerrpc.ListDirEntry{
+			{File: &brokerrpc.FilesystemFile{
+				Path:  "/a.txt",
+				Size:  5,
+				UUID:  "uuid-a",
+				Mtime: "2026-01-01T00:00:00Z",
+			}},
+		}, nil
+	}
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		return &brokerrpc.ReadMetadataResponse{
+			File: brokerrpc.File{
+				Path:  path,
+				UUID:  "uuid-b",
+				Size:  7,
+				Mtime: "2026-01-02T00:00:00Z",
+			},
+		}, nil
+	}
+
+	f := newTestFsWithRoot(t, c, "/", false)
+	f.enc = defaultEncoding
+	ctx := context.Background()
+
+	// src comes from a listing (objectFromFile — real remote), dst from
+	// NewObject: the exact pair vfs File.rename passes to operations.Move when
+	// the rename target already exists.
+	entries, err := f.List(ctx, "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("List returned %d entries, want 1", len(entries))
+	}
+	src, ok := entries[0].(fs.Object)
+	if !ok {
+		t.Fatalf("entries[0] is %T, want fs.Object", entries[0])
+	}
+	dst, err := f.NewObject(ctx, "b.txt")
+	if err != nil {
+		t.Fatalf("NewObject(b.txt): %v", err)
+	}
+
+	if _, err := operations.Move(ctx, f, dst, "b.txt", src); err != nil {
+		t.Fatalf("operations.Move over existing destination: %v", err)
+	}
+
+	// The overwritten destination is deleted first (rclone core's overwrite
+	// discipline), then the backend move must be addressed at the DESTINATION
+	// path — never the Fs root.
+	if c.removeFileCount != 1 {
+		t.Errorf("RemoveFile called %d times, want 1 (delete of the overwritten destination)", c.removeFileCount)
+	}
+	if c.lastRemoveFilePath != "/b.txt" {
+		t.Errorf("RemoveFile path = %q, want %q", c.lastRemoveFilePath, "/b.txt")
+	}
+	if c.moveFileCount != 1 {
+		t.Fatalf("MoveFile called %d times, want 1", c.moveFileCount)
+	}
+	if c.lastMoveFileSrc != "/a.txt" {
+		t.Errorf("MoveFile sourcePath = %q, want %q", c.lastMoveFileSrc, "/a.txt")
+	}
+	if c.lastMoveFileDst != "/b.txt" {
+		t.Errorf("MoveFile destinationPath = %q, want %q (a root-addressed move destroys the destination without renaming the source)", c.lastMoveFileDst, "/b.txt")
+	}
+}
+
+// TestOperationsMoveBothNewObjectStillMoves pins the second flavour of the same
+// contract violation: when BOTH src and dst are NewObject-built, an empty
+// Remote() on each makes rclone core's same-object short-circuit fire (both
+// resolve to the Fs root), so the move silently succeeds WITHOUT issuing any
+// backend call — a false success that leaves the filesystem unchanged. With
+// Remote() populated the pair is correctly distinguished and the move runs.
+func TestOperationsMoveBothNewObjectStillMoves(t *testing.T) {
+	c := &fakeClient{}
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		return &brokerrpc.ReadMetadataResponse{
+			File: brokerrpc.File{
+				Path:  path,
+				UUID:  "uuid-" + path,
+				Size:  3,
+				Mtime: "2026-01-03T00:00:00Z",
+			},
+		}, nil
+	}
+
+	f := newTestFsWithRoot(t, c, "/", false)
+	f.enc = defaultEncoding
+	ctx := context.Background()
+
+	src, err := f.NewObject(ctx, "a.txt")
+	if err != nil {
+		t.Fatalf("NewObject(a.txt): %v", err)
+	}
+	dst, err := f.NewObject(ctx, "b.txt")
+	if err != nil {
+		t.Fatalf("NewObject(b.txt): %v", err)
+	}
+
+	if _, err := operations.Move(ctx, f, dst, "b.txt", src); err != nil {
+		t.Fatalf("operations.Move: %v", err)
+	}
+	if c.moveFileCount != 1 {
+		t.Fatalf("MoveFile called %d times, want 1 (a zero-call return is a silent false success)", c.moveFileCount)
+	}
+	if c.lastMoveFileSrc != "/a.txt" || c.lastMoveFileDst != "/b.txt" {
+		t.Errorf("MoveFile = (%q → %q), want (%q → %q)", c.lastMoveFileSrc, c.lastMoveFileDst, "/a.txt", "/b.txt")
 	}
 }
 

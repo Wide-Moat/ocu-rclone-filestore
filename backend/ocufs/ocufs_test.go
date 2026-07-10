@@ -500,6 +500,35 @@ func TestNewObjectFile(t *testing.T) {
 	}
 }
 
+// TestNewObjectFileSetsRemote verifies that a NewObject-built Object reports
+// the rclone-relative remote it was requested by. rclone's fs.Object contract
+// requires Remote() to return that path; rclone core routes the destination of
+// an overwriting move through dst.Remote(), so an empty remote here collapses
+// the move target to the Fs root (see
+// TestOperationsMoveOverExistingTargetsDestination).
+func TestNewObjectFileSetsRemote(t *testing.T) {
+	c := &fakeClient{}
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		return &brokerrpc.ReadMetadataResponse{
+			File: brokerrpc.File{
+				Path:  path,
+				UUID:  "remote-uuid-001",
+				Size:  10,
+				Mtime: "2026-01-20T08:00:00Z",
+			},
+		}, nil
+	}
+
+	f := newTestFs(t, c, false)
+	obj, err := f.NewObject(context.Background(), "docs/file.txt")
+	if err != nil {
+		t.Fatalf("NewObject: %v", err)
+	}
+	if got := obj.Remote(); got != "docs/file.txt" {
+		t.Errorf("NewObject-built Object.Remote() = %q, want %q", got, "docs/file.txt")
+	}
+}
+
 // TestNewObjectNotFound verifies that NewObject returns fs.ErrorObjectNotFound
 // when ReadMetadata returns an empty response (neither file nor directory
 // populated).
