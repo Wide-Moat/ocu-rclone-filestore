@@ -88,7 +88,7 @@ func (e *liveEdge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
 	}
-	cred, err := e.exchanger.Resolve(r.Context(), claims.FilesystemID, weak)
+	cred, err := e.exchanger.Resolve(r.Context(), claims.FilesystemID, claims.Intent, weak)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("exchange failed: %v", err), http.StatusUnauthorized)
 		return

@@ -84,7 +84,7 @@ func TestResolveIssuesAcceptedCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	cred, err := g.Resolve(context.Background(), "fs-outputs", weak)
+	cred, err := g.Resolve(context.Background(), "fs-outputs", "write", weak)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -119,11 +119,11 @@ func TestResolveCachesPerFilesystemID(t *testing.T) {
 	}
 	weak, _ := cp.Mint("fs-outputs", "write", false)
 
-	first, err := g.Resolve(context.Background(), "fs-outputs", weak)
+	first, err := g.Resolve(context.Background(), "fs-outputs", "write", weak)
 	if err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
-	second, err := g.Resolve(context.Background(), "fs-outputs", weak)
+	second, err := g.Resolve(context.Background(), "fs-outputs", "write", weak)
 	if err != nil {
 		t.Fatalf("second Resolve: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestResolveCachesPerFilesystemID(t *testing.T) {
 	if got := atomic.LoadInt64(&ct.calls); got != 1 {
 		t.Fatalf("exchange peer hit %d times, want exactly 1", got)
 	}
-	if cached, ok := g.Cached("fs-outputs"); !ok || cached != first {
+	if cached, ok := g.Cached("fs-outputs", "write"); !ok || cached != first {
 		t.Fatalf("Cached did not reflect the resolved credential: %q %v", cached, ok)
 	}
 }
@@ -153,7 +153,7 @@ func TestResolveConcurrentSingleFlightStable(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			cred, rerr := g.Resolve(context.Background(), "fs-outputs", weak)
+			cred, rerr := g.Resolve(context.Background(), "fs-outputs", "write", weak)
 			if rerr != nil {
 				t.Errorf("concurrent Resolve: %v", rerr)
 				return
@@ -191,10 +191,10 @@ func TestResolveErrorsAndCachesNothing(t *testing.T) {
 	parts[2] = string(sig)
 	tampered := strings.Join(parts, ".")
 
-	if _, rerr := g.Resolve(context.Background(), "fs-outputs", tampered); rerr == nil {
+	if _, rerr := g.Resolve(context.Background(), "fs-outputs", "write", tampered); rerr == nil {
 		t.Fatalf("expected error on tampered subject token")
 	}
-	if _, ok := g.Cached("fs-outputs"); ok {
+	if _, ok := g.Cached("fs-outputs", "write"); ok {
 		t.Fatalf("a failed exchange must cache nothing")
 	}
 
@@ -204,10 +204,10 @@ func TestResolveErrorsAndCachesNothing(t *testing.T) {
 		Issuer: issuer, Audience: audience, FilesystemID: "fs-outputs",
 		Expiry: fixedNow().Add(time.Minute).Unix(),
 	})
-	if _, rerr := g.Resolve(context.Background(), "fs-outputs", ftok); rerr == nil {
+	if _, rerr := g.Resolve(context.Background(), "fs-outputs", "write", ftok); rerr == nil {
 		t.Fatalf("expected error on foreign-key subject token")
 	}
-	if _, ok := g.Cached("fs-outputs"); ok {
+	if _, ok := g.Cached("fs-outputs", "write"); ok {
 		t.Fatalf("a foreign-key exchange must cache nothing")
 	}
 }
@@ -218,7 +218,7 @@ func TestResolveRejectsEmptyFilesystemID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, rerr := g.Resolve(context.Background(), "", "anything"); rerr == nil {
+	if _, rerr := g.Resolve(context.Background(), "", "write", "anything"); rerr == nil {
 		t.Fatalf("expected error on empty filesystem_id")
 	}
 }
@@ -244,7 +244,7 @@ func TestResolveRejectsScopeMismatch(t *testing.T) {
 	}
 
 	// Request fs-A with the fs-B token: the scopes disagree, so Resolve refuses.
-	if _, rerr := g.Resolve(context.Background(), "fs-A", weakB); rerr == nil {
+	if _, rerr := g.Resolve(context.Background(), "fs-A", "write", weakB); rerr == nil {
 		t.Fatalf("expected error on scope mismatch (fs-B token, fs-A request)")
 	}
 	// The peer must not have been called at all on a mismatch.
@@ -253,10 +253,10 @@ func TestResolveRejectsScopeMismatch(t *testing.T) {
 	}
 	// Neither scope may be seeded in the cache, and no credential may have been
 	// issued into the sink.
-	if _, ok := g.Cached("fs-A"); ok {
+	if _, ok := g.Cached("fs-A", "write"); ok {
 		t.Fatalf("a scope mismatch must not seed cache key fs-A")
 	}
-	if _, ok := g.Cached("fs-B"); ok {
+	if _, ok := g.Cached("fs-B", "write"); ok {
 		t.Fatalf("a scope mismatch must not seed cache key fs-B")
 	}
 	if len(sink) != 0 {
@@ -280,7 +280,7 @@ func TestResolveRejectsUnparseableToken(t *testing.T) {
 		"a." + b64(`{"x":1}`) + ".c",  // JSON without a filesystem_id
 	}
 	for _, tok := range cases {
-		if _, rerr := g.Resolve(context.Background(), "fs-outputs", tok); rerr == nil {
+		if _, rerr := g.Resolve(context.Background(), "fs-outputs", "write", tok); rerr == nil {
 			t.Fatalf("expected error on unparseable token %q", tok)
 		}
 	}
@@ -334,7 +334,7 @@ func TestExchangeErrorsOnTransportFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, rerr := g.Resolve(context.Background(), "fs-outputs", mintScoped(t, "fs-outputs")); rerr == nil {
+	if _, rerr := g.Resolve(context.Background(), "fs-outputs", "write", mintScoped(t, "fs-outputs")); rerr == nil {
 		t.Fatalf("expected transport error")
 	}
 }
@@ -346,7 +346,7 @@ func TestExchangeErrorsOnNon200(t *testing.T) {
 	}))
 	defer ts.Close()
 	g, _ := New(Options{ExchangeURL: ts.URL})
-	if _, err := g.Resolve(context.Background(), "fs-outputs", mintScoped(t, "fs-outputs")); err == nil {
+	if _, err := g.Resolve(context.Background(), "fs-outputs", "write", mintScoped(t, "fs-outputs")); err == nil {
 		t.Fatalf("expected error on non-200")
 	}
 }
@@ -358,7 +358,7 @@ func TestExchangeErrorsOnEmptyAccessToken(t *testing.T) {
 	}))
 	defer ts.Close()
 	g, _ := New(Options{ExchangeURL: ts.URL})
-	if _, err := g.Resolve(context.Background(), "fs-outputs", mintScoped(t, "fs-outputs")); err == nil {
+	if _, err := g.Resolve(context.Background(), "fs-outputs", "write", mintScoped(t, "fs-outputs")); err == nil {
 		t.Fatalf("expected error on empty access_token")
 	}
 }
@@ -370,7 +370,7 @@ func TestExchangeErrorsOnGarbledBody(t *testing.T) {
 	}))
 	defer ts.Close()
 	g, _ := New(Options{ExchangeURL: ts.URL})
-	if _, err := g.Resolve(context.Background(), "fs-outputs", mintScoped(t, "fs-outputs")); err == nil {
+	if _, err := g.Resolve(context.Background(), "fs-outputs", "write", mintScoped(t, "fs-outputs")); err == nil {
 		t.Fatalf("expected error on garbled body")
 	}
 }
@@ -381,7 +381,51 @@ func TestExchangeErrorsOnBadRequestBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := g.Resolve(context.Background(), "fs-outputs", mintScoped(t, "fs-outputs")); err == nil {
+	if _, err := g.Resolve(context.Background(), "fs-outputs", "write", mintScoped(t, "fs-outputs")); err == nil {
 		t.Fatalf("expected request-build error")
+	}
+}
+
+// TestResolveKeysCacheOnFilesystemIDAndIntent is the ADR-0029 keystone: a
+// session's two mounts share ONE filesystem_id but carry distinct intent claims
+// (uploads=read, outputs=write). The per-{filesystem_id, intent} cache key keeps
+// the write mount's exchange a MISS against the read mount's entry, so each mount
+// gets its OWN credential. A per-filesystem_id cache (the ADR-0019 original)
+// would answer the second mount from the first mount's cache and flatten the
+// intent - the live two-mount-layout bug this closes.
+func TestResolveKeysCacheOnFilesystemIDAndIntent(t *testing.T) {
+	cp, _, ts, _ := newWired(t)
+	g, err := New(Options{ExchangeURL: ts.URL + exchange.ExchangePath})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	readWeak, err := cp.Mint("fs-fleet", "read", false)
+	if err != nil {
+		t.Fatalf("mint read: %v", err)
+	}
+	writeWeak, err := cp.Mint("fs-fleet", "write", false)
+	if err != nil {
+		t.Fatalf("mint write: %v", err)
+	}
+
+	readCred, err := g.Resolve(context.Background(), "fs-fleet", "read", readWeak)
+	if err != nil {
+		t.Fatalf("resolve read: %v", err)
+	}
+	writeCred, err := g.Resolve(context.Background(), "fs-fleet", "write", writeWeak)
+	if err != nil {
+		t.Fatalf("resolve write: %v", err)
+	}
+	if readCred == writeCred {
+		t.Fatalf("the read and write mounts got the SAME credential; the cache keyed on filesystem_id alone and flattened the intent")
+	}
+	// Each is cached under its own {fsID, intent} key; a re-resolve is a hit that
+	// returns the SAME per-intent credential (no second exchange, no crossover).
+	if c, ok := g.Cached("fs-fleet", "read"); !ok || c != readCred {
+		t.Fatalf("read credential not cached under {fs-fleet, read}")
+	}
+	if c, ok := g.Cached("fs-fleet", "write"); !ok || c != writeCred {
+		t.Fatalf("write credential not cached under {fs-fleet, write}")
 	}
 }
