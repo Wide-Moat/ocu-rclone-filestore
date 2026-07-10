@@ -1,28 +1,34 @@
 # SPDX-License-Identifier: FSL-1.1-Apache-2.0
 # Copyright (c) 2025 Open Computer Use Contributors
 #
-# CodeQL static analysis. Runs on push to main and on a weekly schedule, then
-# uploads SARIF results to the repository's code scanning dashboard (Security
-# tab) for human triage. A matrix over the analyzed languages keeps the Go
-# module and the workflow definitions on independent, parallel jobs. This
-# workflow is additive to sast.yml (semgrep) and is fully separate from the
-# build, release, and live e2e paths.
+# CodeQL static analysis. Runs on pull requests, on push to main, and on a
+# weekly schedule, then uploads SARIF results to the repository's code
+# scanning dashboard (Security tab) for human triage. A matrix over the
+# analyzed languages keeps the Go module and the workflow definitions on
+# independent, parallel jobs. This workflow is additive to sast.yml (semgrep)
+# and is fully separate from the build, release, and live e2e paths.
 #
-# CodeQL is advisory defense-in-depth, NOT a merge gate: the required, blocking
-# SAST floor is semgrep (sast.yml, a required status check). CodeQL runs on the
-# pushed main branch and weekly, so its findings still reach code scanning
-# alerts, but it deliberately carries NO pull_request trigger — a per-PR CodeQL
-# check would render a green tick that masquerades as a gate while not being a
-# required, blocking one. Keeping it off the PR event removes that misleading
-# signal without losing the dashboard coverage.
+# CodeQL is advisory defense-in-depth, NOT a merge gate: the required,
+# blocking SAST floor is semgrep (sast.yml, a required status check). The
+# pull_request trigger exists so reviewers see dataflow findings BEFORE merge
+# — a defect class the semgrep pattern floor does not cover would otherwise
+# get zero pre-merge signal and could ship in a release cut before the
+# post-merge dashboard is triaged. The check is advisory by construction:
+# the analyze jobs are deliberately absent from the branch-protection
+# required contexts (that list is the gate registry), and this comment is
+# the documented answer to the masquerade concern — advisory status is
+# stated at the trigger and enforced by the check's absence from the
+# required set. On fork PRs the read-only token can reject the SARIF upload;
+# that red is cosmetic noise on a non-required check, not a gate verdict.
 
 name: codeql
 
 on:
-  # No pull_request trigger: CodeQL is advisory defense-in-depth, not a merge
-  # gate (semgrep in sast.yml is the required blocking SAST floor). Running only
-  # on pushed main + weekly keeps the dashboard current without a per-PR check
-  # that masquerades as a gate while not being a required, blocking one.
+  # Advisory pre-merge signal (see the header comment): findings surface on
+  # the PR while semgrep remains the required blocking SAST floor. The
+  # analyze jobs are not in the required-checks list and must not silently
+  # become required without an owner decision.
+  pull_request:
   push:
     branches: [main]
   schedule:
