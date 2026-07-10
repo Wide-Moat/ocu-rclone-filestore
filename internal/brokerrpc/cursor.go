@@ -20,6 +20,7 @@ package brokerrpc
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 )
 
@@ -27,6 +28,65 @@ import (
 // on the wire and must be echoed unmodified. The client never inspects its
 // internals.
 type OpaqueCursor string
+
+// defaultMaxListPages is the default hard ceiling on how many pages a single
+// paged listing may fetch before the loop aborts. Each page from an honest
+// broker carries at least one entry, so the ceiling admits listings of tens of
+// thousands of entries per listing — far beyond any session filesystem this
+// mount serves — while bounding both the pagination loop and the seen-cursor
+// set at a fixed worst-case size. Hitting it surfaces a loud, attributable
+// error instead of guest OOM (the same least-provisioned-guest rationale as
+// defaultMaxDownloadBytes). Broker throttling (SEC-46) arrives as per-call
+// errors, never as endless pages, so the ceiling cannot misfire under
+// throttle.
+const defaultMaxListPages = 65536
+
+// pageGuard bounds a pagination loop against a broker that never lets the
+// listing complete. Two failure shapes exist on this wire and each needs its
+// own bound:
+//
+//   - A repeated cursor at ANY distance (the A,B,A,B echo, not just the
+//     immediate repeat): the shipped guard already treated an
+//     immediately-repeated cursor as non-progress and failed loudly; the seen
+//     set extends that same decision to longer cycles. The frozen contract
+//     pins nothing about cursor uniqueness and the opaque-echo discipline
+//     (package doc above) forbids reasoning about cursor structure, so a
+//     broker whose cursors legitimately repeat while progressing is
+//     indistinguishable from a cycle on this wire — the page ceiling below is
+//     the true bound, and failing at the repeat is the established decision
+//     applied at every distance. Cursors are stored as fixed-size SHA-256
+//     digests so a hostile arbitrarily-long cursor cannot balloon the set.
+//
+//   - Distinct cursors forever: no set catches a broker that mints a fresh
+//     cursor per page without end, so a hard page ceiling backstops the loop
+//     (and with it the seen set's memory).
+type pageGuard struct {
+	fn       string // emitting function, named in the error text
+	maxPages int
+	pages    int
+	seen     map[[sha256.Size]byte]struct{}
+}
+
+func newPageGuard(fn string, maxPages int) *pageGuard {
+	return &pageGuard{fn: fn, maxPages: maxPages, seen: make(map[[sha256.Size]byte]struct{})}
+}
+
+// admit accounts one fetched page and validates the non-empty cursor the
+// broker returned for the next page. It fails when the listing exceeds the
+// page ceiling or when the cursor repeats any cursor already seen in this
+// listing (a pagination cycle — the "did not advance" error class).
+func (g *pageGuard) admit(cursor OpaqueCursor) error {
+	g.pages++
+	if g.pages >= g.maxPages {
+		return fmt.Errorf("brokerrpc: %s: pagination exceeded the %d-page ceiling — aborting unbounded listing", g.fn, g.maxPages)
+	}
+	key := sha256.Sum256([]byte(cursor))
+	if _, dup := g.seen[key]; dup {
+		return fmt.Errorf("brokerrpc: %s: cursor did not advance (%q) — aborting pagination cycle", g.fn, string(cursor))
+	}
+	g.seen[key] = struct{}{}
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // Recursive listDirectory paging
@@ -65,6 +125,7 @@ func (c *Client) ListDirectoryStream(ctx context.Context, path string, yield fun
 	}
 
 	var cursor OpaqueCursor
+	guard := newPageGuard("ListDirectoryStream", c.maxListPages)
 
 	for {
 		req := listDirectoryPageRequest{
@@ -88,11 +149,12 @@ func (c *Client) ListDirectoryStream(ctx context.Context, path string, yield fun
 		if resp.Cursor == "" {
 			break
 		}
-		// Progress guard: if the broker echoes the same cursor we just sent,
-		// the listing is not advancing. Without this, a broker bug would spin
-		// this loop forever with unbounded memory growth inside the mount.
-		if cursor != "" && resp.Cursor == cursor {
-			return fmt.Errorf("brokerrpc: ListDirectoryAll: cursor did not advance (%q) — aborting non-progressing pagination", string(resp.Cursor))
+		// Progress guard: a cursor repeated at any distance or a listing past
+		// the page ceiling means pagination is not converging. Without this, a
+		// broker bug would spin this loop forever with unbounded memory growth
+		// inside the mount (see pageGuard).
+		if err := guard.admit(resp.Cursor); err != nil {
+			return err
 		}
 		cursor = resp.Cursor
 	}
@@ -148,6 +210,7 @@ func (c *Client) ListFilesStream(ctx context.Context, uuid string, yield func(Fi
 	}
 
 	var afterUUID OpaqueCursor
+	guard := newPageGuard("ListFilesStream", c.maxListPages)
 
 	for {
 		req := listFilesPageRequest{
@@ -171,10 +234,11 @@ func (c *Client) ListFilesStream(ctx context.Context, uuid string, yield func(Fi
 		if resp.AfterUUID == "" {
 			break
 		}
-		// Progress guard: a repeated after_uuid means the listing is not
-		// advancing; abort rather than loop forever (see ListDirectoryStream).
-		if afterUUID != "" && resp.AfterUUID == afterUUID {
-			return fmt.Errorf("brokerrpc: ListFilesAll: after_uuid did not advance (%q) — aborting non-progressing pagination", string(resp.AfterUUID))
+		// Progress guard: an after_uuid repeated at any distance or a listing
+		// past the page ceiling aborts rather than looping forever (see
+		// pageGuard).
+		if err := guard.admit(resp.AfterUUID); err != nil {
+			return err
 		}
 		afterUUID = resp.AfterUUID
 	}

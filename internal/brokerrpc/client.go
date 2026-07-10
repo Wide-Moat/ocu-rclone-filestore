@@ -61,6 +61,11 @@ type Client struct {
 	authToken        string
 	messageCeiling   int
 	maxDownloadBytes int64
+	// maxListPages is the hard ceiling on pages a single paged listing may
+	// fetch (see defaultMaxListPages in cursor.go). Unexported and defaulted at
+	// construction: it is a loop-termination safety bound, not a policy knob,
+	// so it is deliberately absent from ClientOptions and the mount config.
+	maxListPages int
 }
 
 // New constructs a Client bound to the broker's HTTPS service_url, the
@@ -114,6 +119,7 @@ func NewWithOptions(serviceURL, fsID, authToken string, caCertPEM []byte, opts C
 		authToken:        authToken,
 		messageCeiling:   ceiling,
 		maxDownloadBytes: maxDL,
+		maxListPages:     defaultMaxListPages,
 	}, nil
 }
 
