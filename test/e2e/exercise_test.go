@@ -782,8 +782,17 @@ func assertBrokerThrottlePersisted(t *testing.T, env liveEnv, relPath string, wa
 // throttled upload's writeback backoff can outlast the 30s window. The
 // byte-identity (sha256) check is the same regardless of budget, so widening
 // the wait never weakens what the assertion proves.
+//
+// On success the measured settle duration is logged next to the budget it ran
+// under. That is observability, not a bound: a recovery-latency regression
+// that still fits the budget (say a 100s settle in a green SC2 run) becomes
+// visible in the step output for a triager or a trend-reading human, without
+// re-tightening the deliberately widened throttle budget into a flake. A
+// follow-up that wants a hard promptness bound can graduate from this
+// recorded data instead of guessing one.
 func assertWorkspaceHasBytes(t *testing.T, workspace, relPath string, want []byte, within time.Duration) {
 	t.Helper()
+	start := time.Now()
 	wantSum := sha256.Sum256(want)
 	brokerPath := filepath.Join(workspace, filepath.FromSlash(relPath))
 	deadline := time.Now().Add(within)
@@ -794,7 +803,10 @@ func assertWorkspaceHasBytes(t *testing.T, workspace, relPath string, want []byt
 		if err == nil {
 			lastLen = len(b)
 			if sha256.Sum256(b) == wantSum {
-				return // byte-identical broker-side: the upload landed.
+				// Byte-identical broker-side: the upload landed.
+				t.Logf("broker-side bytes for %q settled in %s (budget %s)",
+					relPath, time.Since(start).Round(time.Millisecond), within)
+				return
 			}
 		} else {
 			lastErr = err
