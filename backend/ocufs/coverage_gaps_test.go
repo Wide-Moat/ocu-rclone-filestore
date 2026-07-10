@@ -496,10 +496,14 @@ func TestPutClientErrorWrapped(t *testing.T) {
 	}
 }
 
-// TestPutUsesOverwriteFalse verifies that Put (the create-new write path)
-// issues Upload with overwrite=false so a colliding destination is a conflict,
-// not a silent in-place replacement.
-func TestPutUsesOverwriteFalse(t *testing.T) {
+// TestPutUsesOverwriteTrue verifies that Put issues Upload with
+// overwrite=true. Put must be retry-safe: rclone re-drives Put after an
+// ambiguous first attempt (a lost 2xx on an upload the broker committed), so
+// a create-only Put wedges that retry on the broker's conflict forever.
+// rclone core decides create-vs-update before calling Put, so refusing a
+// collision inside Put is not part of the backend contract; the mount
+// presents last-writer-wins.
+func TestPutUsesOverwriteTrue(t *testing.T) {
 	c := &fakeClient{}
 	f := newTestFs(t, c, false)
 
@@ -507,8 +511,8 @@ func TestPutUsesOverwriteFalse(t *testing.T) {
 	if _, err := f.Put(context.Background(), bytes.NewReader([]byte("abc")), src); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if c.lastUploadOverwrite != false {
-		t.Error("Put issued Upload with overwrite=true, want overwrite=false (create-new path)")
+	if c.lastUploadOverwrite != true {
+		t.Error("Put issued Upload with overwrite=false, want overwrite=true (retry-safe, idempotent at the destination)")
 	}
 }
 

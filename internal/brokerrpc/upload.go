@@ -34,14 +34,16 @@ import (
 
 // uploadParamsFrame is the JSON body of the multipart "params" form field for a
 // fileUpload request. OverwriteExisting selects whether an existing destination
-// is replaced in place (true) or the upload fails on a present path (false): a
-// create-new write (Put) leaves it false so a colliding path is a conflict,
-// while an overwrite-in-place write (Update) sets it true so the broker
-// replaces the object atomically rather than the guest staging a
-// remove-then-upload with a non-atomic window between the two.
+// is replaced in place (true) or the upload fails on a present path (false).
+// EVERY guest upload sends true: Update so the broker replaces the object
+// atomically rather than the guest staging a remove-then-upload with a
+// non-atomic window between the two, and Put because rclone re-drives it after
+// an ambiguous first attempt (a lost success response on an upload the broker
+// committed), so it must be idempotent at the destination path. The broker's
+// create-only conflict arm is therefore guest-unreachable by design.
 //
-// The field is omitempty: a create-new upload (the overwhelmingly common path)
-// serialises NO overwrite_existing key at all.
+// The field keeps its omitempty tag for wire compatibility: false (never sent
+// by this guest) would serialise no overwrite_existing key at all.
 type uploadParamsFrame struct {
 	FilesystemID          string                `json:"filesystem_id"`
 	Path                  string                `json:"path"`
