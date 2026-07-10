@@ -74,7 +74,15 @@ func directMountFn(VFS *vfs.VFS, mountpoint string, opt *mountlib.Options) (<-ch
 	}
 	nodeOpts := buildNodeFSOptions(fsys, opt, mo)
 
-	rawFS := fusefs.NewNodeFS(root, &nodeOpts)
+	// Wrap the assembled raw filesystem so its extended-attribute ops answer
+	// ENOTSUP instead of ENOSYS. rclone's mount2 node answers xattr ops with
+	// ENOSYS; a native kernel silently rewrites that to ENOTSUP for userspace,
+	// but the gVisor sentry forwards ENOSYS verbatim, making `ls -la` print a
+	// spurious "Function not implemented" per entry. The wrapper makes both
+	// kernels agree (see xattr_enotsup.go). It composes because DisableXAttrs is
+	// left unset in buildFuseMountOptions — otherwise go-fuse would short-circuit
+	// xattr ops to ENOSYS inside the server, before this wrapper could run.
+	rawFS := newXattrENOTSUPFileSystem(fusefs.NewNodeFS(root, &nodeOpts))
 	server, err := fuse.NewServer(rawFS, mountpoint, &nodeOpts.MountOptions)
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("direct mount %q: %w", mountpoint, err)
@@ -135,11 +143,15 @@ var errUnsupportedDirectMountOption = errors.New("unsupported under direct mount
 // buildFuseMountOptions maps *mountlib.Options onto go-fuse's fuse.MountOptions
 // for the direct-mount frontend. The field mapping matches what rclone's mount2
 // frontend feeds go-fuse (same names, same defaults: MaxWrite pinned to 1 MiB,
-// xattrs and ReadDirPlus disabled), with one deliberate divergence:
-// DirectMountStrict is ALWAYS set, so go-fuse calls the mount syscall itself
-// and never execs a fusermount helper — the load-bearing property for the
-// static guest image. DirectMountStrict wins over DirectMount and has no
-// helper fallback.
+// ReadDirPlus disabled), with two deliberate divergences:
+//   - DirectMountStrict is ALWAYS set, so go-fuse calls the mount syscall itself
+//     and never execs a fusermount helper — the load-bearing property for the
+//     static guest image. DirectMountStrict wins over DirectMount and has no
+//     helper fallback.
+//   - DisableXAttrs is left UNSET (rclone's mount2 sets it): it would leak
+//     ENOSYS to userspace under the gVisor sentry. The xattrENOTSUPFileSystem
+//     wrapper in directMountFn supplies the correct ENOTSUP instead. See the
+//     DisableXAttrs note on the mount-options struct below.
 //
 // Because the option string goes raw into the mount syscall, the two axes the
 // kernel cannot parse are rejected with errUnsupportedDirectMountOption:
@@ -163,10 +175,19 @@ func buildFuseMountOptions(fsys *mount2.FS, opt *mountlib.Options) (fuse.MountOp
 		// AllowOther rides the field only: go-fuse appends the kernel-valid
 		// allow_other option itself under direct mount, so an explicit string
 		// append here would just duplicate it in the mount data.
-		AllowOther:         opt.AllowOther,
-		FsName:             opt.DeviceName,
-		Name:               "rclone",
-		DisableXAttrs:      true,
+		AllowOther: opt.AllowOther,
+		FsName:     opt.DeviceName,
+		Name:       "rclone",
+		// DisableXAttrs is deliberately NOT set. It would make go-fuse answer
+		// every GETXATTR/LISTXATTR with ENOSYS inside the server, before any
+		// filesystem method runs — and under the gVisor sentry that ENOSYS
+		// reaches userspace verbatim, so `ls -la` prints a spurious "Function
+		// not implemented" per entry. Instead the ops are allowed through to the
+		// mount2 node (which also answers ENOSYS) and the xattrENOTSUPFileSystem
+		// wrapper in directMountFn rewrites that to ENOTSUP — the POSIX "no
+		// xattrs here" answer a native mount gives. The kernel still caches the
+		// "no xattr support" signal on the first ENOTSUP, so there is no per-op
+		// probe cost.
 		Debug:              opt.DebugFUSE,
 		MaxReadAhead:       int(opt.MaxReadAhead),
 		MaxWrite:           1024 * 1024, // Linux v4.20+ caps requests at 1 MiB
