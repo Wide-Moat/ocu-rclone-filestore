@@ -416,20 +416,20 @@ func TestDownloadOversizedBodyIsError(t *testing.T) {
 
 	// Over-cap: a whole-object stream that carries more bytes than the bound
 	// must fail on read rather than deliver unbounded content. boundedBody with
-	// strict=true is exactly what Download returns on the full-read path.
-	over := newBoundedBody(io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("A"), 100))), true, 10)
+	// ranged=false is exactly what Download returns on the full-read path.
+	over := newBoundedBody(io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("A"), 100))), false, 10)
 	if _, err := io.ReadAll(over); err == nil {
 		t.Error("over-cap whole-object stream must fail on read, got no error")
 	}
 
-	// A ranged stream (strict=false) over-delivering is truncated to the window,
-	// not errored: the caller asked for a fixed byte count.
-	ranged := newBoundedBody(io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("B"), 100))), false, 10)
-	rangedGot, err := io.ReadAll(ranged)
-	if err != nil {
-		t.Fatalf("ranged over-delivery must truncate, not error: %v", err)
-	}
-	if len(rangedGot) != 10 {
-		t.Errorf("ranged stream = %d bytes, want 10 (truncated to window)", len(rangedGot))
+	// The ranged path is equally strict: over-delivery past the requested
+	// window is the observable signature of a broker that did not honour the
+	// range, so it errors rather than truncating (truncation would relabel the
+	// object's head as the requested window). This pin deliberately reverses
+	// the earlier truncate-to-window behaviour — see
+	// TestDownloadRangeOverDeliveryIsAnError for the wire-level pins.
+	ranged := newBoundedBody(io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("B"), 100))), true, 10)
+	if _, err := io.ReadAll(ranged); err == nil {
+		t.Error("ranged over-delivery must fail on read, got silent truncation")
 	}
 }

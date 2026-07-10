@@ -106,12 +106,14 @@ func TestAdapterDownloadForwards(t *testing.T) {
 	}
 }
 
-// TestAdapterDownloadRangeForwards confirms DownloadRange forwards to the
-// broker and that the returned slice is clamped to the requested length.
+// TestAdapterDownloadRangeForwards confirms DownloadRange forwards the
+// {offset, length} window to the broker and returns exactly the window bytes:
+// a mid-file offset proves the range reached the wire — the object's head
+// would be the wrong bytes.
 func TestAdapterDownloadRangeForwards(t *testing.T) {
 	a := newClientOverFakeBroker(t)
-	const length = int64(5)
-	rc, err := a.DownloadRange(context.Background(), "uuid-range", 0, length)
+	const offset, length = int64(5), int64(5)
+	rc, err := a.DownloadRange(context.Background(), "uuid-range", offset, length)
 	if err != nil {
 		t.Fatalf("DownloadRange: %v", err)
 	}
@@ -120,13 +122,11 @@ func TestAdapterDownloadRangeForwards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DownloadRange read: %v", err)
 	}
-	// The fake serves the full canned bytes; DownloadRange's defensive clamp
-	// trims to the requested length.
 	if int64(len(data)) != length {
-		t.Errorf("DownloadRange returned %d bytes, want %d (clamped to requested length)", len(data), length)
+		t.Errorf("DownloadRange returned %d bytes, want %d (the requested window)", len(data), length)
 	}
-	if !bytes.Equal(data, fakeBrokerContentBytes[:length]) {
-		t.Errorf("DownloadRange returned %q, want %q", data, fakeBrokerContentBytes[:length])
+	if !bytes.Equal(data, fakeBrokerContentBytes[offset:offset+length]) {
+		t.Errorf("DownloadRange returned %q, want %q", data, fakeBrokerContentBytes[offset:offset+length])
 	}
 }
 

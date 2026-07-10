@@ -120,10 +120,12 @@ chunked `application/octet-stream` body, read to completion. The read is bounded
 by a download cap (16 GiB) so a runaway stream cannot OOM the least-provisioned
 party in the system: a body over the cap is a hard error, never a truncated
 success. `Download` returns the full object. `DownloadRange` sends an
-`{offset, length}` window so the broker streams only those bytes, then clamps the
-result to `length` as a defensive trim against a broker that over-delivers; it
-rejects a negative offset or length up front. A non-2xx maps through
-`MapHTTPStatus`.
+`{offset, length}` window so the broker streams only those bytes; it rejects a
+negative offset or length up front, answers a length-0 window with an empty
+reader and no wire call, and bounds the stream strictly to `length` — the wire
+carries no range echo, so over-delivery is the one verifiable signature of a
+dishonoured range, and it fails as an error rather than being trimmed into
+wrong-but-plausible bytes. A non-2xx maps through `MapHTTPStatus`.
 
 **Cursor pagination.** Listing is paged. `ListDirectory` and `ListFiles` each
 return one page plus a continuation token (`Cursor` and `AfterUUID`
