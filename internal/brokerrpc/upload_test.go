@@ -341,3 +341,77 @@ func (m *midErrReader) Read(p []byte) (int, error) {
 	}
 	return 0, errors.New("midErrReader: forced mid-stream failure")
 }
+
+// countingBody is a synthetic response body that serves `remain` filler bytes
+// and records how many were actually consumed, so a test can measure exactly
+// how far a response read progressed.
+type countingBody struct {
+	remain   int64
+	consumed int64
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	if c.remain <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > c.remain {
+		p = p[:c.remain]
+	}
+	for i := range p {
+		p[i] = 'x'
+	}
+	c.remain -= int64(len(p))
+	c.consumed += int64(len(p))
+	return len(p), nil
+}
+
+func (c *countingBody) Close() error { return nil }
+
+// drainingStubTransport is a RoundTripper returning a canned status and body.
+// It MUST drain the request body before responding: Upload streams its
+// multipart body through an io.Pipe and blocks on the writer goroutine, so a
+// stub that never consumes the request would hang the call instead of letting
+// the test fail on its real assertion.
+type drainingStubTransport struct {
+	status int
+	body   io.ReadCloser
+}
+
+func (s *drainingStubTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	_, _ = io.Copy(io.Discard, req.Body)
+	_ = req.Body.Close()
+	return &http.Response{
+		StatusCode:    s.status,
+		Status:        http.StatusText(s.status),
+		Header:        make(http.Header),
+		Body:          s.body,
+		Request:       req,
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		ContentLength: -1,
+	}, nil
+}
+
+// TestUploadResponseBodyReadIsBounded pins the fileUpload response read to the
+// package's bounded-read discipline: the body is diagnostics-only (the HTTP
+// status is authoritative), so a runaway or desynced response body must never
+// be buffered whole into guest memory. A 256 MiB error body must be consumed
+// only up to the small diagnostics cap. The 64 KiB bound is hardcoded here on
+// purpose: raising the production cap past the diagnostics scale should trip
+// this pin and force the change to be argued.
+func TestUploadResponseBodyReadIsBounded(t *testing.T) {
+	body := &countingBody{remain: 256 << 20} // 256 MiB runaway body
+	c, _ := newTLSTestClient(t, "fs-up-bounded", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("the stub transport must intercept the request; the TLS server must never be reached")
+	})
+	c.http.Transport = &drainingStubTransport{status: http.StatusInternalServerError, body: body}
+
+	err := c.Upload(context.Background(), "/f.txt", bytes.NewReader([]byte("data")), 4, false)
+	if err == nil {
+		t.Fatal("expected the 500 to surface as an error, got nil")
+	}
+	const diagnosticsCap = 64 * 1024
+	if body.consumed > diagnosticsCap+512 {
+		t.Errorf("Upload consumed %d response-body bytes, want <= %d — the fileUpload response read is unbounded", body.consumed, diagnosticsCap)
+	}
+}

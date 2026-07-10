@@ -32,6 +32,16 @@ import (
 	"net/http"
 )
 
+// maxUploadResponseBytes bounds the fileUpload response-body read. The body is
+// used solely as diagnostics for MapHTTPStatus — the HTTP status, not the body,
+// is authoritative for success or failure — so the small error-body bound
+// (matching the fileDownload error path) is the right discipline on both the
+// 2xx and non-2xx branches. A longer body is silently capped rather than
+// buffered whole into guest memory: the guest is the least-provisioned party
+// and must never let a runaway or desynced response size an unbounded read
+// into OOM.
+const maxUploadResponseBytes = 64 * 1024
+
 // uploadParamsFrame is the JSON body of the multipart "params" form field for a
 // fileUpload request. OverwriteExisting selects whether an existing destination
 // is replaced in place (true) or the upload fails on a present path (false).
@@ -109,7 +119,14 @@ func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBy
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
-	respBody, readErr := io.ReadAll(httpResp.Body)
+	// Bounded read: only a diagnostics-sized prefix of the body is ever kept
+	// (see maxUploadResponseBytes). Consequence on the 2xx branch: a transport
+	// failure occurring PAST the cap is invisible here — the LimitReader ends
+	// the read cleanly at the cap — so the call reports success on the strength
+	// of the 2xx status alone. That is the intended semantics: the broker
+	// committed the upload when it issued the 2xx, and the remainder of the
+	// body carries no data the guest acts on.
+	respBody, readErr := io.ReadAll(io.LimitReader(httpResp.Body, maxUploadResponseBytes))
 
 	// Collect the body-writing result (blocks until the goroutine finishes).
 	writeErr := <-errCh
