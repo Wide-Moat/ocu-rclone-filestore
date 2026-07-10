@@ -130,12 +130,14 @@ The broker replies with an HTTP status. A 2xx is success and may carry an
 optional `FileUploadResponse` JSON body with the assembled object's metadata; the
 decoder tolerates its presence or absence. A non-2xx maps through `MapHTTPStatus`.
 
-**`overwrite_existing` semantics.** A create-new write (Put) sends the field
-`false`, and because it is `omitempty` the create-new path — the common case —
-serialises no key at all, so a broker build predating the knob accepts it
-unchanged. An overwrite-in-place write (Update) sends `true` so the broker
-replaces the object atomically rather than forcing the guest into a non-atomic
-remove-then-upload.
+**`overwrite_existing` semantics.** Every guest upload sends `true`: Update so
+the broker replaces the object atomically rather than forcing the guest into a
+non-atomic remove-then-upload, and Put because rclone re-drives it after an
+ambiguous first attempt (a success response lost after the broker committed),
+so it must be idempotent at the destination path. The broker's create-only
+conflict arm is guest-unreachable by design. The field keeps `omitempty` for
+wire compatibility: `false` — never sent by this guest — would serialise no
+key at all.
 
 **Status-precedence rule.** When the broker ends the request early (a SEC-46
 `429` throttle or a permission failure) it replies without draining the request
@@ -218,9 +220,10 @@ The single-page methods (`ListDirectory`, `ListFiles`) expose the cursor so a
 caller can tell page 1 from a complete listing — silent truncation is
 detectable rather than disguised as the whole result. The aggregating methods
 (`ListDirectoryAll`, `ListFilesAll`) follow the cursor across pages and return
-the accumulated slice. Each carries a **progress guard**: if the broker echoes
-the same cursor it was just handed, the loop aborts with an error rather than
-spinning forever with unbounded memory growth inside the mount.
+the accumulated slice. Each carries a **progress guard**: a cursor that repeats
+at any distance (a pagination cycle, caught by a fixed-size digest set) or a
+listing that runs past the hard page ceiling aborts the loop with an error
+rather than spinning forever with unbounded memory growth inside the mount.
 
 `listDirectory` entries are a pinned union, `ListDirEntry`: each entry is either
 a `file` (a full `FilesystemFile`) XOR a `directory`, discriminated by which key

@@ -110,9 +110,10 @@ failure — it replies without draining the request body, the pipe closes, and t
 writer goroutine fails with a pipe-closure error. That local error must **not**
 mask the retryable backpressure verdict the status carries; `Upload` prefers the
 non-2xx status first, and surfaces a genuine write fault only on a 2xx where the
-write error is not a pipe closure. The `overwrite` argument distinguishes a
-create-new write (the common path, which serialises no overwrite key at all)
-from an overwrite-in-place write.
+write error is not a pipe closure. The `overwrite` argument selects whether an
+existing destination is replaced; both backend write paths pass `true` —
+Update for the atomic in-place replace, Put because rclone re-drives it after
+an ambiguous first attempt and it must be idempotent at the destination path.
 
 **`Download` / `DownloadRange` (`fileDownload`).** The request is a JSON POST
 addressing the object by UUID; on a 2xx the broker streams the object bytes as a
@@ -134,9 +135,10 @@ complete listing instead of mistaking page 1 for the whole result.
 `ListDirectoryAll` and `ListFilesAll` follow the token to completion. The token
 is an `OpaqueCursor` — echoed back verbatim, never parsed or mutated, because it
 may carry broker-internal scope and inspecting it could leak an enumeration path.
-Both loops guard against a token that repeats unchanged: a non-advancing cursor
-aborts rather than spinning forever with unbounded memory growth inside the
-mount.
+Both loops carry a progress guard: a token that repeats at any distance (a
+pagination cycle, caught by a fixed-size digest set) or a listing that runs
+past the hard page ceiling aborts with an error rather than spinning forever
+with unbounded memory growth inside the mount.
 
 Code: `upload.go` (`Upload`, `isPipeClosure`, `sourceChunkSize`), `download.go` (`Download`, `DownloadRange`, `doDownload`), `cursor.go` (`ListDirectoryAll`, `ListFilesAll`, `OpaqueCursor`).
 
