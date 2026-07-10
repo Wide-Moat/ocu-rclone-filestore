@@ -4,8 +4,17 @@
 # Naming-denylist gate. A thin caller of scripts/lexicon-scan.sh: it passes
 # the LEXICON_DENYLIST repository secret into the environment and runs the
 # shared scan. All scan logic lives in the script so the behavior is the same
-# locally and in CI. With the secret unset the scan skips with a notice; with
-# a denied term present it fails without ever echoing the term value.
+# locally and in CI. On a hit it fails without ever echoing the term value.
+#
+# This job runs STRICT (LEXICON_REQUIRE_DENYLIST): with the secret
+# unavailable the check fails loudly instead of skipping green — fork PRs and
+# Dependabot PRs run secretless, and a required gate that silently passes for
+# exactly those contributor classes is vacuous. The failure message names the
+# remedy per state. Owner duty: the LEXICON_DENYLIST secret must exist in
+# BOTH the repository Actions secrets store AND the Dependabot secrets store
+# (Dependabot-triggered runs read only the latter); keep the two in sync on
+# every denylist update. Advisory verdicts on fork PRs come from the separate
+# label-gated lexicon-fork-advisory.yml, never from this required job.
 
 name: lexicon
 
@@ -24,7 +33,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Self-test the lexicon scanner
+        # Prove the scanner's contract first (throwaway tokens, no secret): a
+        # regression in the strict fail-closed branch, the fixed-string
+        # matching, or the no-leak guarantee reds the gate itself instead of
+        # silently restoring a vacuous green.
+        run: bash scripts/lexicon-scan_test.sh
       - name: Run lexicon scan
         env:
           LEXICON_DENYLIST: ${{ secrets.LEXICON_DENYLIST }}
+          # Fail closed when the secret is unavailable: "no term list" and
+          # "scan passed" must never share an exit code (see the script's
+          # behavior contract).
+          LEXICON_REQUIRE_DENYLIST: "1"
         run: bash scripts/lexicon-scan.sh
