@@ -46,12 +46,17 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, dstRemote string) (fs.Obje
 	}
 
 	// Build a uuid-less destination Object. The broker ack carries no File
-	// body, so no uuid is available from the ack. resolve() is the defensive
-	// fallback that fetches uuid+size on the first access that needs them.
+	// body, so no uuid is available from the ack; resolve() is the defensive
+	// fallback that fetches it on the first access that needs it. The size IS
+	// known without a round-trip: a server-side copy preserves byte content,
+	// hence byte count — carrying it keeps Size() truthful on the ack path
+	// (the kernel caches Size() on the first getattr) with zero extra wire
+	// calls.
 	return &Object{
 		fs:     f,
 		path:   dstPath,
 		remote: dstRemote,
+		size:   srcObj.Size(),
 	}, nil
 }
 
@@ -81,10 +86,14 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, dstRemote string) (fs.Obje
 		return nil, fmt.Errorf("ocufs: Move %q → %q: %w", srcPath, dstPath, mapBrokerError(err))
 	}
 
+	// Ack-only destination Object, same shape as Copy's: uuid resolves lazily,
+	// but the size is carried from the source (a server-side move preserves
+	// byte count) so Size() never reports a false 0 on the rename path.
 	return &Object{
 		fs:     f,
 		path:   dstPath,
 		remote: dstRemote,
+		size:   srcObj.Size(),
 	}, nil
 }
 

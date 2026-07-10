@@ -344,6 +344,92 @@ func TestListDerivedObjectOpenNoResolve(t *testing.T) {
 	}
 }
 
+// TestAckOnlySizeResolvesDefensively verifies that Size() on an ack-only
+// Object (uuid empty, size 0 — the only state in which the held size can be
+// false) triggers the same defensive resolve ModTime uses, and that the
+// resolve is idempotent: once the uuid lands, further Size() calls cost zero
+// wire calls.
+func TestAckOnlySizeResolvesDefensively(t *testing.T) {
+	c := &fakeClient{}
+	const wantSize = int64(512)
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		return &brokerrpc.ReadMetadataResponse{
+			File: brokerrpc.File{
+				UUID:  "size-resolve-uuid",
+				Size:  wantSize,
+				Path:  path,
+				Mtime: "2026-01-01T00:00:00Z",
+			},
+		}, nil
+	}
+	f := newTestFs(t, c, false)
+	obj := &Object{fs: f, path: "/ack/file.bin", uuid: "", size: 0}
+
+	if got := obj.Size(); got != wantSize {
+		t.Errorf("Size() on an ack-only Object = %d, want %d (the defensive resolve must run)", got, wantSize)
+	}
+	if c.readMetadataCount != 1 {
+		t.Errorf("ReadMetadata called %d times, want exactly 1", c.readMetadataCount)
+	}
+	if got := obj.Size(); got != wantSize {
+		t.Errorf("second Size() = %d, want %d", got, wantSize)
+	}
+	if c.readMetadataCount != 1 {
+		t.Errorf("ReadMetadata called %d times after the second Size(), want 1 (resolve is idempotent once uuid lands)", c.readMetadataCount)
+	}
+}
+
+// TestResolvedSizeStaysWireFree verifies the guard the other way: an Object
+// that already carries a uuid or a non-zero size answers Size() with zero wire
+// calls — the hot Put/Move/Copy paths gain no round-trip.
+func TestResolvedSizeStaysWireFree(t *testing.T) {
+	c := &fakeClient{}
+	f := newTestFs(t, c, false)
+
+	withUUID := &Object{fs: f, path: "/a.bin", uuid: "u", size: 0}
+	if got := withUUID.Size(); got != 0 {
+		t.Errorf("Size() = %d, want 0 (a resolved 0-byte file reports 0)", got)
+	}
+	withSize := &Object{fs: f, path: "/b.bin", uuid: "", size: 42}
+	if got := withSize.Size(); got != 42 {
+		t.Errorf("Size() = %d, want 42 (the carried size is truthful)", got)
+	}
+	if c.readMetadataCount != 0 {
+		t.Errorf("ReadMetadata called %d times, want 0", c.readMetadataCount)
+	}
+}
+
+// TestAckOnlySizeResolveIsBounded verifies that the resolve issued from
+// Size() carries a deadline. The fs.Object interface gives Size() no context
+// and the shared broker HTTP client sets no global timeout, so an unbounded
+// context here would let a stalled broker connection wedge kernel getattr
+// forever; the bound must live at this call site.
+func TestAckOnlySizeResolveIsBounded(t *testing.T) {
+	c := &fakeClient{}
+	deadlineSeen := false
+	var deadline time.Time
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		deadline, deadlineSeen = ctx.Deadline()
+		return &brokerrpc.ReadMetadataResponse{
+			File: brokerrpc.File{UUID: "u", Size: 1, Path: path, Mtime: "2026-01-01T00:00:00Z"},
+		}, nil
+	}
+	f := newTestFs(t, c, false)
+	obj := &Object{fs: f, path: "/ack/slow.bin", uuid: "", size: 0}
+
+	before := time.Now()
+	_ = obj.Size()
+	if c.readMetadataCount != 1 {
+		t.Fatalf("ReadMetadata called %d times from Size(), want 1 (the defensive resolve must run)", c.readMetadataCount)
+	}
+	if !deadlineSeen {
+		t.Fatal("the resolve context carries no deadline; a stalled broker connection would wedge getattr forever")
+	}
+	if max := before.Add(sizeResolveTimeout + 5*time.Second); deadline.After(max) {
+		t.Errorf("resolve deadline %v exceeds sizeResolveTimeout bound (max %v)", deadline, max)
+	}
+}
+
 // TestObjectResolveConcurrentNoRace hammers ModTime, Size, and Open concurrently
 // on a single uuid-less (ack-only) Object. resolve() and the accessors all touch
 // the lazily-resolved fields, so without mu this fans a data race that -race

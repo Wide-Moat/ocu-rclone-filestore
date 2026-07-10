@@ -71,8 +71,35 @@ func (o *Object) ModTime(ctx context.Context) time.Time {
 	return o.mtime
 }
 
-// Size returns the size of the object in bytes.
+// sizeResolveTimeout bounds the defensive metadata resolve issued from
+// Size(). The fs.Object interface gives Size no context to inherit a deadline
+// from, and the shared broker HTTP client deliberately sets no global timeout
+// (a client-wide timeout would also bound body reads and abort long streaming
+// downloads mid-transfer) — so the bound has to live at this call site, or a
+// TCP-level broker stall would wedge kernel getattr forever.
+const sizeResolveTimeout = 30 * time.Second
+
+// Size returns the size of the object in bytes. For an ack-only Object that
+// carries neither a uuid nor a size (uuid == "" && size == 0 — the only state
+// in which the held size can be false), it triggers the same defensive
+// resolve ModTime uses, so a false 0 is never reported: the FUSE getattr
+// after a rename reads Size() BEFORE ModTime(), and an unresolved 0 here
+// would be stamped into the kernel attr cache, making an immediate read
+// return empty content for a non-empty file. The size != 0 guard keeps the
+// Put/Move/Copy hot paths wire-free (their carried size is truthful: the
+// broker commits an upload only when the streamed byte count matches the
+// declared one, and a server-side copy/move preserves byte count).
 func (o *Object) Size() int64 {
+	o.mu.Lock()
+	unresolved := o.uuid == "" && o.size == 0
+	o.mu.Unlock()
+	if unresolved {
+		// Bounded by construction (see sizeResolveTimeout): no caller context
+		// exists on this interface and the shared client carries no deadline.
+		ctx, cancel := context.WithTimeout(context.Background(), sizeResolveTimeout)
+		defer cancel()
+		_ = o.resolve(ctx) // best-effort; return whatever we have
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.size
