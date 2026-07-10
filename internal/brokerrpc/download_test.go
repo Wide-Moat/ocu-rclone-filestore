@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/rclone/rclone/fs/fserrors"
@@ -340,6 +341,85 @@ func TestDownloadServiceUnavailableIsRetryable(t *testing.T) {
 	}
 	if !fserrors.IsRetryError(err) {
 		t.Errorf("503 download must be retryable: %v", err)
+	}
+}
+
+// scriptedBody is an io.ReadCloser that first serves its data bytes, then
+// replays the scripted tail results one Read at a time (a step with n == 1
+// yields its payload byte), and finally reports io.EOF. It lets a test place
+// an exact (n, err) sequence at the boundedBody cap boundary.
+type scriptedBody struct {
+	data []byte
+	tail []scriptedRead
+}
+
+type scriptedRead struct {
+	b   byte // payload byte when n == 1
+	n   int
+	err error
+}
+
+func (s *scriptedBody) Read(p []byte) (int, error) {
+	if len(s.data) > 0 {
+		n := copy(p, s.data)
+		s.data = s.data[n:]
+		return n, nil
+	}
+	if len(s.tail) == 0 {
+		return 0, io.EOF
+	}
+	step := s.tail[0]
+	s.tail = s.tail[1:]
+	if step.n > 0 && len(p) > 0 {
+		p[0] = step.b
+		return 1, step.err
+	}
+	return 0, step.err
+}
+
+func (s *scriptedBody) Close() error { return nil }
+
+// TestBoundedBodyPropagatesErrorAtCapBoundary pins that a transport failure
+// landing exactly at the byte cap surfaces as an error: the strict path's
+// one-byte probe must never relabel a mid-body fault as clean end-of-stream,
+// or a truncated prefix of a larger object would pass to the caller as the
+// complete file content.
+func TestBoundedBodyPropagatesErrorAtCapBoundary(t *testing.T) {
+	const limit = 8
+	body := &scriptedBody{
+		data: bytes.Repeat([]byte("D"), limit),
+		tail: []scriptedRead{{n: 0, err: errors.New("connection reset mid-body")}},
+	}
+	bb := newBoundedBody(body, true, limit)
+	got, err := io.ReadAll(bb)
+	if len(got) != limit {
+		t.Errorf("delivered %d in-cap bytes, want %d", len(got), limit)
+	}
+	if err == nil {
+		t.Fatal("a transport failure at the cap boundary must surface, got clean EOF")
+	}
+	if !strings.Contains(err.Error(), "connection reset mid-body") {
+		t.Errorf("error %q does not carry the underlying transport fault", err.Error())
+	}
+}
+
+// TestBoundedBodyProbeRetriesTransientZeroRead pins that a legal transient
+// (0, nil) probe result is retried until decisive per the io.Reader contract:
+// over-cap bytes hidden behind one empty read must still trip the over-cap
+// error, never clean EOF.
+func TestBoundedBodyProbeRetriesTransientZeroRead(t *testing.T) {
+	const limit = 8
+	body := &scriptedBody{
+		data: bytes.Repeat([]byte("D"), limit),
+		tail: []scriptedRead{{n: 0, err: nil}, {n: 1, b: 'X', err: nil}},
+	}
+	bb := newBoundedBody(body, true, limit)
+	got, err := io.ReadAll(bb)
+	if err == nil {
+		t.Fatalf("over-cap bytes behind a transient (0, nil) read must error, got clean EOF with %d bytes", len(got))
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("error %q does not name the over-cap condition", err.Error())
 	}
 }
 
