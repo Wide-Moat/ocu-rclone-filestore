@@ -1183,6 +1183,52 @@ func TestImmediateChildRemoteRootPath(t *testing.T) {
 	}
 }
 
+// TestListBuiltObjectPathIsCanonical pins the guest-side invariant that every
+// outbound wire path is canonical (see TestAbsPathCanonicalizes) for
+// List-built Objects too. The listing response body is not pinned by the
+// frozen contract, so a broker entry path without a leading slash (or with a
+// trailing one) is contract-legal; the depth-1 filter already canonicalizes
+// its own copy, and the Object built from the same entry must store — and
+// later put on the wire (Remove, Update, resolve) — the same canonical form,
+// never the raw listing bytes.
+func TestListBuiltObjectPathIsCanonical(t *testing.T) {
+	c := &fakeClient{}
+	c.listDirectoryAllResult = func(ctx context.Context, path string) ([]brokerrpc.ListDirEntry, error) {
+		return []brokerrpc.ListDirEntry{
+			{File: &brokerrpc.FilesystemFile{
+				Path:  "docs/file.txt", // no leading slash — non-canonical but contract-legal
+				Size:  9,
+				UUID:  "uuid-canon",
+				Mtime: "2026-01-01T00:00:00Z",
+			}},
+		}, nil
+	}
+	f := newTestFs(t, c, false)
+
+	entries, err := f.List(context.Background(), "docs")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("List returned %d entries, want 1", len(entries))
+	}
+	obj, ok := entries[0].(*Object)
+	if !ok {
+		t.Fatalf("entries[0] is %T, want *Object", entries[0])
+	}
+	if obj.path != "/docs/file.txt" {
+		t.Errorf("List-built Object.path = %q, want canonical %q", obj.path, "/docs/file.txt")
+	}
+
+	// The stored path is what later path-addressed ops put on the wire.
+	if err := obj.Remove(context.Background()); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if c.lastRemoveFilePath != "/docs/file.txt" {
+		t.Errorf("Remove sent path %q on the wire, want canonical %q", c.lastRemoveFilePath, "/docs/file.txt")
+	}
+}
+
 // TestListPathErrorPropagated verifies that an error from ListDirectoryAll
 // is surfaced by List.
 func TestListPathErrorPropagated(t *testing.T) {
