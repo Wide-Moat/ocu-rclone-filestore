@@ -48,8 +48,18 @@ type Claims struct {
 	IssuedAt     int64  `json:"iat"`
 	Expiry       int64  `json:"exp"`
 	FilesystemID string `json:"filesystem_id"`
-	Intent       string `json:"intent"`
-	Downloadable bool   `json:"downloadable"`
+	// Intent is the top-level intent claim harness-minted tokens carry. The real
+	// Control plane nests it under authz.intent (see Authz below); Verify falls
+	// back to that nested value so a Control-minted Storage-JWT and a harness
+	// token both surface the same Intent. The two claim shapes coexist: harness
+	// fixtures set the top-level field, Control sets the nested one.
+	Intent string `json:"intent"`
+	// Authz mirrors the ocu-control StorageClaims shape: the real Control plane
+	// emits the intent under an "authz" object, not at the payload top level.
+	Authz struct {
+		Intent string `json:"intent"`
+	} `json:"authz"`
+	Downloadable bool `json:"downloadable"`
 }
 
 // joseHeader is the JWS protected header for an ES256 JWT.
@@ -146,6 +156,12 @@ func Verify(token string, jwks JWKS, expectedIss, expectedAud string, now time.T
 	var c Claims
 	if err := json.Unmarshal(payloadJSON, &c); err != nil {
 		return Claims{}, fmt.Errorf("%w: payload is not JSON", ErrUntrusted)
+	}
+	// The real Control plane nests the intent under authz.intent; a harness token
+	// carries it at the top level. Prefer the top-level value, fall back to the
+	// nested one, so both claim shapes yield a usable Intent downstream.
+	if c.Intent == "" {
+		c.Intent = c.Authz.Intent
 	}
 
 	if expectedIss != "" && c.Issuer != expectedIss {
