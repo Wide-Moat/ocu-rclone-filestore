@@ -321,3 +321,43 @@ func TestDecodeRSRejectsWrongLength(t *testing.T) {
 		t.Fatalf("expected error for wrong-length signature")
 	}
 }
+
+// TestVerifyReadsNestedAuthzIntent pins the ocu-control claim shape: the real
+// Control plane emits the intent nested under an "authz" object, not at the
+// payload top level. Verify must surface that nested intent (with claims-bind
+// on, the storage engine reads Claims.Intent to build the per-mount grant, so a
+// missed nested intent denies every op on the mount). A top-level intent still
+// wins when both are present.
+func TestVerifyReadsNestedAuthzIntent(t *testing.T) {
+	priv := mustKey(t)
+	now := time.Unix(1_700_000_000, 0)
+	jwks := JWKS{Keys: []JWK{JWKFromPublic("kid-1", &priv.PublicKey)}}
+
+	// A Control-shaped token: intent lives ONLY under authz.intent. We build the
+	// payload by hand because the harness Claims struct also serialises the
+	// top-level field; here we prove the nested read path.
+	base := sampleClaims(now)
+	base.Intent = ""
+	base.Authz.Intent = "write"
+	tok, err := Sign(priv, "kid-1", base)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	got, err := Verify(tok, jwks, base.Issuer, base.Audience, now)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if got.Intent != "write" {
+		t.Fatalf("nested authz.intent not surfaced: got Intent=%q, want write", got.Intent)
+	}
+
+	// Top-level intent wins when both are set.
+	both := sampleClaims(now)
+	both.Intent = "read"
+	both.Authz.Intent = "write"
+	tok2, _ := Sign(priv, "kid-1", both)
+	got2, _ := Verify(tok2, jwks, both.Issuer, both.Audience, now)
+	if got2.Intent != "read" {
+		t.Fatalf("top-level intent must win: got %q, want read", got2.Intent)
+	}
+}
