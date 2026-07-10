@@ -124,7 +124,7 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// on the validated filesystem_id. (Stage 2, STRIP, is realised below by
 	// building a fresh forwarded request that never copies the inbound
 	// Authorization header.) ---
-	cred, err := e.exchanger.Resolve(r.Context(), claims.FilesystemID, weak)
+	cred, err := e.exchanger.Resolve(r.Context(), claims.FilesystemID, claims.Intent, weak)
 	if err != nil {
 		http.Error(w, "exchange failed", http.StatusUnauthorized)
 		return

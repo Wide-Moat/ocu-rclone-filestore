@@ -79,9 +79,11 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Stage 3: EXCHANGE the validated token for the real credential, keyed on the
-	// validated filesystem_id. (Stage 2 STRIP is realised below by building a
-	// fresh forwarded request that never copies the inbound Authorization.)
-	cred, err := e.exchanger.Resolve(r.Context(), claims.FilesystemID, weak)
+	// validated {filesystem_id, intent} (ADR-0029: a session's two mounts share
+	// the fsID but carry distinct intents). (Stage 2 STRIP is realised below by
+	// building a fresh forwarded request that never copies the inbound
+	// Authorization.)
+	cred, err := e.exchanger.Resolve(r.Context(), claims.FilesystemID, claims.Intent, weak)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("exchange failed: %v", err), http.StatusUnauthorized)
 		return

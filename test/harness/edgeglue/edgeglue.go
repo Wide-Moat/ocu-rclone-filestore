@@ -53,10 +53,15 @@ type tokenResponse struct {
 // to refuse caching that credential under a mismatched cache key (WR-01).
 type scopeClaims struct {
 	FilesystemID string `json:"filesystem_id"`
+	Intent       string `json:"intent"`
 }
 
 // Exchanger performs the RFC-8693 exchange against the exchange peer and caches
-// the issued credential per filesystem_id. It is safe for concurrent use.
+// the issued credential per {filesystem_id, intent} (ADR-0029 amends ADR-0019:
+// a session's two mounts share one filesystem_id but carry distinct intent
+// claims, so a per-fsID cache would answer the outputs mount's exchange with the
+// uploads mount's credential and flatten the intent). It is safe for concurrent
+// use.
 type Exchanger struct {
 	// exchangeURL is the absolute URL of the exchange peer's token endpoint
 	// (its base URL joined with exchange.ExchangePath).
@@ -67,9 +72,10 @@ type Exchanger struct {
 
 	mu    sync.Mutex
 	cache map[string]string
-	// inflight serialises concurrent first-resolvers for the same filesystem_id
-	// so a session triggers exactly one exchange even under a stampede. Each
-	// entry is created under mu and closed when its exchange settles.
+	// inflight serialises concurrent first-resolvers for the same
+	// {filesystem_id, intent} key so a session triggers exactly one exchange per
+	// mount even under a stampede. Each entry is created under mu and closed when
+	// its exchange settles.
 	inflight map[string]*flight
 }
 
@@ -114,7 +120,7 @@ func New(opts Options) (*Exchanger, error) {
 // re-validates it, so a credential is only ever issued for a token the edge has
 // already proved valid. A failed exchange returns a non-nil error and caches
 // nothing.
-func (e *Exchanger) Resolve(ctx context.Context, filesystemID, weakJWT string) (string, error) {
+func (e *Exchanger) Resolve(ctx context.Context, filesystemID, intent, weakJWT string) (string, error) {
 	if filesystemID == "" {
 		return "", fmt.Errorf("edgeglue: a filesystem_id is required")
 	}
@@ -136,8 +142,15 @@ func (e *Exchanger) Resolve(ctx context.Context, filesystemID, weakJWT string) (
 		return "", fmt.Errorf("edgeglue: subject token is scoped to %q, not the requested %q", claimedFSID, filesystemID)
 	}
 
+	// The cache and inflight keys are {filesystem_id, intent}: a session's two
+	// mounts share the filesystem_id but not the intent, so keying on the pair
+	// keeps the outputs (write) mount's exchange a miss against the uploads
+	// (read) mount's entry (ADR-0029). The NUL separator cannot appear in either
+	// value.
+	key := filesystemID + "\x00" + intent
+
 	e.mu.Lock()
-	if cred, ok := e.cache[filesystemID]; ok {
+	if cred, ok := e.cache[key]; ok {
 		e.mu.Unlock()
 		return cred, nil
 	}
@@ -145,7 +158,7 @@ func (e *Exchanger) Resolve(ctx context.Context, filesystemID, weakJWT string) (
 	// launching a second one: one exchange per session even under a stampede.
 	// Respect context cancellation while waiting so a caller that gives up (or a
 	// cancelled request) is not pinned to the leader's whole round trip.
-	if fl, ok := e.inflight[filesystemID]; ok {
+	if fl, ok := e.inflight[key]; ok {
 		e.mu.Unlock()
 		select {
 		case <-fl.done:
@@ -154,9 +167,9 @@ func (e *Exchanger) Resolve(ctx context.Context, filesystemID, weakJWT string) (
 			return "", ctx.Err()
 		}
 	}
-	// This goroutine owns the exchange for this scope.
+	// This goroutine owns the exchange for this {scope, intent}.
 	fl := &flight{done: make(chan struct{})}
-	e.inflight[filesystemID] = fl
+	e.inflight[key] = fl
 	e.mu.Unlock()
 
 	cred, err := e.exchange(ctx, weakJWT)
@@ -164,21 +177,22 @@ func (e *Exchanger) Resolve(ctx context.Context, filesystemID, weakJWT string) (
 	e.mu.Lock()
 	fl.cred, fl.err = cred, err
 	if err == nil {
-		e.cache[filesystemID] = cred
+		e.cache[key] = cred
 	}
-	delete(e.inflight, filesystemID)
+	delete(e.inflight, key)
 	e.mu.Unlock()
 	close(fl.done)
 
 	return cred, err
 }
 
-// Cached reports the cached credential for a filesystem_id, if any. It exists so
-// a caller (or a test) can observe the cache without forcing an exchange.
-func (e *Exchanger) Cached(filesystemID string) (string, bool) {
+// Cached reports the cached credential for a {filesystem_id, intent}, if any. It
+// exists so a caller (or a test) can observe the cache without forcing an
+// exchange.
+func (e *Exchanger) Cached(filesystemID, intent string) (string, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	cred, ok := e.cache[filesystemID]
+	cred, ok := e.cache[filesystemID+"\x00"+intent]
 	return cred, ok
 }
 
