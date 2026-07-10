@@ -173,6 +173,56 @@ func TestMoveCallsMoveFile(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Ack-only destination Objects must never report a false size. The FUSE
+// getattr after a rename reads Size() BEFORE ModTime(), so a size-0 ack
+// Object stamps 0 into the kernel attr cache and an immediate read returns
+// empty content for a non-empty file.
+// ---------------------------------------------------------------------------
+
+// TestMoveReturnedObjectReportsSourceSize verifies that the ack-only Object
+// returned by Move carries the source's size (a server-side move preserves
+// byte content, hence byte count) without any metadata round-trip.
+func TestMoveReturnedObjectReportsSourceSize(t *testing.T) {
+	c := &fakeClient{}
+	f := newTestFsWithRoot(t, c, "/", false)
+
+	const wantSize = int64(4096)
+	srcObj := &Object{fs: f, path: "/big.bin", remote: "big.bin", uuid: "uuid-big", size: wantSize}
+
+	got, err := f.Move(context.Background(), srcObj, "renamed.bin")
+	if err != nil {
+		t.Fatalf("Move: %v", err)
+	}
+	if got.Size() != wantSize {
+		t.Errorf("Move-returned Object.Size() = %d, want %d (the kernel caches this value on the first getattr after a rename)", got.Size(), wantSize)
+	}
+	if c.readMetadataCount != 0 {
+		t.Errorf("ReadMetadata called %d times, want 0 (the carried size keeps the ack path wire-free)", c.readMetadataCount)
+	}
+}
+
+// TestCopyReturnedObjectReportsSourceSize is the Copy analogue of
+// TestMoveReturnedObjectReportsSourceSize.
+func TestCopyReturnedObjectReportsSourceSize(t *testing.T) {
+	c := &fakeClient{}
+	f := newTestFsWithRoot(t, c, "/", false)
+
+	const wantSize = int64(2048)
+	srcObj := &Object{fs: f, path: "/src.bin", remote: "src.bin", uuid: "uuid-src", size: wantSize}
+
+	got, err := f.Copy(context.Background(), srcObj, "copy.bin")
+	if err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	if got.Size() != wantSize {
+		t.Errorf("Copy-returned Object.Size() = %d, want %d", got.Size(), wantSize)
+	}
+	if c.readMetadataCount != 0 {
+		t.Errorf("ReadMetadata called %d times, want 0 (the carried size keeps the ack path wire-free)", c.readMetadataCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestOperationsMoveOverExistingTargetsDestination — rename-over-existing
 // driven through rclone core, the exact shape the VFS rename path produces.
 // ---------------------------------------------------------------------------
