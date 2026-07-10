@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Advisory lexicon scan of a FORK pull request's head, maintainer-triggered.
+#
+# Why this exists: the required "lexicon naming gate" (lexicon.yml) fails
+# closed on fork PRs because repository secrets are never exposed to
+# fork-triggered runs. This workflow gives a maintainer a real verdict on the
+# fork content BEFORE deciding to vet and re-push the branch in-repo. It is
+# decision support only, never a merge path: its job name is not a required
+# check and must not become one.
+#
+# SECURITY justification for pull_request_target (binding rule: a fork PR
+# must never execute code in a privileged context or exfiltrate secrets):
+#   - Nothing from the PR head is ever EXECUTED. The default checkout below
+#     is the BASE repository, so the scanner script that runs is the trusted
+#     base copy; the PR head is checked out into an inert subdirectory with
+#     persist-credentials disabled and is only READ by the base scanner's
+#     fixed-string grep. No build, no test, no script, no action definition
+#     from the head tree runs.
+#   - The trigger is `types: [labeled]` gated on the maintainer-applied
+#     `lexicon-fork-scan` label: only users with triage/write access can
+#     apply labels, a fork push does not re-trigger the run (no
+#     `synchronize` type; head.sha is pinned at label time), and a re-scan
+#     requires removing and re-applying the label. Unattended fork-driven
+#     probing of the denylist is structurally impossible.
+#   - Oracle bound: the scan runs in aggregate-only mode, so the public log
+#     carries a verdict and a matching-file COUNT — never paths (on an
+#     untrusted tree the filenames are attacker-chosen, and echoing a
+#     matching path would let a chosen filename act as a term-membership
+#     oracle) and never term values. Accepted residual, by design: each
+#     deliberate maintainer-triggered run leaks at most that coarse count.
+#
+# On a hit: do not import the content; investigate locally (where the term
+# list is available) before any in-repo re-push.
+
+name: lexicon-fork-advisory
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  fork-scan:
+    name: lexicon fork scan (advisory, maintainer-triggered)
+    if: github.event.label.name == 'lexicon-fork-scan'
+    runs-on: ubuntu-latest
+    steps:
+      # BASE-repo checkout: on pull_request_target the default ref is the
+      # base branch, so everything executed below comes from the trusted
+      # base tree.
+      - name: Checkout the base repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # PR-head checkout into an inert subdirectory: read-only input for the
+      # scan, never executed. persist-credentials: false keeps the workflow
+      # token out of the untrusted tree's .git config.
+      - name: Checkout the PR head (inert, read-only)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pr-head
+          persist-credentials: false
+      - name: Scan the PR head (aggregate verdict only)
+        env:
+          LEXICON_DENYLIST: ${{ secrets.LEXICON_DENYLIST }}
+          LEXICON_REQUIRE_DENYLIST: "1"
+          LEXICON_AGGREGATE_ONLY: "1"
+        run: bash scripts/lexicon-scan.sh pr-head
