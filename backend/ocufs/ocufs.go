@@ -405,8 +405,16 @@ func (f *Fs) immediateChildRemote(dir string, entry brokerrpc.ListDirEntry) (str
 // (uuid+size+mime+mtime) as per the pinned D6 contract.
 func objectFromFile(f *Fs, remote string, ff *brokerrpc.FilesystemFile) *Object {
 	return &Object{
-		fs:    f,
-		path:  ff.Path,
+		fs: f,
+		// The stored path is what later path-addressed ops (Remove, Update,
+		// resolve) put on the wire, and every outbound wire path is canonical
+		// by guest-side invariant (see TestAbsPathCanonicalizes). The listing
+		// response body is not pinned by the frozen contract, so the entry
+		// path may legally arrive non-canonical; canonicalize it exactly as
+		// the depth-1 filter does for its own comparison copy. cleanPath is
+		// safe on the on-wire encoded form — "/" is the preserved structural
+		// separator and is never produced by the encoding.
+		path:  cleanPath(ff.Path),
 		uuid:  ff.UUID,
 		size:  ff.Size,
 		mtime: parseMtime(ff.Mtime),
