@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -427,6 +428,57 @@ func TestAckOnlySizeResolveIsBounded(t *testing.T) {
 	}
 	if max := before.Add(sizeResolveTimeout + 5*time.Second); deadline.After(max) {
 		t.Errorf("resolve deadline %v exceeds sizeResolveTimeout bound (max %v)", deadline, max)
+	}
+}
+
+// TestObjectMimeTypeSurfacesBrokerMime verifies that *Object implements
+// fs.MimeTyper and serves the broker-declared MIME type. Features()
+// advertises ReadMimeType, so without the optional interface the declared
+// mime carried on every constructor path is dead weight and rclone silently
+// falls back to extension guessing — wrong for any extension-less file.
+func TestObjectMimeTypeSurfacesBrokerMime(t *testing.T) {
+	c := &fakeClient{}
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		return &brokerrpc.ReadMetadataResponse{
+			File: brokerrpc.File{
+				Path:  path,
+				UUID:  "mime-uuid",
+				Size:  4,
+				Mtime: "2026-01-01T00:00:00Z",
+				MIME:  "application/x-custom",
+			},
+		}, nil
+	}
+	f := newTestFs(t, c, false)
+
+	obj, err := f.NewObject(context.Background(), "binfile") // extension-less
+	if err != nil {
+		t.Fatalf("NewObject: %v", err)
+	}
+	if _, ok := obj.(fs.MimeTyper); !ok {
+		t.Fatal("*Object does not implement fs.MimeTyper; the advertised ReadMimeType capability is false")
+	}
+	if got := fs.MimeType(context.Background(), obj); got != "application/x-custom" {
+		t.Errorf("fs.MimeType = %q, want the broker-declared %q (extension guessing must not win)", got, "application/x-custom")
+	}
+}
+
+// TestObjectMimeTypeEmptyFallsBackToExtension verifies the rclone convention
+// for an unknown MIME: MimeType returns the empty string, and fs.MimeType
+// then falls back to extension-based guessing.
+func TestObjectMimeTypeEmptyFallsBackToExtension(t *testing.T) {
+	f := newTestFs(t, &fakeClient{}, false)
+	obj := &Object{
+		fs:     f,
+		path:   "/x.txt",
+		remote: "x.txt",
+		uuid:   "u",
+		size:   1,
+		mime:   "", // broker declared nothing
+	}
+	got := fs.MimeType(context.Background(), obj)
+	if !strings.HasPrefix(got, "text/plain") {
+		t.Errorf("fs.MimeType with empty broker mime = %q, want the extension fallback (text/plain...)", got)
 	}
 }
 

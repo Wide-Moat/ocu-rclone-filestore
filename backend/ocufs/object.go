@@ -121,6 +121,19 @@ func (o *Object) Hash(ctx context.Context, ty hash.Type) (string, error) {
 // Storable returns true — all Objects returned by the backend can be stored.
 func (o *Object) Storable() bool { return true }
 
+// MimeType returns the broker-declared MIME type for the object,
+// implementing the optional fs.MimeTyper interface that the advertised
+// ReadMimeType feature promises. The mime is decoded and stored on every
+// constructor path (listing entries and metadata lookups); on the ack-only
+// path resolve() populates it exactly as it populates mtime. An empty string
+// is the correct "unknown" answer per rclone convention — the core then falls
+// back to extension-based guessing — so no wire call is issued here.
+func (o *Object) MimeType(ctx context.Context) string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.mime
+}
+
 // ---------------------------------------------------------------------------
 // fs.Object mutating methods
 // ---------------------------------------------------------------------------
