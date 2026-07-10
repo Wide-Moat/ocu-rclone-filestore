@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+#
+# Nightly exploratory fuzzing of the defensive parsers. The per-PR fuzz-smoke
+# job in ci.yml replays only the committed seed corpus (deterministic); THIS
+# workflow is the scheduled stochastic exploration that job's rationale points
+# to: every fuzz target in the two untrusted-byte packages (the host-supplied
+# mount config and the broker wire bodies) gets a real engine budget each
+# night.
+#
+# Targets are ENUMERATED at run time (go test -list) instead of named in an
+# allowlist, so a renamed or added target cannot silently drop out of
+# coverage, and zero enumerated targets is itself a loud failure — the
+# fake-green failure mode of a hardcoded target list. A crasher fails the job
+# only after every target has spent its budget (rc accumulator), and the
+# failing inputs plus the accumulated corpus upload as an artifact.
+#
+# Schedule + manual dispatch only: this is not (and cannot become) a required
+# PR check, so it can never deadlock a merge. The repo owner watches
+# scheduled-run failures via the Actions tab and the default-branch
+# workflow-failure notifications.
+
+name: fuzz
+
+on:
+  schedule:
+    # Nightly, off-the-hour to avoid scheduler contention.
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: exploratory fuzz (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [internal/brokerrpc, internal/mountcfg]
+    env:
+      PKG: ${{ matrix.package }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Resolve the artifact slug and the fuzz cache path
+        # upload-artifact rejects '/' in artifact names, so the failure-only
+        # upload below must never see the raw matrix value; also export the
+        # resolved fuzz-corpus cache dir while go is on PATH.
+        run: |
+          set -euo pipefail
+          echo "PKG_SLUG=${PKG//\//-}" >> "${GITHUB_ENV}"
+          echo "GOFUZZCACHE=$(go env GOCACHE)/fuzz" >> "${GITHUB_ENV}"
+      - name: Fuzz every enumerated target with a per-target budget
+        run: |
+          set -euo pipefail
+          # Enumerate the targets that actually exist: naming them in an
+          # allowlist is how a previous per-PR fuzz step went fake-green on
+          # non-existent targets. An empty enumeration is a failure, never a
+          # skip.
+          targets="$(go test "./${PKG}/" -list '^Fuzz' | grep '^Fuzz' || true)"
+          if [[ -z "${targets}" ]]; then
+            echo "error: no fuzz targets found in ${PKG}; enumeration broken or targets removed" >&2
+            exit 1
+          fi
+          echo "enumerated fuzz targets in ${PKG}:"
+          echo "${targets}"
+          # The fuzz engine accepts exactly one -fuzz match per invocation,
+          # hence the loop. The rc accumulator keeps later targets fuzzing
+          # when an earlier one crashes, then fails the job loudly at the
+          # end; a crasher input lands in ${PKG}/testdata/fuzz/<Target>/ for
+          # the artifact upload.
+          rc=0
+          for t in ${targets}; do
+            go test "./${PKG}/" -run='^$' -fuzz="^${t}\$" -fuzztime=5m || rc=1
+          done
+          exit "${rc}"
+      - name: Upload crashers and the accumulated corpus
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-corpus-${{ env.PKG_SLUG }}
+          path: |
+            ${{ env.PKG }}/testdata/fuzz/
+            ${{ env.GOFUZZCACHE }}/
+          if-no-files-found: warn

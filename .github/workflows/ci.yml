@@ -78,8 +78,9 @@ jobs:
       # The PR gate runs ONLY the committed seed corpus (deterministic): a seed
       # regression fails the PR, but no stochastic exploration runs here, so an
       # unrelated PR can never trip a newly-discovered crash and go red at random.
-      # Exploratory fuzzing with a time budget belongs in a scheduled/nightly job
-      # (tracked separately), not in the per-PR gate.
+      # Exploratory fuzzing with a real per-target time budget runs nightly in
+      # fuzz.yml (schedule + workflow_dispatch), which enumerates the targets at
+      # run time; the per-PR gate here stays deterministic on purpose.
       - name: Fuzz-seed broker-wire parsers (brokerrpc)
         run: |
           set -euo pipefail
