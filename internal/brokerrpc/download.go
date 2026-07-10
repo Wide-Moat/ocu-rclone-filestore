@@ -156,10 +156,28 @@ func newBoundedBody(body io.ReadCloser, strict bool, limit int64) *boundedBody {
 func (b *boundedBody) Read(p []byte) (int, error) {
 	if b.remaining <= 0 {
 		if b.strict {
-			// The stream still has bytes past the cap: reject rather than OOM.
+			// Probe one byte past the cap and reject over-delivery rather than
+			// OOM. The probe must be DECISIVE: a (0, nil) result is "try again"
+			// per the io.Reader contract, and a boundary error is a real
+			// transport fault that must surface — never be relabelled as clean
+			// end-of-stream (that would pass a truncated prefix off as the
+			// complete content).
 			var probe [1]byte
-			if n, _ := b.body.Read(probe[:]); n > 0 {
-				return 0, fmt.Errorf("brokerrpc: fileDownload: response exceeds %d bytes", b.limit)
+			for {
+				n, perr := b.body.Read(probe[:])
+				if n > 0 {
+					return 0, fmt.Errorf("brokerrpc: fileDownload: response exceeds %d bytes", b.limit)
+				}
+				if perr != nil {
+					if perr == io.EOF {
+						return 0, io.EOF
+					}
+					return 0, perr
+				}
+				// (0, nil): not decisive — try again. The underlying body here
+				// is always a net/http response body, which terminates every
+				// read sequence with n > 0 or an error, so this loop cannot
+				// spin in production.
 			}
 		}
 		return 0, io.EOF
