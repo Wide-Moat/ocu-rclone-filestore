@@ -152,53 +152,11 @@ func TestBareAckDecodes(t *testing.T) {
 	}
 }
 
-// TestReadFileRangeMarshalsNested verifies that a ReadFileRequest serialises
-// its Range as a nested object, not inline fields.
-func TestReadFileRangeMarshalsNested(t *testing.T) {
-	req := brokerrpc.ReadFileRequest{
-		FilesystemID: "fs-1",
-		Path:         "/file.txt",
-		Range: brokerrpc.Range{
-			Offset: 100,
-			Length: 512,
-		},
-		AuthorizationMetadata: brokerrpc.AuthorizationMetadata{
-			Intent:       "read",
-			Downloadable: false,
-		},
-	}
-
-	b, err := json.Marshal(req)
-	if err != nil {
-		t.Fatalf("marshal ReadFileRequest: %v", err)
-	}
-
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(b, &top); err != nil {
-		t.Fatalf("unmarshal to map: %v", err)
-	}
-
-	rawRange, ok := top["range"]
-	if !ok {
-		t.Fatal("expected range key at top level; not found")
-	}
-
-	var rng map[string]json.RawMessage
-	if err := json.Unmarshal(rawRange, &rng); err != nil {
-		t.Fatalf("range is not an object: %v", err)
-	}
-	if _, ok := rng["offset"]; !ok {
-		t.Error("expected offset inside range")
-	}
-	if _, ok := rng["length"]; !ok {
-		t.Error("expected length inside range")
-	}
-}
-
-// TestUUIDAxisRequestsDoNotHavePath verifies that uuid-addressed ops
-// (getFileMetadata, fileDownload, listFiles) carry a uuid field, not a path.
+// TestUUIDAxisRequestsDoNotHavePath verifies that the uuid-addressed
+// fileDownload request carries a uuid field, not a path — the guest never
+// addresses that op by path.
 func TestUUIDAxisRequestsDoNotHavePath(t *testing.T) {
-	req := brokerrpc.GetFileMetadataRequest{
+	req := brokerrpc.FileDownloadRequest{
 		FilesystemID: "fs-1",
 		UUID:         "u-abc",
 		AuthorizationMetadata: brokerrpc.AuthorizationMetadata{
@@ -209,7 +167,7 @@ func TestUUIDAxisRequestsDoNotHavePath(t *testing.T) {
 
 	b, err := json.Marshal(req)
 	if err != nil {
-		t.Fatalf("marshal GetFileMetadataRequest: %v", err)
+		t.Fatalf("marshal FileDownloadRequest: %v", err)
 	}
 
 	var top map[string]json.RawMessage
@@ -223,18 +181,5 @@ func TestUUIDAxisRequestsDoNotHavePath(t *testing.T) {
 	// path must not appear on uuid-axis ops
 	if _, bad := top["path"]; bad {
 		t.Error("path must NOT appear on uuid-axis requests")
-	}
-}
-
-// TestCreateFileResponseDecodes verifies that a createFile response wrapping
-// a FilesystemFile decodes correctly.
-func TestCreateFileResponseDecodes(t *testing.T) {
-	raw := `{"file": {"path": "/new.txt", "size": 0, "uuid": "u-new"}}`
-	var resp brokerrpc.CreateFileResponse
-	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
-		t.Fatalf("decode CreateFileResponse: %v", err)
-	}
-	if resp.File.Path != "/new.txt" {
-		t.Errorf("CreateFileResponse.File.Path = %q; want /new.txt", resp.File.Path)
 	}
 }

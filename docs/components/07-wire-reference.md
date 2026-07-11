@@ -49,10 +49,15 @@ Code: `transport.go` (`httpsTransport`), `client.go` (`opURL`, `restBase`, `call
 ## The 18 operations
 
 Every request carries `filesystem_id` at the top level and an
-`authorization_metadata` block. Path-scoped ops address by `path`; three ops
-(`getFileMetadata`, `listFiles`, `fileDownload`) address by broker-minted
-`uuid` handle — the guest never derives scope from a UUID. Rename/copy ops use
-the bare field names `source` and `destination` (not `*_path`).
+`authorization_metadata` block. Path-scoped ops address by `path`; the
+implemented uuid-axis op (`fileDownload`) addresses by broker-minted `uuid`
+handle — the guest never derives scope from a UUID. Rename/copy ops use the
+bare field names `source` and `destination` (not `*_path`).
+
+The operation **names** and their intents are pinned for the whole set; a body
+the frozen contract marks TBD is **never invented here** — those ops have no
+client method and no wire types in this package, only their pinned names in
+the intent table (so intent stamping stays total).
 
 Intent is derived centrally from the op via one authoritative table; it is
 never set by the caller. The `preview` intent exists in the service vocabulary
@@ -61,35 +66,35 @@ but the mount never requests it.
 | # | Op (route segment) | Intent | Address | Transport | Request fields (beyond `filesystem_id` + `authorization_metadata`) | Response |
 |---|---|---|---|---|---|---|
 | 1 | `listDirectory` | read | path | unary | `path`; `cursor` on page 2+ | `ListDirectoryResponse` |
-| 2 | `readFile` | read | path | unary | `path`, `range{offset,length}` | `ReadFileResponse` (metadata-only; see below) |
+| 2 | `readFile` | read | — | not implemented | body TBD at the frozen contract | body TBD |
 | 3 | `readMetadata` | read | path | unary | `path` | `ReadMetadataResponse` |
-| 4 | `getFileMetadata` | read | uuid | unary | `uuid` | `GetFileMetadataResponse` |
-| 5 | `listFiles` | read | uuid | unary | `uuid`; `after_uuid` on page 2+ | `ListFilesResponse` |
+| 4 | `getFileMetadata` | read | uuid | not implemented | body TBD at the frozen contract | body TBD |
+| 5 | `listFiles` | read | — | not implemented | body TBD at the frozen contract | body TBD |
 | 6 | `fileDownload` | read | uuid | chunked download | `uuid`, optional `range{offset,length}` | chunked octet-stream body |
 | 7 | `makeDirectory` | write | path | unary | `path` | ack `{}` |
 | 8 | `moveDirectory` | write | path | unary | `source`, `destination` | ack `{}` |
 | 9 | `removeDirectory` | write | path | unary | `path` | ack `{}` |
-| 10 | `createFile` | write | path | unary | `path` | `CreateFileResponse` |
+| 10 | `createFile` | write | — | not implemented | body TBD at the frozen contract | body TBD |
 | 11 | `copyFile` | write | path | unary | `source`, `destination`, `overwrite_existing` | ack `{}` |
 | 12 | `moveFile` | write | path | unary | `source`, `destination`, `overwrite_existing` | ack `{}` |
 | 13 | `removeFile` | write | path | unary | `path` | ack `{}` |
-| 14 | `fileUpload` | write | path | multipart upload | `params` field + streamed file part | optional `FileUploadResponse` |
-| 15 | `importFiles` | write | path | unary | `path` | ack `{}` |
-| 16 | `importZip` | write | path | unary | `path` | ack `{}` |
-| 17 | `migrateFilesystem` | write | — | unary | (none) | ack `{}` |
-| 18 | `removeFilesystem` | write | — | unary | (none) | ack `{}` |
+| 14 | `fileUpload` | write | path | multipart upload | `params` field + streamed file part | 2xx status; body read as bounded diagnostics only (body TBD) |
+| 15 | `importFiles` | write | — | not implemented | body TBD at the frozen contract | body TBD |
+| 16 | `importZip` | write | — | not implemented | body TBD at the frozen contract | body TBD |
+| 17 | `migrateFilesystem` | write | — | not implemented | body TBD at the frozen contract | body TBD |
+| 18 | `removeFilesystem` | write | — | not implemented | body TBD at the frozen contract | body TBD |
+
+A "not implemented" row is an op whose **name and intent are pinned** but whose
+request/response field set the frozen contract leaves TBD: the client defines
+no method and no wire types for it, and none may be added until the contract
+pins the body. (`getFileMetadata` is contract-described as a by-uuid read,
+recorded in its Address cell; the other TBD rows carry no addressing claim.)
 
 Ack responses decode to the empty `AckResponse` struct and tolerate any future
 fields the broker adds. The unary `copyFile`/`moveFile` methods send
 `overwrite_existing: true` — the operations layer has already decided the
-mutation should proceed by the time it reaches the backend.
-
-`readFile` is **metadata-only as shipped**: its response carries a `File` with
-no content body, because the content field is contract-TBD and is not invented
-here. The request `range` therefore selects within a body that is currently
-absent. Bulk content arrives over `fileDownload`, not this op. A broker that
-returns a content field has it silently dropped by the tolerant decoder until
-the field is pinned.
+mutation should proceed by the time it reaches the backend. Bulk content
+arrives over `fileDownload`; the mount's metadata reads ride `readMetadata`.
 
 Code: `intent.go` (the 18 `Op` constants, `opIntentTable`), `client.go` (per-op methods), `messages.go` (request/response types).
 
@@ -126,9 +131,10 @@ buffered. The body is two form fields:
    single `Write` stays under `MessageCeiling`; the part as a whole carries the
    exact source bytes.
 
-The broker replies with an HTTP status. A 2xx is success and may carry an
-optional `FileUploadResponse` JSON body with the assembled object's metadata; the
-decoder tolerates its presence or absence. A non-2xx maps through `MapHTTPStatus`.
+The broker replies with an HTTP status. A 2xx is success; the response body is
+TBD at the frozen contract, so the client never decodes fields from it — it is
+read only as a bounded diagnostics prefix. A non-2xx maps through
+`MapHTTPStatus`.
 
 **`overwrite_existing` semantics.** Every guest upload sends `true`: Update so
 the broker replaces the object atomically rather than forcing the guest into a
@@ -164,7 +170,7 @@ The broker assembles the object only when the streamed total equals
 `declared_size_bytes`; any over- or under-send draws `400`/`422`, which maps to a
 permanent no-retry error.
 
-Code: `upload.go` (`Upload`, `writeUploadMultipart`, `isPipeClosure`, `sourceChunkSize`, `jsonEnvelopeOverhead`, `uploadParamsFrame`), `messages.go` (`FileUploadResponse`).
+Code: `upload.go` (`Upload`, `writeUploadMultipart`, `isPipeClosure`, `sourceChunkSize`, `uploadParamsFrame`).
 
 ## fileDownload — chunked octet-stream, ranged, UUID-addressed
 
@@ -202,34 +208,33 @@ Two entry points consume the same op:
   that needs a contract-level pin. Offset is not re-applied locally — the
   broker already seeked to it.
 
-Neither helper is the unary `readFile` op; they are the chunked ranged-read path
-(D5).
+This chunked ranged-read path is the only content-read the client implements
+(D5); the contract's unary `readFile` op has a TBD body and no client method.
 
 Code: `download.go` (`Download`, `DownloadRange`, `doDownload`, `maxDownloadBytes`), `messages.go` (`FileDownloadRequest`, `Range`).
 
 ## Cursor pagination
 
-Two listing ops page. `listDirectory` returns a `cursor`; `listFiles` returns an
-`after_uuid`. Both are `OpaqueCursor` — transmitted as strings, echoed back
-verbatim on the next request, never parsed or mutated. The opacity is a security
-requirement: a cursor may carry broker-internal scope information, and inspecting
-or rewriting it could break broker invariants or open an enumeration path
-(D7 / D8).
+`listDirectory` pages: the response carries a `cursor`, an `OpaqueCursor` —
+transmitted as a string, echoed back verbatim on the next request, never parsed
+or mutated. The opacity is a security requirement: a cursor may carry
+broker-internal scope information, and inspecting or rewriting it could break
+broker invariants or open an enumeration path (D7 / D8).
 
-The single-page methods (`ListDirectory`, `ListFiles`) expose the cursor so a
-caller can tell page 1 from a complete listing — silent truncation is
-detectable rather than disguised as the whole result. The aggregating methods
-(`ListDirectoryAll`, `ListFilesAll`) follow the cursor across pages and return
-the accumulated slice. Each carries a **progress guard**: a cursor that repeats
+The single-page method (`ListDirectory`) exposes the cursor so a caller can
+tell page 1 from a complete listing — silent truncation is detectable rather
+than disguised as the whole result. `ListDirectoryStream` follows the cursor
+across pages, yielding entries as each page arrives; `ListDirectoryAll` is its
+buffering wrapper. The loop carries a **progress guard**: a cursor that repeats
 at any distance (a pagination cycle, caught by a fixed-size digest set) or a
-listing that runs past the hard page ceiling aborts the loop with an error
-rather than spinning forever with unbounded memory growth inside the mount.
+listing that runs past the hard page ceiling aborts with an error rather than
+spinning forever with unbounded memory growth inside the mount.
 
 `listDirectory` entries are a pinned union, `ListDirEntry`: each entry is either
 a `file` (a full `FilesystemFile`) XOR a `directory`, discriminated by which key
 is present; exactly one arm is non-nil after decoding.
 
-Code: `cursor.go` (`OpaqueCursor`, `ListDirectoryAll`, `ListFilesAll`, the page request/response types), `messages.go` (`ListDirEntry`, `ListDirectoryResponse`, `ListFilesResponse`).
+Code: `cursor.go` (`OpaqueCursor`, `pageGuard`, `ListDirectoryStream`, `ListDirectoryAll`, the page request/response types), `messages.go` (`ListDirEntry`, `ListDirectoryResponse`).
 
 ## Error mapping
 
@@ -273,12 +278,14 @@ would silently couple the two. The `File` tags (`uuid`, `size`, `mtime`,
 
 Contract-**TBD** items, not invented here:
 
-- The `readFile` response **content body** — TBD per D6. The type is
-  metadata-only until the field is pinned.
-- Any `FilesystemFile`-bearing metadata for a `fileDownload` is fetched via the
-  metadata ops per D6; the download 2xx delivers raw object bytes, never a
-  `{"file": …}` body.
+- Every op the frozen contract leaves body-TBD (the "not implemented" rows in
+  the operations table) has no wire type in this package; only the pinned
+  names live in the intent table.
+- A `fileDownload` 2xx delivers raw object bytes, never a `{"file": …}` body;
+  any `FilesystemFile`-bearing metadata is fetched via `readMetadata`.
+- The `fileUpload` 2xx body is read as a bounded diagnostics prefix only,
+  never decoded.
 
 No request carries a `metadata_retention_days` field (D6 reject).
 
-Code: `messages.go` (`File`, `FilesystemFile`, `Directory`, `ReadFileResponse`, the response-type comments).
+Code: `messages.go` (`File`, `FilesystemFile`, `Directory`, the response-type comments).

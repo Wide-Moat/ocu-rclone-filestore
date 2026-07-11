@@ -99,8 +99,8 @@ func TestClientRequestBodyCarriesAuthMetadata(t *testing.T) {
 			wantIntent: "read",
 		},
 		{
-			name:       "write op createFile",
-			call:       func(c *Client) error { _, err := c.CreateFile(context.Background(), "/new.txt"); return err },
+			name:       "write op makeDirectory",
+			call:       func(c *Client) error { _, err := c.MakeDirectory(context.Background(), "/newdir"); return err },
 			wantIntent: "write",
 		},
 	}
@@ -143,7 +143,7 @@ func TestClientRequestBodyCarriesAuthMetadata(t *testing.T) {
 	}
 }
 
-// TestClientUnaryMethodsExist verifies that all 16 exported unary op methods are
+// TestClientUnaryMethodsExist verifies that all 8 exported unary op methods are
 // present on Client and route over the TLS server with the Bearer header.
 func TestClientUnaryMethodsExist(t *testing.T) {
 	c, _ := newTLSTestClient(t, "fs-smoke", func(w http.ResponseWriter, r *http.Request) {
@@ -157,21 +157,13 @@ func TestClientUnaryMethodsExist(t *testing.T) {
 
 	ctx := context.Background()
 	_, _ = c.ListDirectory(ctx, "/")
-	_, _ = c.ReadFile(ctx, "/f.txt", Range{})
 	_, _ = c.ReadMetadata(ctx, "/f.txt")
-	_, _ = c.GetFileMetadata(ctx, "u-abc")
-	_, _ = c.ListFiles(ctx, "u-abc")
 	_, _ = c.MakeDirectory(ctx, "/d")
 	_, _ = c.MoveDirectory(ctx, "/src", "/dst")
 	_, _ = c.RemoveDirectory(ctx, "/d")
-	_, _ = c.CreateFile(ctx, "/f.txt")
 	_, _ = c.CopyFile(ctx, "/src", "/dst")
 	_, _ = c.MoveFile(ctx, "/src", "/dst")
 	_, _ = c.RemoveFile(ctx, "/f.txt")
-	_, _ = c.ImportFiles(ctx, "/dir")
-	_, _ = c.ImportZip(ctx, "/archive.zip")
-	_, _ = c.MigrateFilesystem(ctx)
-	_, _ = c.RemoveFilesystem(ctx)
 }
 
 // TestClientNewRejectsBadInputs verifies the construction guards: a non-https
@@ -222,9 +214,6 @@ func TestUnaryMethodsSurfaceTypedErrorOnNon2xx(t *testing.T) {
 	if _, err := cNF.ReadMetadata(context.Background(), "/x"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("ReadMetadata 404: want ErrNotFound, got %v", err)
 	}
-	if _, err := cNF.GetFileMetadata(context.Background(), "uuid"); !errors.Is(err, ErrNotFound) {
-		t.Errorf("GetFileMetadata 404: want ErrNotFound, got %v", err)
-	}
 
 	// 403 -> ErrPermissionDenied for write-class mutating ops.
 	cPD, _ := newTLSTestClient(t, "fs-unary-403", func(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +234,7 @@ func TestUnaryMethodsSurfaceTypedErrorOnNon2xx(t *testing.T) {
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte("exists"))
 	})
-	if _, err := cAE.CreateFile(context.Background(), "/f"); !errors.Is(err, ErrAlreadyExists) {
-		t.Errorf("CreateFile 409: want ErrAlreadyExists, got %v", err)
+	if _, err := cAE.MakeDirectory(context.Background(), "/d"); !errors.Is(err, ErrAlreadyExists) {
+		t.Errorf("MakeDirectory 409: want ErrAlreadyExists, got %v", err)
 	}
 }

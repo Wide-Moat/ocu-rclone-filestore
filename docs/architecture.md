@@ -262,7 +262,7 @@ sequenceDiagram
     K->>V: FUSE READ (offset, size)
     Note right of V: served from VFS cache if warm —<br/>otherwise a backend Open is issued
     V->>O: Object.Open(RangeOption)
-    O->>R: readFile / fileDownload<br/>(filesystem_id, intent=read, downloadable=false)
+    O->>R: fileDownload<br/>(filesystem_id, intent=read, downloadable=false)
     R->>E: POST /v1/filestore/fs/op over HTTPS<br/>static Authorization Bearer JWT
     Note right of E: validate JWT (JWKS)<br/>strip it, exchange (RFC 8693)<br/>for the real credential<br/>keyed on filesystem_id, inject
     E->>B: request with the injected credential
@@ -464,7 +464,7 @@ depends on it being trusted).
 Registers `ocufs` with rclone's backend registry and maps rclone's `Fs`/`Object`
 surface onto the broker RPC through the `brokerClient` seam: `List`/`ListR` →
 `listDirectory`; `NewObject` → metadata; `Open` (with a range option) →
-`readFile`/`fileDownload`; `Put`/`Update` → chunked `fileUpload`; `Remove`,
+`fileDownload`; `Put`/`Update` → chunked `fileUpload`; `Remove`,
 `Copy`, `Move`, `Mkdir`/`Rmdir`/`DirMove` → their RPC analogues. It enforces
 read-only mounts by returning a permission error at the *top* of every mutating
 method, before any RPC. It constructs no `AuthorizationMetadata` and links no

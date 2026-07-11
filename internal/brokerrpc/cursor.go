@@ -3,14 +3,11 @@
 
 // Package brokerrpc — opaque cursor handling for paged listing ops.
 //
-// The broker returns pagination cursors as opaque tokens:
-//
-//   - listDirectory recursive paging: a "cursor" field in the response is
-//     echoed verbatim in subsequent requests. The client never models the
-//     cursor's internal structure.
-//
-//   - listFiles uuid-paginated paging: an "after_uuid" field plays the same
-//     role — echoed opaquely across pages.
+// The broker returns pagination cursors as opaque tokens: recursive
+// listDirectory paging carries a "cursor" field in the response that is echoed
+// verbatim in subsequent requests. The client never models the cursor's
+// internal structure. (The frozen contract names other paged listing ops, but
+// their bodies are TBD and this client implements no method for them.)
 //
 // The opaque-echo discipline is a security requirement: a cursor may carry
 // broker-internal scope information; parsing or mutating it could break the
@@ -173,86 +170,6 @@ func (c *Client) ListDirectoryAll(ctx context.Context, path string) ([]ListDirEn
 	var all []ListDirEntry
 	if err := c.ListDirectoryStream(ctx, path, func(e ListDirEntry) error {
 		all = append(all, e)
-		return nil
-	}); err != nil {
-		return nil, err
-	}
-	return all, nil
-}
-
-// ---------------------------------------------------------------------------
-// UUID-paginated listFiles paging
-// ---------------------------------------------------------------------------
-
-// listFilesPageResponse is the JSON response shape for listFiles with paging.
-type listFilesPageResponse struct {
-	Files     []FilesystemFile `json:"files,omitempty"`
-	AfterUUID OpaqueCursor     `json:"after_uuid,omitempty"`
-}
-
-// listFilesPageRequest overrides ListFilesRequest to include the after_uuid
-// cursor for page-2+ requests.
-type listFilesPageRequest struct {
-	FilesystemID          string                `json:"filesystem_id"`
-	UUID                  string                `json:"uuid"`
-	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
-	AfterUUID             OpaqueCursor          `json:"after_uuid,omitempty"`
-}
-
-// ListFilesStream performs uuid-paginated listFiles paging, echoing the opaque
-// after_uuid cursor across pages, and invokes yield once per file as each page
-// arrives — the listFiles analogue of ListDirectoryStream. A yield returning a
-// non-nil error stops pagination and surfaces that error.
-func (c *Client) ListFilesStream(ctx context.Context, uuid string, yield func(FilesystemFile) error) error {
-	fsID, am, err := c.stamp(OpListFiles)
-	if err != nil {
-		return err
-	}
-
-	var afterUUID OpaqueCursor
-	guard := newPageGuard("ListFilesStream", c.maxListPages)
-
-	for {
-		req := listFilesPageRequest{
-			FilesystemID:          fsID,
-			UUID:                  uuid,
-			AuthorizationMetadata: am,
-			AfterUUID:             afterUUID,
-		}
-
-		var resp listFilesPageResponse
-		if err := c.call(ctx, OpListFiles, req, &resp); err != nil {
-			return fmt.Errorf("brokerrpc: ListFilesAll: %w", err)
-		}
-
-		for _, fEntry := range resp.Files {
-			if err := yield(fEntry); err != nil {
-				return err
-			}
-		}
-
-		if resp.AfterUUID == "" {
-			break
-		}
-		// Progress guard: an after_uuid repeated at any distance or a listing
-		// past the page ceiling aborts rather than looping forever (see
-		// pageGuard).
-		if err := guard.admit(resp.AfterUUID); err != nil {
-			return err
-		}
-		afterUUID = resp.AfterUUID
-	}
-
-	return nil
-}
-
-// ListFilesAll is the buffering convenience wrapper over ListFilesStream: it
-// collects every file into one slice. Callers that can process files
-// incrementally should prefer the stream form.
-func (c *Client) ListFilesAll(ctx context.Context, uuid string) ([]FilesystemFile, error) {
-	var all []FilesystemFile
-	if err := c.ListFilesStream(ctx, uuid, func(f FilesystemFile) error {
-		all = append(all, f)
 		return nil
 	}); err != nil {
 		return nil, err

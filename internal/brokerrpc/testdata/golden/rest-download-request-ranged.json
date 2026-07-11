@@ -1,0 +1,12 @@
+{
+  "filesystem_id": "fs-golden-01",
+  "uuid": "uuid-golden-42",
+  "range": {
+    "offset": 100,
+    "length": 512
+  },
+  "authorization_metadata": {
+    "intent": "read",
+    "downloadable": false
+  }
+}

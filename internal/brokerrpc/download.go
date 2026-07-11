@@ -12,8 +12,7 @@
 //
 // Download reassembles the full object; DownloadRange is a distinctly-named
 // helper that consumes the same op and returns the requested {offset, length}
-// slice. Neither is related to the unary readFile op (which operates on a path
-// with a nested Range in the unary request body).
+// slice. fileDownload is the only content-read path this client implements.
 
 package brokerrpc
 
@@ -88,9 +87,9 @@ func (c *Client) DownloadRange(ctx context.Context, uuid string, offset, length 
 	// with no RPC. This is the POSIX at-EOF answer (Object.Open clamps at/past-
 	// EOF windows to length 0), and it deliberately sidesteps fileDownload's
 	// length-0 wire semantics — this broker family reads length 0 as "full
-	// file" (see ReadFile), so issuing the RPC would stream the whole object
-	// only to be discarded, and the strict window bound below would misread
-	// that stream as over-delivery.
+	// file", so issuing the RPC would stream the whole object only to be
+	// discarded, and the strict window bound below would misread that stream
+	// as over-delivery.
 	if length == 0 {
 		return http.NoBody, nil
 	}
