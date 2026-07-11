@@ -42,26 +42,6 @@ import (
 // into OOM.
 const maxUploadResponseBytes = 64 * 1024
 
-// uploadParamsFrame is the JSON body of the multipart "params" form field for a
-// fileUpload request. OverwriteExisting selects whether an existing destination
-// is replaced in place (true) or the upload fails on a present path (false).
-// EVERY guest upload sends true: Update so the broker replaces the object
-// atomically rather than the guest staging a remove-then-upload with a
-// non-atomic window between the two, and Put because rclone re-drives it after
-// an ambiguous first attempt (a lost success response on an upload the broker
-// committed), so it must be idempotent at the destination path. The broker's
-// create-only conflict arm is therefore guest-unreachable by design.
-//
-// The field keeps its omitempty tag for wire compatibility: false (never sent
-// by this guest) would serialise no overwrite_existing key at all.
-type uploadParamsFrame struct {
-	FilesystemID          string                `json:"filesystem_id"`
-	Path                  string                `json:"path"`
-	DeclaredSizeBytes     int64                 `json:"declared_size_bytes"`
-	OverwriteExisting     bool                  `json:"overwrite_existing,omitempty"`
-	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
-}
-
 // Upload performs the fileUpload op. It reads all bytes from src and sends them
 // as the file part of a multipart/form-data body, preceded by a "params" field
 // carrying the total source size as declared_size_bytes. The broker assembles
@@ -187,8 +167,9 @@ func writeUploadMultipart(
 	src io.Reader,
 	ceiling int,
 ) error {
-	// Field 1: params (JSON).
-	params := uploadParamsFrame{
+	// Field 1: params (JSON). FileUploadRequest is the single wire declaration
+	// for this body (messages.go); see its doc for the overwrite semantics.
+	params := FileUploadRequest{
 		FilesystemID:          fsID,
 		Path:                  path,
 		DeclaredSizeBytes:     totalBytes,

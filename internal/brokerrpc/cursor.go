@@ -89,25 +89,6 @@ func (g *pageGuard) admit(cursor OpaqueCursor) error {
 // Recursive listDirectory paging
 // ---------------------------------------------------------------------------
 
-// listDirectoryPageResponse is the JSON response shape for listDirectory.
-// We decode only the fields we echo (cursor) plus the entries we aggregate.
-// Entries uses the pinned union type []ListDirEntry (raised from []Directory
-// in Phase 3 — a response-decoder correction only, no new transport/op/auth
-// path, SEC-25).
-type listDirectoryPageResponse struct {
-	Entries []ListDirEntry `json:"entries,omitempty"`
-	Cursor  OpaqueCursor   `json:"cursor,omitempty"`
-}
-
-// listDirectoryPageRequest overrides ListDirectoryRequest to include the
-// cursor for page-2+ requests.
-type listDirectoryPageRequest struct {
-	FilesystemID          string                `json:"filesystem_id"`
-	Path                  string                `json:"path"`
-	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
-	Cursor                OpaqueCursor          `json:"cursor,omitempty"`
-}
-
 // ListDirectoryStream performs recursive listDirectory paging, echoing the
 // opaque cursor across pages, and invokes yield once per entry AS EACH PAGE
 // ARRIVES. It never accumulates the full recursive tree in memory: a caller
@@ -125,14 +106,16 @@ func (c *Client) ListDirectoryStream(ctx context.Context, path string, yield fun
 	guard := newPageGuard("ListDirectoryStream", c.maxListPages)
 
 	for {
-		req := listDirectoryPageRequest{
+		// ListDirectoryRequest is the single wire declaration for both the
+		// page-1 form and this continuation form (Cursor omitempty).
+		req := ListDirectoryRequest{
 			FilesystemID:          fsID,
 			Path:                  path,
 			AuthorizationMetadata: am,
 			Cursor:                cursor,
 		}
 
-		var resp listDirectoryPageResponse
+		var resp ListDirectoryResponse
 		if err := c.call(ctx, OpListDirectory, req, &resp); err != nil {
 			return fmt.Errorf("brokerrpc: ListDirectoryAll: %w", err)
 		}
