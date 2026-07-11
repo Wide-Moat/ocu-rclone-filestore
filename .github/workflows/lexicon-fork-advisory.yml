@@ -55,9 +55,13 @@ jobs:
       - name: Checkout the base repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # PR-head checkout into an inert subdirectory: read-only input for the
-      # scan, never executed. persist-credentials: false keeps the workflow
-      # token out of the untrusted tree's .git config.
-      - name: Checkout the PR head (inert, read-only)
+      # scan, never executed. The untrusted tree is NEVER built or run — the
+      # base-repo scanner (checked out above) only READS it with a fixed-string
+      # grep, and persist-credentials:false keeps the workflow token out of the
+      # untrusted tree's .git config. This is the exact safe shape the SECURITY
+      # header mandates, so the generic pull_request_target-checkout finding is
+      # suppressed at the site (below) with this justification, not tree-wide.
+      - name: Checkout the PR head (inert, read-only) # nosemgrep: yaml.github-actions.security.pull-request-target-code-checkout.pull-request-target-code-checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
