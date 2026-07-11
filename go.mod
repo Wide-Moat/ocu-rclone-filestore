@@ -6,7 +6,7 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.10.1
 	github.com/rclone/rclone v1.74.3
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
-	golang.org/x/sync v0.20.0
+	golang.org/x/sync v0.22.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
