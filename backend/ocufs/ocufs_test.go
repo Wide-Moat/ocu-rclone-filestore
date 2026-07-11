@@ -1176,7 +1176,7 @@ func TestImmediateChildRemoteRootPath(t *testing.T) {
 	fileEntry := brokerrpc.ListDirEntry{
 		File: &brokerrpc.FilesystemFile{Path: "/file.txt"},
 	}
-	remote, ok := f.immediateChildRemote(dir, fileEntry)
+	remote, ok := f.immediateChildRemote(dir, f.absPath(dir), fileEntry)
 	if !ok {
 		t.Fatal("immediateChildRemote for root-level file returned false, want true")
 	}
@@ -1188,7 +1188,7 @@ func TestImmediateChildRemoteRootPath(t *testing.T) {
 	deepEntry := brokerrpc.ListDirEntry{
 		File: &brokerrpc.FilesystemFile{Path: "/a/b/file.txt"},
 	}
-	_, ok = f.immediateChildRemote(dir, deepEntry)
+	_, ok = f.immediateChildRemote(dir, f.absPath(dir), deepEntry)
 	if ok {
 		t.Error("immediateChildRemote for deeply nested path returned true, want false")
 	}
@@ -1199,7 +1199,7 @@ func TestImmediateChildRemoteRootPath(t *testing.T) {
 	selfEntry := brokerrpc.ListDirEntry{
 		Directory: &brokerrpc.Directory{Path: "/"},
 	}
-	if _, ok := f.immediateChildRemote(dir, selfEntry); ok {
+	if _, ok := f.immediateChildRemote(dir, f.absPath(dir), selfEntry); ok {
 		t.Error("immediateChildRemote surfaced the listed root as its own child, want false")
 	}
 }
@@ -1358,7 +1358,7 @@ func TestPathEncodingRoundTrip(t *testing.T) {
 	entry := brokerrpc.ListDirEntry{
 		File: &brokerrpc.FilesystemFile{Path: "/d/" + encLeaf},
 	}
-	remote, ok := f.immediateChildRemote(dir, entry)
+	remote, ok := f.immediateChildRemote(dir, f.absPath(dir), entry)
 	if !ok {
 		t.Fatalf("immediateChildRemote did not accept the encoded child %q", encLeaf)
 	}
