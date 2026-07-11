@@ -116,6 +116,15 @@ services:
       - mount-shared:/run/ocu
       # The mount destinations propagate out to the host via an rshared bind so
       # the FUSE mounts created inside this container reach the guest userspace.
+      #
+      # The bind must present a content-free (dirs-only) tree at bringup: the
+      # mount refuses to shadow real files (they would vanish while mounted
+      # and split-brain after unmount). Residue here is DELIBERATELY not
+      # auto-cleaned — on this side of the mount it is indistinguishable from
+      # real user data, so deleting it at bringup would BE the data loss the
+      # guard prevents. A refusal is one loud failed bringup naming the
+      # offending path; the remedy (empty the destination, restart the mount)
+      # is an operator action.
       - type: bind
         source: /tmp/ocu-mountroot
         target: /mnt/user-data

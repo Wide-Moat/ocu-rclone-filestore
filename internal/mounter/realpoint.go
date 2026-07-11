@@ -211,6 +211,15 @@ func (r *realPointMounter) mountAndWaitReady(ctx context.Context, spec mountSpec
 		return nil, fmt.Errorf("mount %q: build mount options: %w", dest, err)
 	}
 
+	// AllowNonEmpty is pinned true (the baked dirs-only scaffold would fail
+	// rclone's entry-counting gate), so the shadow protection that gate
+	// provided is supplied here instead: refuse to mount over anything but
+	// the scaffold shape. Runs before Mount() on every path — the production
+	// directMountFn and any injected MountFn alike.
+	if err := ensureMountpointShadowsNoContent(dest); err != nil {
+		return nil, fmt.Errorf("mount %q: %w", dest, err)
+	}
+
 	mp := mountlib.NewMountPoint(r.mountFn, dest, fsObj, &mountOpt, &vfsOpt)
 
 	if _, err := mp.Mount(); err != nil {
