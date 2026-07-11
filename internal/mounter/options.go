@@ -94,8 +94,11 @@ func buildVFSOptions(m mountcfg.Mount, readOnly bool) (vfscommon.Options, error)
 // over any non-empty directory to avoid shadowing data — but the scaffold holds
 // no files, so the FUSE mount shadows nothing. Without this the guest's managed
 // mount boot-child exits before its ready-file appears and the whole session
-// fails to serve. No config field controls either flag today; both are pinned
-// here and in the test.
+// fails to serve. The shadow protection the rclone gate provided is NOT lost:
+// the runtime guard lives in mountAndWaitReady (ensureMountpointShadowsNoContent),
+// which tolerates exactly the dirs-only scaffold and refuses real content.
+// No config field controls either flag today; both are pinned here and in the
+// test.
 func buildMountOptions(_ mountcfg.Mount) (mountlib.Options, error) {
 	opt := mountlib.Opt // copy of the registered defaults
 	opt.AllowOther = true

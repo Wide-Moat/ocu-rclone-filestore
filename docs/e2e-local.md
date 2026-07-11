@@ -69,11 +69,15 @@ mount for it if not) so `docker compose -f <repo>/deploy/compose/...` resolves.
 
 The mount destinations are a host bind with `rshared` propagation, so the FUSE
 mounts created inside the mount container propagate to the test-runner (a named
-volume cannot propagate mounts created after container start). Create the
-directories on the Docker host (the Lima VM) before bringing the harness up:
+volume cannot propagate mounts created after container start). Recreate the
+directories fresh on the Docker host (the Lima VM) before bringing the harness
+up — the mount refuses to shadow residue left by an aborted previous run, and
+on a persistent VM that residue survives. Lazy-unmount any stale scope mount
+FIRST: an `rm` through a live stale FUSE mount would delete broker-side
+content.
 
 ```sh
-limactl shell <vm> mkdir -p /tmp/ocu-e2e-mountroot/outputs /tmp/ocu-e2e-mountroot/uploads /tmp/ocu-e2e-mountroot/outputs2 /tmp/ocu-e2e-mountroot/throttle
+limactl shell <vm> sh -c 'for d in outputs uploads outputs2 throttle; do sudo umount -l "/tmp/ocu-e2e-mountroot/$d" 2>/dev/null || true; done; sudo rm -rf /tmp/ocu-e2e-mountroot; mkdir -p /tmp/ocu-e2e-mountroot/outputs /tmp/ocu-e2e-mountroot/uploads /tmp/ocu-e2e-mountroot/outputs2 /tmp/ocu-e2e-mountroot/throttle'
 ```
 
 ## 3. Bring up the harness

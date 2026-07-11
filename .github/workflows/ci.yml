@@ -252,8 +252,19 @@ jobs:
       # before the harness starts (the mount binary does not create them).
       # outputs = rw scope, uploads = ro scope, outputs2 = the cold-read second
       # mount of the rw scope, throttle = the SC2 throttle scope.
+      #
+      # Recreated FRESH each run: the mount refuses to shadow residue left by
+      # an aborted previous run (files under the bind are indistinguishable
+      # from real user data), so any stale scope mount is lazy-unmounted FIRST
+      # (an rm through a live stale FUSE mount would delete broker-side
+      # content), then the root is removed and re-created dirs-only.
       - name: Prepare the mount-root bind
-        run: mkdir -p /tmp/ocu-e2e-mountroot/outputs /tmp/ocu-e2e-mountroot/uploads /tmp/ocu-e2e-mountroot/outputs2 /tmp/ocu-e2e-mountroot/throttle
+        run: |
+          for d in outputs uploads outputs2 throttle; do
+            sudo umount -l "/tmp/ocu-e2e-mountroot/$d" 2>/dev/null || true
+          done
+          sudo rm -rf /tmp/ocu-e2e-mountroot
+          mkdir -p /tmp/ocu-e2e-mountroot/outputs /tmp/ocu-e2e-mountroot/uploads /tmp/ocu-e2e-mountroot/outputs2 /tmp/ocu-e2e-mountroot/throttle
       # The mount service references a NAMED AppArmor profile (apparmor=ocu-mount).
       # A named profile must be loaded into the runner's host kernel before the
       # container is created, or OCI create fails ("unable to apply apparmor

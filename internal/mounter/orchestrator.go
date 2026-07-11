@@ -10,7 +10,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"syscall"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mountcfg"
@@ -236,6 +238,18 @@ func (o *orchestrator) buildSpecs(cfg *mountcfg.Config) ([]mountSpec, error) {
 		}
 		if _, dup := seen[m.Destination]; dup {
 			return nil, fmt.Errorf("mount %q: duplicate destination across mounts (a second mount would silently shadow the first)", m.Destination)
+		}
+		// Ancestor/descendant destination pairs are rejected so the pre-mount
+		// shadow guard never walks a LIVE earlier mount: a destination nested
+		// under a mounted point would make the later guard's walk read broker
+		// content and refuse bringup on any real session file. Checked on the
+		// cleaned paths at a separator boundary, both directions.
+		cleaned := filepath.Clean(m.Destination)
+		for prior := range seen {
+			p := filepath.Clean(prior)
+			if strings.HasPrefix(cleaned, p+string(filepath.Separator)) || strings.HasPrefix(p, cleaned+string(filepath.Separator)) {
+				return nil, fmt.Errorf("mount %q: destination is nested with %q (the later mount's pre-mount inspection would traverse the earlier live mount)", m.Destination, prior)
+			}
 		}
 		seen[m.Destination] = struct{}{}
 		specs = append(specs, mountSpec{mount: m, readOnly: readOnly, serviceURL: o.serviceURL, caCertPEM: o.caCertPEM})
