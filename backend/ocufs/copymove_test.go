@@ -422,6 +422,67 @@ func TestDirMoveRejectsForeignFs(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestCopyRejectsForeignFsObject / TestMoveRejectsForeignFsObject — the
+// pointer-identity half of the foreign-source guard. The foreign-src tests in
+// coverage_gaps_test.go pin only the type half (src not an *Object); these pin
+// the case the guard comment names: src IS an *Object but is bound to a
+// DIFFERENT *Fs instance (a second mount, another filesystem_id scope). A bare
+// type assert would accept it; pointer identity must not. Mirrors
+// TestDirMoveRejectsForeignFs on the file axis.
+// ---------------------------------------------------------------------------
+
+// TestCopyRejectsForeignFsObject verifies that Copy rejects a source *Object
+// bound to a different *Fs instance with fs.ErrorCantCopy and zero client
+// calls on either Fs, so rclone falls back to download+upload across scopes.
+func TestCopyRejectsForeignFsObject(t *testing.T) {
+	dstClient := &fakeClient{}
+	dstClient.copyFileResult = func(ctx context.Context, srcPath, dstPath string) (*brokerrpc.AckResponse, error) {
+		t.Fatalf("CopyFile must not be called for a foreign-Fs src (got %q → %q)", srcPath, dstPath)
+		return nil, nil
+	}
+	srcClient := &fakeClient{}
+
+	dst := newTestFsWithRoot(t, dstClient, "/", false)
+	// foreign is a SEPARATE *Fs (distinct pointer, distinct client/scope); an
+	// Object bound to it satisfies the *Object type assertion but must fail
+	// the identity check.
+	foreign := newTestFsWithRoot(t, srcClient, "/", false)
+	src := &Object{fs: foreign, path: "/a/cross.txt", remote: "a/cross.txt", uuid: "u", size: 1}
+
+	_, err := dst.Copy(context.Background(), src, "b/dst.txt")
+	if !errors.Is(err, fs.ErrorCantCopy) {
+		t.Fatalf("Copy with foreign-Fs *Object = %v, want fs.ErrorCantCopy", err)
+	}
+	if dstClient.totalMutatingCalls() != 0 || srcClient.totalMutatingCalls() != 0 {
+		t.Errorf("cross-Fs Copy issued client calls; want zero on both Fs")
+	}
+}
+
+// TestMoveRejectsForeignFsObject verifies that Move rejects a source *Object
+// bound to a different *Fs instance with fs.ErrorCantMove and zero client
+// calls on either Fs, so rclone falls back to copy+delete across scopes.
+func TestMoveRejectsForeignFsObject(t *testing.T) {
+	dstClient := &fakeClient{}
+	dstClient.moveFileResult = func(ctx context.Context, srcPath, dstPath string) (*brokerrpc.AckResponse, error) {
+		t.Fatalf("MoveFile must not be called for a foreign-Fs src (got %q → %q)", srcPath, dstPath)
+		return nil, nil
+	}
+	srcClient := &fakeClient{}
+
+	dst := newTestFsWithRoot(t, dstClient, "/", false)
+	foreign := newTestFsWithRoot(t, srcClient, "/", false)
+	src := &Object{fs: foreign, path: "/old/name.bin", remote: "old/name.bin", uuid: "u", size: 1}
+
+	_, err := dst.Move(context.Background(), src, "new/name.bin")
+	if !errors.Is(err, fs.ErrorCantMove) {
+		t.Fatalf("Move with foreign-Fs *Object = %v, want fs.ErrorCantMove", err)
+	}
+	if dstClient.totalMutatingCalls() != 0 || srcClient.totalMutatingCalls() != 0 {
+		t.Errorf("cross-Fs Move issued client calls; want zero on both Fs")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // TestReadOnlyBlocksCopyMoveDir — read-only guard fires before any client call.
 // ---------------------------------------------------------------------------
 
