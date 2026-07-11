@@ -4,8 +4,10 @@
 package brokerrpc
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -58,6 +60,50 @@ func TestMapHTTPStatusAuthCollapseIsOneWay(t *testing.T) {
 	}
 	if fserrors.IsRetryError(e401) {
 		t.Error("401 (token expiry) must be non-retryable — the guest does not loop or re-mint")
+	}
+}
+
+// TestMapHTTPStatusBoundsHugeBody pins the diagnostics budget: the error body
+// is diagnostics-only (the mapping keys on the status, Retry-After is a
+// header), so a multi-MiB body must not balloon the error string. The bound is
+// maxErrorBodyBytes plus a small allowance for the sentinel prefix and the
+// truncation marker.
+func TestMapHTTPStatusBoundsHugeBody(t *testing.T) {
+	huge := bytes.Repeat([]byte("A"), 4<<20) // 4 MiB
+	err := MapHTTPStatus(http.StatusInternalServerError, huge, "")
+	if err == nil {
+		t.Fatal("MapHTTPStatus returned nil")
+	}
+	const slack = 256 // sentinel prefix + status text + truncation marker
+	if got, limit := int64(len(err.Error())), maxErrorBodyBytes+slack; got > limit {
+		t.Errorf("error string is %d bytes; the diagnostics budget bounds it at %d", got, limit)
+	}
+	if !errors.Is(err, ErrPermanentOther) {
+		t.Errorf("500 must still map to ErrPermanentOther; got %v", err)
+	}
+}
+
+// TestCallErrorBodyCaptureIsBounded is the transport-level pin: a unary op
+// answered with a non-2xx and a body far larger than the diagnostics budget
+// must surface a bounded error string — the guest never buffers a runaway
+// error page into the error value.
+func TestCallErrorBodyCaptureIsBounded(t *testing.T) {
+	huge := bytes.Repeat([]byte("B"), 1<<20) // 1 MiB error page
+	c, _ := newTLSTestClient(t, "fs-err-bound", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(huge)
+	})
+	_, err := c.ListDirectory(context.Background(), "/")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("400 must map to ErrInvalidArgument; got sentinel of %v", err)
+	}
+	const slack = 256
+	if got, limit := int64(len(err.Error())), maxErrorBodyBytes+slack; got > limit {
+		t.Errorf("error string is %d bytes; the diagnostics budget bounds it at %d", got, limit)
 	}
 }
 

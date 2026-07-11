@@ -161,10 +161,11 @@ func (c *Client) call(ctx context.Context, op Op, req, resp interface{}) error {
 	defer func() { _ = httpResp.Body.Close() }()
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
-		// Non-2xx error: the HTTP status drives the typed mapping. Read a bounded
-		// prefix of the body for diagnostics; the Retry-After header is honoured
-		// only on 429 inside MapHTTPStatus.
-		errBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxJSONResponseBytes))
+		// Non-2xx error: the HTTP status drives the typed mapping. The body is
+		// diagnostics-only (never parsed; the Retry-After header is honoured
+		// only on 429 inside MapHTTPStatus), so capture is capped at the shared
+		// diagnostics budget rather than the 2xx decode ceiling.
+		errBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodyBytes))
 		return MapHTTPStatus(httpResp.StatusCode, errBody, httpResp.Header.Get("Retry-After"))
 	}
 

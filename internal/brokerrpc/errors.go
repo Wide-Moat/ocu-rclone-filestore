@@ -58,6 +58,17 @@ var ErrAlreadyExists = errors.New("brokerrpc: already exists")
 // broker back-off and excludes "inf" and overflowing floats.
 const maxRetryAfterSeconds = 3600
 
+// maxErrorBodyBytes is the shared diagnostics budget for a non-2xx response
+// body. The body is diagnostics-only on this wire: the mapping keys on the
+// HTTP status, Retry-After arrives as a header, and nothing in the body is
+// ever parsed. The frozen contract's structured deny envelope is bounded well
+// under 1 KiB (a short reason code plus a bounded message), so 64 KiB keeps
+// two orders of magnitude of headroom for verbose broker error pages while
+// stopping a runaway error body from ballooning guest memory or the error
+// string. It is the package's one bound for every error-body read (unary,
+// upload, download error paths).
+const maxErrorBodyBytes int64 = 64 << 10 // 64 KiB
+
 // ErrPermanentOther is the sentinel for any non-2xx status not in the mapped
 // table. These map to a permanent no-retry error. The explicit default
 // prevents a wrong retryable fallthrough from looping a write forever.
@@ -76,9 +87,12 @@ var ErrPermanentOther = errors.New("brokerrpc: permanent error")
 // there is no header.
 //
 // The mapping is keyed on the HTTP status; the body text is appended to the
-// error message for diagnostics only and never changes the mapping.
+// error message for diagnostics only and never changes the mapping. The copy
+// into the error string is truncated at maxErrorBodyBytes as a choke-point
+// defense: even a caller that read the body unbounded cannot balloon the
+// error value.
 func MapHTTPStatus(status int, body []byte, retryAfterRaw string) error {
-	msg := string(body)
+	msg := boundErrorBody(body)
 
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
@@ -137,4 +151,14 @@ func MapHTTPStatus(status int, body []byte, retryAfterRaw string) error {
 		// forever; the default MUST stay non-retryable.
 		return fmt.Errorf("%w: status %d: %s", ErrPermanentOther, status, msg)
 	}
+}
+
+// boundErrorBody returns the diagnostics prefix of a non-2xx body, truncated
+// to maxErrorBodyBytes with an explicit marker so a capped page is never
+// mistaken for the complete broker output.
+func boundErrorBody(body []byte) string {
+	if int64(len(body)) <= maxErrorBodyBytes {
+		return string(body)
+	}
+	return string(body[:maxErrorBodyBytes]) + " ...[truncated]"
 }
