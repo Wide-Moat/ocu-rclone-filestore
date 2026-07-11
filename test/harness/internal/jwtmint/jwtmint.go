@@ -177,6 +177,37 @@ func Verify(token string, jwks JWKS, expectedIss, expectedAud string, now time.T
 	return c, nil
 }
 
+// ExpiryUnverified reads the exp claim from a compact JWS payload WITHOUT
+// verifying the signature. It is a lifetime probe, not an authorization check:
+// the caller is not the token's verifier (an artifact bringup reads back a token
+// it just minted; the edge reads a credential the exchange peer already verified
+// when it issued it), so all this reports is when the token says it dies. It
+// reuses splitToken so it decodes the payload exactly as Verify does, and never
+// touches the header or signature.
+//
+// It errors when the token is not a three-segment compact JWS, when the payload
+// is not base64url, or when the payload is not JSON. It does NOT reject a zero or
+// absent exp: it returns the raw value (0 when absent) and leaves the "zero means
+// unsafe" policy to the caller. Do not use it where a signature must be trusted;
+// use Verify for that.
+func ExpiryUnverified(token string) (int64, error) {
+	_, payloadB64, _, ok := splitToken(token)
+	if !ok {
+		return 0, fmt.Errorf("jwtmint: not a compact JWS")
+	}
+	payloadJSON, err := b64.DecodeString(payloadB64)
+	if err != nil {
+		return 0, fmt.Errorf("jwtmint: payload is not base64url: %w", err)
+	}
+	var probe struct {
+		Expiry int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payloadJSON, &probe); err != nil {
+		return 0, fmt.Errorf("jwtmint: payload is not JSON: %w", err)
+	}
+	return probe.Expiry, nil
+}
+
 // splitToken splits a compact JWS into its three base64url segments.
 func splitToken(token string) (header, payload, sig string, ok bool) {
 	first := -1
