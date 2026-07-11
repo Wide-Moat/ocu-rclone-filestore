@@ -19,22 +19,19 @@ package ocufs
 //     Object that resolves lazily via ReadMetadata.
 //
 // What is gated behind OCU_FSTESTS_REMOTE (the live conformance gate):
-//   - TestFstestsLiveBroker: a curated standard round-trip over the IMPLEMENTED
-//     broker ops (Mkdir, Put chunked, List, Open full + ranged read-back, Copy,
-//     Move, Remove, Rmdir) against a real broker. It deliberately does NOT run
-//     rclone's monolithic fstests.Run: a large share of that suite verifies
-//     writes via NewObject (→ broker readMetadata/getFileMetadata, whose bodies
-//     are TBD/unimplemented pending a canon pin), so those subtests cannot pass
-//     yet and fstests.Run cannot be carved up with -test.run/-test.skip. The
-//     curated round-trip is honest coverage of the real data path with a
-//     documented scope boundary; fstests.Run is restored as the gate once the
-//     metadata-op bodies are pinned. Set OCU_FSTESTS_REMOTE=<remote-name> (the
-//     compose conformance-runner does so).
+//   - TestFstestsLiveBroker: a curated standard round-trip over the broker ops
+//     (Mkdir, Put chunked, List, NewObject after-write + absent-path, Open
+//     full + ranged read-back, Copy, Move, Remove, Rmdir) against a real
+//     broker. It deliberately does NOT run rclone's monolithic fstests.Run;
+//     the dropped subtest families are tracked one line each, with a status
+//     tag, in the SCOPE inventory above TestFstestsLiveBroker. Set
+//     OCU_FSTESTS_REMOTE=<remote-name> (the compose conformance-runner does).
 
 import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"strings"
@@ -277,31 +274,61 @@ func TestFakeBrokerNilObject(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Live conformance gate — a curated standard round-trip over the IMPLEMENTED
-// broker ops against a real broker.
+// Live conformance gate — a curated standard round-trip over the broker ops
+// against a real broker.
 // ---------------------------------------------------------------------------
 //
 // SCOPE — why this is curated, not the monolithic rclone fstests.Run:
-// rclone's standard fstests.Run drives every backend method, and a large share
-// of its assertions verify a write by re-fetching the object through NewObject
-// (→ the broker readMetadata / getFileMetadata ops). Those metadata ops are not
-// yet implemented in the broker build (their bodies are TBD in the frozen
-// file-ops contract, pending a canon pin); calling them returns
-// code=unimplemented, so the fstests subtests that round-trip through NewObject
-// (FsEncoding, FsPutFiles, FsNewObjectNotFound, FsPutError, FsRootCollapse,
-// FsUploadUnknownSize, …) cannot pass. fstests.Run is monolithic — those
-// assertions cannot be carved out with -test.run/-test.skip because they run
-// inside fstests' own t.Run tree and via plain helper calls — so the full suite
-// cannot be a green gate while the metadata ops are unimplemented.
+// fstests.Run is all-or-nothing — its assertions run inside its own t.Run tree
+// and via plain helper calls, so individual subtests cannot be carved out with
+// -test.run/-test.skip. Parts of what it drives are deliberately outside this
+// backend's surface (PutStream, hashes), and parts depend on live-gate
+// semantics that are not pinned yet, so the full suite cannot be a green gate.
+// This test gates on the round-trip the real data path serves today, and
+// EVERYTHING fstests.Run would add beyond it is inventoried below, one family
+// per line with a status tag, so nothing dropped is untracked. The honest
+// rule: whatever is not run stays listed as NOT-RUN — no fake gate.
 //
-// This test therefore gates on the standard round-trip the IMPLEMENTED ops DO
-// support, exercised against the real broker over the session endpoint (the same
-// data path the suite would use): Mkdir, Put (chunked upload), List (the D6
-// union returns fully-populated Objects, so the listing IS the read-back
-// handle — no NewObject needed), Open (ranged read via fileDownload), Copy,
-// Move, Remove, Rmdir. It is honest coverage of the real data path with a
-// documented, contract-driven scope boundary. The full fstests.Run is restored
-// as the gate once the broker pins the readMetadata / getFileMetadata bodies.
+// Inventory of the dropped fstests.Run families:
+//
+//   - NewObject-after-write metadata verification — ADDED-NOW: this test
+//     re-fetches the written object via NewObject and asserts size and
+//     Remote() round-trip. A note on stale wording this inventory replaces:
+//     the metadata-op BODIES remain TBD in the frozen file-ops contract, but
+//     the readMetadata point lookup itself is served by the broker and is
+//     already production-exercised on every live run (Object.resolve() calls
+//     it), so this family is live-servable — the earlier claim that it could
+//     not pass was out of date.
+//   - NewObject on an absent path → typed not-found (FsNewObjectNotFound) —
+//     ADDED-NOW: asserted below against fs.ErrorObjectNotFound.
+//   - Special-character / encoding round-trip names (FsEncoding) — NOT-RUN:
+//     deferred until the live gate's encoder/path-normalization semantics are
+//     pinned; the lossless unit-level round-trip is pinned by
+//     TestPathEncodingRoundTrip. Add to the round-trip once pinned.
+//   - Overwrite-an-existing-object Put — NOT-RUN: deferred for the same
+//     reason. When added, the case exercises fileUpload with overwrite=true —
+//     which is already the production Put path (Put uploads with
+//     overwrite=true so rclone's retry layers stay idempotent), NOT the
+//     create-only createFile op; a conflict rejection applies only to
+//     overwrite=false.
+//   - Unknown-size uploads (FsUploadUnknownSize) — NOT-RUN: PutStream is
+//     deliberately unadvertised; rclone spools an unknown-size source and
+//     re-calls Put with a real size, so declared sizes are always real
+//     (design decision 1) and the family has no backend path to exercise.
+//   - Root-collapse / path-edge subtests (FsRootCollapse and friends) —
+//     NOT-RUN: absPath canonicalization is pinned at unit level
+//     (TestAbsPathCanonicalizes); no live coverage.
+//   - Fault-injection / partial-write subtests (FsPutError) — NOT-RUN: the
+//     live gate has no fault injection to drive them.
+//   - Hash and precision assertions — NOT-RUN: Hashes() = none and
+//     Precision = time.Second are documented backend limits, so these
+//     assertions have nothing to verify here.
+//
+// The curated round-trip, against a real broker over the session endpoint:
+// Mkdir, Put (chunked upload), List (the D6 union returns fully-populated
+// Objects, so the listing IS a read-back handle), NewObject (written path +
+// absent path), Open (full + ranged read via fileDownload), Copy, Move,
+// Remove, Rmdir.
 //
 // Gated on OCU_FSTESTS_REMOTE (a remote NAME, e.g. "fsconf:e2e") — distinct
 // from the exercise runner's RCLONE_OCUFS_LIVE boolean so the two can never
@@ -352,8 +379,28 @@ func TestFstestsLiveBroker(t *testing.T) {
 		t.Errorf("Put returned size %d, want %d", put.Size(), len(want))
 	}
 
+	// --- NewObject after write: re-fetch the written object via the point
+	// lookup (ADDED-NOW in the scope inventory). This rides the same
+	// readMetadata surface Object.resolve() exercises on every live run. ---
+	fetched, err := f.NewObject(ctx, sub+"/roundtrip.txt")
+	if err != nil {
+		t.Fatalf("NewObject after Put: %v", err)
+	}
+	if fetched.Size() != int64(len(want)) {
+		t.Errorf("NewObject after Put: size = %d, want %d", fetched.Size(), len(want))
+	}
+	if got, want := fetched.Remote(), sub+"/roundtrip.txt"; got != want {
+		t.Errorf("NewObject after Put: Remote() = %q, want %q", got, want)
+	}
+
+	// --- NewObject on an absent path: the typed not-found sentinel
+	// (ADDED-NOW in the scope inventory). ------------------------------------
+	if _, err := f.NewObject(ctx, sub+"/absent-"+randHex(t, 4)+".txt"); !errors.Is(err, fs.ErrorObjectNotFound) {
+		t.Errorf("NewObject on an absent path: error = %v, want fs.ErrorObjectNotFound", err)
+	}
+
 	// --- List: the D6 union returns a fully-populated Object for the file, so
-	// the listing itself is the read-back handle (no NewObject round-trip). ---
+	// the listing itself is a read-back handle (no NewObject round-trip needed). ---
 	entries, err := f.List(ctx, sub)
 	if err != nil {
 		t.Fatalf("List %q: %v", sub, err)
