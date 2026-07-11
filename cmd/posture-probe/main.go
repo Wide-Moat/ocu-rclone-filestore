@@ -29,6 +29,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/Wide-Moat/ocu-rclone-filestore/internal/posture"
 )
 
 const (
@@ -48,9 +50,11 @@ const (
 	rootfsProbeDir = "/"
 	rootfsProbe    = "ocu-rootfs-probe"
 
-	// tmpfsProbeDir is the single declared writable surface — the VFS-cache tmpfs
-	// at /root/.cache. A write+read-back here must succeed byte-identical.
-	tmpfsProbeDir = "/root/.cache"
+	// tmpfsProbeDir is the single declared writable surface — the VFS-cache
+	// tmpfs, taken from the one posture declaration (internal/posture, a leaf
+	// package this tiny static binary can import without dragging a dependency
+	// tree). A write+read-back here must succeed byte-identical.
+	tmpfsProbeDir = posture.CacheTmpfs
 	tmpfsProbe    = "ocu-tmpfs-probe"
 )
 

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 
 	"github.com/rclone/rclone/fs/config"
+
+	"github.com/Wide-Moat/ocu-rclone-filestore/internal/posture"
 )
 
 // EnsureWritableCacheDir guarantees the VFS disk cache has a writable directory
@@ -45,9 +47,11 @@ func EnsureWritableCacheDir() error {
 
 	// The resolved default is not writable (typically root-level /.cache under a
 	// read-only rootfs with HOME unset). Fall back to a candidate that matches
-	// the hardened posture's writable tmpfs.
+	// the hardened posture's writable tmpfs — the single declared posture value
+	// (posture.CacheTmpfs, what HOME=posture.Home would yield), so the binary
+	// never carries its own copy of the deploy-layer path.
 	candidates := []string{
-		filepath.Join("/root", ".cache", "rclone"),
+		filepath.Join(posture.CacheTmpfs, "rclone"),
 		filepath.Join(os.TempDir(), "rclone"),
 	}
 	for _, dir := range candidates {
