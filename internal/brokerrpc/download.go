@@ -25,13 +25,16 @@ import (
 	"net/http"
 )
 
-// defaultMaxDownloadBytes is the DEFAULT cap on how many bytes a single download
-// body may deliver before the streaming reader aborts, used when the mount
-// config supplies no MaxDownloadBytes. The guest is the least-provisioned party
-// in the architecture and must never let a broker bug or a desynced stream size
-// an unbounded read into guest OOM. The default is far above any expected single
-// object yet rejects absurd lengths; a deployment overrides it via
-// ClientOptions.MaxDownloadBytes so the binary ships no fixed policy value.
+// defaultMaxDownloadBytes is the cap on how many bytes a single download body
+// may deliver before the streaming reader aborts — the value the shipped
+// binary always runs, since the production constructor passes empty options
+// and the frozen mount-config schema carries no download-ceiling knob. The
+// guest is the least-provisioned party in the architecture and must never let
+// a broker bug or a desynced stream size an unbounded read into guest OOM
+// (SEC-46 posture: tolerate throttling and misbehaviour without dying). The
+// value is a safety ceiling far above any expected single object, not a
+// policy value; tests override it through the ClientOptions.MaxDownloadBytes
+// seam to make the bound observable.
 //
 // The cap bounds the STREAM, not a pre-read buffer: Download returns a reader
 // that yields bytes as they arrive and only fails once cumulative reads would

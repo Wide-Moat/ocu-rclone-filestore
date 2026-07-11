@@ -40,10 +40,13 @@ type ClientOptions struct {
 	MessageCeiling int
 
 	// MaxDownloadBytes caps how many bytes a single whole-object download may
-	// deliver before the streaming reader aborts. It is a safety ceiling against
-	// a broker bug or desynced stream, not a policy value tied to any object. A
-	// value of 0 uses the default (defaultMaxDownloadBytes). The value flows in
-	// from the parsed mount config, so the binary ships no hard-coded ceiling.
+	// deliver before the streaming reader aborts. It is a safety ceiling
+	// against a broker bug or desynced stream, not a policy value tied to any
+	// object. A value of 0 uses the default (defaultMaxDownloadBytes) — which
+	// is what the shipped binary always runs: the only production constructor
+	// is New (empty options) from the ocufs backend, the frozen mount-config
+	// schema carries no such knob and none may be added, and NewWithOptions is
+	// the test-only override seam.
 	MaxDownloadBytes int64
 }
 
