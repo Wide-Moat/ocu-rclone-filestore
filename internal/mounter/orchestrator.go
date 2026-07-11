@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/internal/mountcfg"
@@ -337,11 +338,38 @@ func (o *orchestrator) blockUntilTeardown(started []point) error {
 }
 
 // unmountAll best-effort-unmounts every point and collects the errors.
+//
+// Points drain CONCURRENTLY: each unmount can block up to
+// writebackDrainTimeout + unmountDetachGrace (the write-back drain plus the
+// bounded kernel detach), so walking N points sequentially would stack those
+// budgets to N x 123s — past the 150s stop_grace_period both shipped compose
+// services pin — and the runtime would SIGKILL the process mid-drain,
+// discarding the later mounts' write-back queues. Concurrent drain bounds
+// whole-teardown cost at the MAX over points. The points are independent (one
+// VFS and one FUSE server each; overlapping drain uploads are the same
+// concurrency steady-state write-back already exercises), and each realPoint
+// serializes its own doUnmount via unmountOnce, so the fan-out is safe by
+// construction. Errors are collected per point and compacted in the points'
+// index order, keeping the aggregated output deterministic and identical to
+// the sequential form's.
 func (o *orchestrator) unmountAll(points []point) []error {
+	collected := make([]error, len(points))
+	var wg sync.WaitGroup
+	for i, p := range points {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := o.seam.unmount(p); err != nil {
+				collected[i] = fmt.Errorf("unmount %q: %w", p.destination(), err)
+			}
+		}()
+	}
+	wg.Wait()
+
 	var errs []error
-	for _, p := range points {
-		if err := o.seam.unmount(p); err != nil {
-			errs = append(errs, fmt.Errorf("unmount %q: %w", p.destination(), err))
+	for _, err := range collected {
+		if err != nil {
+			errs = append(errs, err)
 		}
 	}
 	return errs

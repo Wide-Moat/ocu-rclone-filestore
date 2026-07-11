@@ -38,6 +38,26 @@ func TestWritebackDrainCoversThrottleBackoffWindow(t *testing.T) {
 // a stop_grace_period covering drain + detach grace, asserted against the
 // REAL consts so raising the drain without the grace (or deleting the grace)
 // reds this test.
+//
+// The needed budget is the MAX over points, not the sum: unmountAll drains
+// every point CONCURRENTLY (each point serializes its own doUnmount via
+// unmountOnce), so whole-teardown cost is one drain-plus-detach window
+// regardless of the mount count. TestUnmountAllDrainsPointsConcurrentlyOn*
+// (teardown_concurrency_test.go) pins that fan-out; were teardown ever to go
+// sequential again, this budget would silently under-size by a factor of N
+// (the harness compose serves 4 mounts, the fleet fragment >= 2), which is
+// exactly the certificate this derivation must not re-become.
+//
+// Named residual (bringup window): this budget certifies the steady-state
+// teardown path only. During the sequential startup fan-out a termination
+// signal is observed at the next signalPending() poll, and an in-flight
+// mountAndWaitReady can hold the loop up to waitMountReadyTimeout (30s)
+// before shutdownDuringStartup tears down — worst-case SIGTERM-to-exit on
+// that path is 30s + the 123s teardown window = 153s > the 150s grace, with
+// earlier-started mounts possibly already holding dirty write-back. The
+// residual is pre-existing and NARROWED, not closed, by the concurrent
+// teardown (the sequential model was 30s + N x 123s, strictly worse); a grace
+// bump or a bringup signal restructure is deliberately out of scope here.
 func TestComposeStopGraceCoversTeardownBudget(t *testing.T) {
 	needed := writebackDrainTimeout + unmountDetachGrace
 	cases := []struct {
