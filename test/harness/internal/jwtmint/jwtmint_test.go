@@ -322,6 +322,58 @@ func TestDecodeRSRejectsWrongLength(t *testing.T) {
 	}
 }
 
+// TestExpiryUnverifiedRoundTrip pins that the lifetime probe reads back the exact
+// exp a signed token carries, without needing the verification key. A valid token
+// round-trips its exp; the three malformed-input arms error.
+func TestExpiryUnverifiedRoundTrip(t *testing.T) {
+	priv := mustKey(t)
+	now := time.Unix(1_700_000_000, 0)
+	claims := sampleClaims(now)
+	claims.Expiry = now.Add(9 * time.Minute).Unix()
+
+	tok, err := Sign(priv, "kid-1", claims)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	got, err := ExpiryUnverified(tok)
+	if err != nil {
+		t.Fatalf("ExpiryUnverified: %v", err)
+	}
+	if got != claims.Expiry {
+		t.Fatalf("exp mismatch: got %d, want %d", got, claims.Expiry)
+	}
+
+	// An exp-less token reads back 0 (the probe does not reject it; that policy is
+	// the caller's, and Verify — not this probe — is the one that rejects it).
+	noExp := sampleClaims(now)
+	noExp.Expiry = 0
+	tok2, err := Sign(priv, "kid-1", noExp)
+	if err != nil {
+		t.Fatalf("sign no-exp: %v", err)
+	}
+	if got, err := ExpiryUnverified(tok2); err != nil || got != 0 {
+		t.Fatalf("exp-less token: got (%d, %v), want (0, nil)", got, err)
+	}
+}
+
+func TestExpiryUnverifiedRejectsMalformed(t *testing.T) {
+	cases := []struct {
+		name  string
+		token string
+	}{
+		{"not_a_jws", "onlyonepart"},
+		{"payload_not_base64url", "a.!!!notbase64!!!.c"},
+		{"payload_not_json", "a." + b64.EncodeToString([]byte("not json")) + ".c"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ExpiryUnverified(tc.token); err == nil {
+				t.Fatalf("token %q: expected an error", tc.token)
+			}
+		})
+	}
+}
+
 // TestVerifyReadsNestedAuthzIntent pins the ocu-control claim shape: the real
 // Control plane emits the intent nested under an "authz" object, not at the
 // payload top level. Verify must surface that nested intent (with claims-bind
