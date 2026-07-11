@@ -69,6 +69,18 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if err := configstruct.Set(m, &opts); err != nil {
 		return nil, fmt.Errorf("ocufs: parse options: %w", err)
 	}
+	// The production seam constructs this backend directly with a bare
+	// configmap, bypassing the registry-defaults layer that fs.NewFs applies —
+	// so an absent "encoding" key would leave Enc at zero, the identity
+	// encoder, and a file name carrying invalid UTF-8 or a trailing
+	// space/period would mutate inside the JSON request body instead of
+	// round-tripping losslessly (the broker addresses objects by path, so a
+	// mutated path is a different object). Forward the backend's declared
+	// default here so every constructor path runs the real encoder; an
+	// explicit "encoding" key still wins.
+	if _, ok := m.Get("encoding"); !ok {
+		opts.Enc = defaultEncoding
+	}
 	if opts.ServiceURL == "" {
 		return nil, fmt.Errorf("ocufs: service_url is required")
 	}
