@@ -9,6 +9,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,6 +106,95 @@ func TestCallErrorBodyCaptureIsBounded(t *testing.T) {
 	const slack = 256
 	if got, limit := int64(len(err.Error())), maxErrorBodyBytes+slack; got > limit {
 		t.Errorf("error string is %d bytes; the diagnostics budget bounds it at %d", got, limit)
+	}
+}
+
+// TestCaptureErrorBodyTwoSided pins the shared capture helper on both sides of
+// the diagnostics budget: a body within (or exactly at) the cap comes back
+// verbatim with no marker — a complete page is never mislabelled as truncated —
+// and a body past the cap comes back capped at maxErrorBodyBytes with the
+// truncation marker appended.
+func TestCaptureErrorBodyTwoSided(t *testing.T) {
+	t.Run("under cap is verbatim with no marker", func(t *testing.T) {
+		in := []byte("deny: scope mismatch")
+		got := captureErrorBody(bytes.NewReader(in))
+		if !bytes.Equal(got, in) {
+			t.Errorf("capture altered a %d-byte body under the cap: got %d bytes", len(in), len(got))
+		}
+		if strings.Contains(string(got), " ...[truncated]") {
+			t.Error("a body under the cap must not carry the truncation marker")
+		}
+	})
+	t.Run("exactly at cap is verbatim with no marker", func(t *testing.T) {
+		in := bytes.Repeat([]byte("x"), int(maxErrorBodyBytes))
+		got := captureErrorBody(bytes.NewReader(in))
+		if !bytes.Equal(got, in) {
+			t.Errorf("capture altered a body exactly at the cap: got %d bytes, want %d", len(got), len(in))
+		}
+	})
+	t.Run("over cap is capped plus marker", func(t *testing.T) {
+		in := bytes.Repeat([]byte("y"), int(maxErrorBodyBytes)+1)
+		got := captureErrorBody(bytes.NewReader(in))
+		const marker = " ...[truncated]"
+		if want := maxErrorBodyBytes + int64(len(marker)); int64(len(got)) != want {
+			t.Errorf("capture of an over-cap body is %d bytes, want exactly %d (cap + marker)", len(got), want)
+		}
+		if !strings.HasSuffix(string(got), marker) {
+			t.Errorf("capture of an over-cap body must end with the marker %q", marker)
+		}
+		if !bytes.Equal(got[:maxErrorBodyBytes], in[:maxErrorBodyBytes]) {
+			t.Error("capture must preserve the body prefix up to the cap verbatim")
+		}
+	})
+}
+
+// TestCallErrorBodyCaptureStopsReadingAtCap is the two-sided transport pin for
+// the unary error-path capture bound: the client must stop READING the wire at
+// the diagnostics budget, not merely truncate a fully-buffered page afterwards.
+// The server streams a 1 MiB error page in small flushed chunks, counting the
+// bytes it managed to write; a capped capture stops reading around 64 KiB, so
+// the connection tears down long before 512 KiB crosses the wire. A capture
+// bounded at the 64 MiB decode ceiling would drain the full 1 MiB and red the
+// byte-count assertion — the marker assertion alone cannot distinguish the two,
+// because MapHTTPStatus re-truncates the error string either way.
+func TestCallErrorBodyCaptureStopsReadingAtCap(t *testing.T) {
+	const (
+		chunkSize    = 8 << 10   // 8 KiB per flushed write
+		totalBody    = 1 << 20   // 1 MiB error page
+		writtenLimit = 512 << 10 // wide margin above the ~64 KiB capped read
+	)
+	var written atomic.Int64
+	chunk := bytes.Repeat([]byte("E"), chunkSize)
+	c, _ := newTLSTestClient(t, "fs-err-cap", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusBadRequest)
+		f, canFlush := w.(http.Flusher)
+		for sent := 0; sent < totalBody; sent += chunkSize {
+			n, werr := w.Write(chunk)
+			written.Add(int64(n))
+			if werr != nil {
+				return // the client stopped reading and closed the connection
+			}
+			if canFlush {
+				f.Flush()
+			}
+			// Pace the stream so kernel socket buffering cannot swallow a
+			// large share of the page before the client-side close lands.
+			time.Sleep(500 * time.Microsecond)
+		}
+	})
+	_, err := c.ListDirectory(context.Background(), "/")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("400 must map to ErrInvalidArgument; got %v", err)
+	}
+	if !strings.Contains(err.Error(), " ...[truncated]") {
+		t.Errorf("error must carry the truncation marker; got a %d-byte message without it", len(err.Error()))
+	}
+	if got := written.Load(); got >= writtenLimit {
+		t.Errorf("server wrote %d bytes before the client stopped reading; a capped capture must keep this under %d", got, writtenLimit)
 	}
 }
 

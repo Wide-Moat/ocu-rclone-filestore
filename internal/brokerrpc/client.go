@@ -165,10 +165,10 @@ func (c *Client) call(ctx context.Context, op Op, req, resp interface{}) error {
 	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
 		// Non-2xx error: the HTTP status drives the typed mapping. The body is
 		// diagnostics-only (never parsed; the Retry-After header is honoured
-		// only on 429 inside MapHTTPStatus), so capture is capped at the shared
-		// diagnostics budget rather than the 2xx decode ceiling.
-		errBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodyBytes))
-		return MapHTTPStatus(httpResp.StatusCode, errBody, httpResp.Header.Get("Retry-After"))
+		// only on 429 inside MapHTTPStatus), so capture goes through the shared
+		// bounded helper — capped at the diagnostics budget, never at the 2xx
+		// decode ceiling — which marks a truncated page explicitly.
+		return MapHTTPStatus(httpResp.StatusCode, captureErrorBody(httpResp.Body), httpResp.Header.Get("Retry-After"))
 	}
 
 	if resp != nil {

@@ -145,11 +145,12 @@ func (c *Client) doDownload(
 	}
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
-		// Read the error body for diagnostics (capped at the shared
-		// diagnostics budget), then map by status. This path owns the body
-		// fully, so close it here — success returns the body to the caller
-		// instead, who closes it via the returned ReadCloser.
-		errBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodyBytes))
+		// Capture the error body for diagnostics through the shared bounded
+		// helper (capped at the diagnostics budget, truncation marked), then
+		// map by status. This path owns the body fully, so close it here —
+		// success returns the body to the caller instead, who closes it via
+		// the returned ReadCloser.
+		errBody := captureErrorBody(httpResp.Body)
 		_ = httpResp.Body.Close()
 		return nil, MapHTTPStatus(httpResp.StatusCode, errBody, httpResp.Header.Get("Retry-After"))
 	}
