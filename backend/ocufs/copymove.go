@@ -23,41 +23,11 @@ import (
 // (design decision 2 from 03-02 — distinct from the direct List path where
 // uuid arrives in the listing entry).
 func (f *Fs) Copy(ctx context.Context, src fs.Object, dstRemote string) (fs.Object, error) {
-	if f.readOnly {
-		return nil, fs.ErrorPermissionDenied
-	}
-
-	// The broker's copyFile op is scoped to this filesystem_id and addresses the
-	// source by a path inside it. A foreign src (a different backend, or a second
-	// ocufs mount bound to another filesystem_id) has no valid path in this scope,
-	// so building one from its remote string would issue a server-side copy for a
-	// path that does not exist here. Reject the server-side copy so rclone falls
-	// back to download+upload, which crosses the boundary correctly. Require the
-	// SAME *Fs instance (not merely *Object), mirroring DirMove's identity check.
-	srcObj, ok := src.(*Object)
-	if !ok || srcObj.fs != f {
-		return nil, fs.ErrorCantCopy
-	}
-	srcPath := srcObj.path
-	dstPath := f.absPath(dstRemote)
-
-	if _, err := f.client.CopyFile(ctx, srcPath, dstPath); err != nil {
-		return nil, fmt.Errorf("ocufs: Copy %q → %q: %w", srcPath, dstPath, mapBrokerError(err))
-	}
-
-	// Build a uuid-less destination Object. The broker ack carries no File
-	// body, so no uuid is available from the ack; resolve() is the defensive
-	// fallback that fetches it on the first access that needs it. The size IS
-	// known without a round-trip: a server-side copy preserves byte content,
-	// hence byte count — carrying it keeps Size() truthful on the ack path
-	// (the kernel caches Size() on the first getattr) with zero extra wire
-	// calls.
-	return &Object{
-		fs:     f,
-		path:   dstPath,
-		remote: dstRemote,
-		size:   srcObj.Size(),
-	}, nil
+	return f.transferFile(ctx, src, dstRemote, "Copy", fs.ErrorCantCopy,
+		func(ctx context.Context, srcPath, dstPath string) error {
+			_, err := f.client.CopyFile(ctx, srcPath, dstPath)
+			return err
+		})
 }
 
 // Move moves src to the remote dstRemote, returning the destination Object.
@@ -68,27 +38,53 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, dstRemote string) (fs.Obje
 // MoveFile returns only an AckResponse (no File body), so the returned Object
 // is uuid-less and relies on the defensive lazy resolve() for first access.
 func (f *Fs) Move(ctx context.Context, src fs.Object, dstRemote string) (fs.Object, error) {
+	return f.transferFile(ctx, src, dstRemote, "Move", fs.ErrorCantMove,
+		func(ctx context.Context, srcPath, dstPath string) error {
+			_, err := f.client.MoveFile(ctx, srcPath, dstPath)
+			return err
+		})
+}
+
+// transferFile is the shared server-side transfer skeleton behind Copy and
+// Move, which differ only in the broker op they invoke, the sentinel they
+// reject a foreign source with, and the op name in the wrapped error. opName
+// is interpolated into the error text ("ocufs: <opName> ..."), so the wrapped
+// errors stay byte-identical to the pre-extraction per-method texts.
+func (f *Fs) transferFile(ctx context.Context, src fs.Object, dstRemote string,
+	opName string, cantSentinel error,
+	call func(ctx context.Context, srcPath, dstPath string) error) (fs.Object, error) {
 	if f.readOnly {
 		return nil, fs.ErrorPermissionDenied
 	}
 
-	// Same boundary rule as Copy: the broker's moveFile op is scoped to this
-	// filesystem_id, so a foreign src has no valid path here. Reject the
-	// server-side move so rclone falls back to copy+delete across the boundary.
+	// The broker's copyFile/moveFile ops are scoped to this filesystem_id and
+	// address the source by a path inside it. A foreign src (a different
+	// backend, or a second ocufs mount bound to another filesystem_id) has no
+	// valid path in this scope, so building one from its remote string would
+	// issue a server-side transfer for a path that does not exist here. Reject
+	// it with the op's sentinel (ErrorCantCopy/ErrorCantMove) so rclone falls
+	// back to the client-side route (download+upload, or copy+delete), which
+	// crosses the boundary correctly. Require the SAME *Fs instance (not merely
+	// *Object — pointer identity, not a bare type assert), mirroring DirMove's
+	// identity check.
 	srcObj, ok := src.(*Object)
 	if !ok || srcObj.fs != f {
-		return nil, fs.ErrorCantMove
+		return nil, cantSentinel
 	}
 	srcPath := srcObj.path
 	dstPath := f.absPath(dstRemote)
 
-	if _, err := f.client.MoveFile(ctx, srcPath, dstPath); err != nil {
-		return nil, fmt.Errorf("ocufs: Move %q → %q: %w", srcPath, dstPath, mapBrokerError(err))
+	if err := call(ctx, srcPath, dstPath); err != nil {
+		return nil, fmt.Errorf("ocufs: %s %q → %q: %w", opName, srcPath, dstPath, mapBrokerError(err))
 	}
 
-	// Ack-only destination Object, same shape as Copy's: uuid resolves lazily,
-	// but the size is carried from the source (a server-side move preserves
-	// byte count) so Size() never reports a false 0 on the rename path.
+	// Build a uuid-less destination Object. The broker ack carries no File
+	// body, so no uuid is available from the ack; resolve() is the defensive
+	// fallback that fetches it on the first access that needs it. The size IS
+	// known without a round-trip: a server-side copy or move preserves byte
+	// content, hence byte count — carrying it keeps Size() truthful on the ack
+	// path (the kernel caches Size() on the first getattr) with zero extra
+	// wire calls.
 	return &Object{
 		fs:     f,
 		path:   dstPath,
