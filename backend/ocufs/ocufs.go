@@ -202,7 +202,7 @@ func (f *Fs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 	// grows — as required by rclone's List contract, which returns a slice.
 	var entries fs.DirEntries
 	err := f.client.ListDirectoryStream(ctx, dirPath, func(entry brokerrpc.ListDirEntry) error {
-		remote, ok := f.immediateChildRemote(dir, entry)
+		remote, ok := f.immediateChildRemote(dir, dirPath, entry)
 		if !ok {
 			return nil // deeper descendant — filtered per design decision 6
 		}
@@ -385,7 +385,13 @@ func cleanPath(p string) string {
 // only entries that are exactly one path segment below dir. The broker entry
 // path is on-wire encoded; the returned remote is decoded back to standard
 // encoding (ToStandardPath) so rclone sees the original file name.
-func (f *Fs) immediateChildRemote(dir string, entry brokerrpc.ListDirEntry) (string, bool) {
+//
+// parentPath MUST be f.absPath(dir) for the given dir. The caller passes it
+// in — rather than this helper recomputing it — because the helper runs once
+// per streamed listing entry and the join+encode+clean of absPath is
+// per-listing work, not per-entry work; List already holds the value. dir
+// itself is still required for the final remote join below.
+func (f *Fs) immediateChildRemote(dir, parentPath string, entry brokerrpc.ListDirEntry) (string, bool) {
 	var entryPath string
 	switch {
 	case entry.File != nil:
@@ -396,7 +402,6 @@ func (f *Fs) immediateChildRemote(dir string, entry brokerrpc.ListDirEntry) (str
 		return "", false
 	}
 	entryPath = cleanPath(entryPath)
-	parentPath := f.absPath(dir)
 
 	// An entry equal to the directory being listed is that directory itself, not
 	// a child. Without this guard a root listing whose entries include an entry

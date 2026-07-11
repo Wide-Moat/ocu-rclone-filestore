@@ -371,7 +371,7 @@ func TestOpenRangeToEndBeyondEndClampsLengthToZero(t *testing.T) {
 // by immediateChildRemote (the default arm returns false) and dropped by List.
 func TestImmediateChildRemoteBothArmsNil(t *testing.T) {
 	f := newTestFs(t, &fakeClient{}, false)
-	_, ok := f.immediateChildRemote("", brokerrpc.ListDirEntry{}) // both arms nil
+	_, ok := f.immediateChildRemote("", f.absPath(""), brokerrpc.ListDirEntry{}) // both arms nil
 	if ok {
 		t.Error("immediateChildRemote for an entry with both arms nil returned true, want false")
 	}
