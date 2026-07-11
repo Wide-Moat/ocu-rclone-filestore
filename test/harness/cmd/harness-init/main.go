@@ -182,6 +182,11 @@ func run(out, edgeHost string, edgePort int, fixtureTemplate string, certTTL, re
 	}
 
 	// 4. Mint one weak session JWT per scope, signed by the control-plane key.
+	// The token lifetime is derived from certTTL, not a hard-coded window, so the
+	// weak-JWT axis and the cert axis stay coupled: raising -cert-ttl for a long
+	// demo extends the tokens too, and the two cannot silently diverge (a fresh
+	// cert outliving already-dead tokens). The reissue guard checks both axes.
+	tokenTTL := weakTokenTTL(certTTL)
 	tokens := map[string]string{}
 	now := time.Now()
 	for _, sc := range weakJWTScopes {
@@ -190,7 +195,7 @@ func run(out, edgeHost string, edgePort int, fixtureTemplate string, certTTL, re
 			Audience:     cpAudience,
 			Subject:      sc.fsid,
 			IssuedAt:     now.Unix(),
-			Expiry:       now.Add(12 * time.Hour).Unix(),
+			Expiry:       now.Add(tokenTTL).Unix(),
 			FilesystemID: sc.fsid,
 			Intent:       sc.intent,
 		}
@@ -221,17 +226,32 @@ func run(out, edgeHost string, edgePort int, fixtureTemplate string, certTTL, re
 
 // needsReissue decides whether the artifact set in out must be produced. It
 // returns true (with a human-readable reason) when there is no rendered set yet,
-// or when the set exists but its leaf is missing, unparseable, or within
-// renewBefore of expiry (relative to now). It returns false when the set exists
-// and its leaf is comfortably valid — the idempotent leave-in-place path.
+// or when the set exists but either axis is expiring: the representative leaf is
+// missing, unparseable, or within renewBefore of expiry, OR any minted weak JWT
+// is missing, unparseable, or within renewBefore of expiry. It returns false
+// only when the set exists and BOTH axes are comfortably valid — the idempotent
+// leave-in-place path.
 //
-// A non-positive renewBefore disables the expiry check: an existing marker is
+// The token axis is checked because the weak JWTs are a separate artifact from
+// the cert with their own lifetime: a stand restarted after the tokens die but
+// while the cert is still valid would otherwise self-heal nothing (the guard
+// would leave the dead tokens in place, and the edge would 401 every request).
+// Reading the tokens back from weak-tokens.json and checking their exp with the
+// same renewBefore window couples the two axes, so a re-issue fires the moment
+// either artifact nears expiry.
+//
+// A non-positive renewBefore disables BOTH expiry checks: an existing marker is
 // then always left in place, restoring the original pure stat-idempotency (the
 // documented opt-out for a caller that manages cert lifetime itself).
 //
 // The representative leaf is the first service leaf; every leaf is issued in the
 // same run with the same TTL, so one leaf's remaining validity speaks for the
-// set.
+// set. Likewise every weak JWT is minted in the same run with the same TTL.
+//
+// A present marker but an absent or unparseable weak-tokens.json is treated as a
+// torn/partial set (re-issue), which also self-heals a set produced by an older
+// harness-init that predates the token axis — re-issue is always the safe
+// direction here (harness-init is a one-shot completing before any peer starts).
 func needsReissue(out string, renewBefore time.Duration, now time.Time) (bool, string, error) {
 	marker := filepath.Join(out, "guest-config.json")
 	if _, statErr := os.Stat(marker); statErr != nil {
@@ -255,7 +275,66 @@ func needsReissue(out string, renewBefore time.Duration, now time.Time) (bool, s
 	if remaining := notAfter.Sub(now); remaining < renewBefore {
 		return true, fmt.Sprintf("leaf expires in %s (< renew-before %s)", remaining.Round(time.Second), renewBefore), nil
 	}
+
+	// Token axis: the weak JWTs are their own artifact with their own lifetime.
+	tokenNotAfter, why, err := weakTokensNotAfter(out)
+	if err != nil {
+		return true, why, nil
+	}
+	if remaining := tokenNotAfter.Sub(now); remaining < renewBefore {
+		return true, fmt.Sprintf("weak JWT expires in %s (< renew-before %s)", remaining.Round(time.Second), renewBefore), nil
+	}
 	return false, "", nil
+}
+
+// weakTokenTTL derives the weak session JWT lifetime from the cert TTL so the two
+// artifact axes stay coupled. It floors the token TTL at 12h only if certTTL is
+// somehow shorter, so a raised -cert-ttl always extends the tokens and the
+// default 24h cert simply lends the tokens 24h.
+func weakTokenTTL(certTTL time.Duration) time.Duration {
+	const floor = 12 * time.Hour
+	if certTTL < floor {
+		return floor
+	}
+	return certTTL
+}
+
+// weakTokensNotAfter reads weak-tokens.json and returns the earliest exp across
+// every minted token, so the soonest-dying token governs the axis. It returns an
+// error (with a re-issue reason) when the file is missing, unreadable, not JSON,
+// empty, or carries a token that is not a compact JWS, whose payload is
+// unparseable, or whose exp is absent/zero (treated as expired-unsafe, mirroring
+// Verify's rejection of an exp-less token).
+func weakTokensNotAfter(out string) (time.Time, string, error) {
+	path := filepath.Join(out, "weak-tokens.json")
+	raw, err := os.ReadFile(path) //nolint:gosec // G304: harness-controlled path under the shared volume
+	if err != nil {
+		return time.Time{}, fmt.Sprintf("weak-tokens.json unreadable (%v)", err), err
+	}
+	var tokens map[string]string
+	if err := json.Unmarshal(raw, &tokens); err != nil {
+		return time.Time{}, fmt.Sprintf("weak-tokens.json is not JSON (%v)", err), err
+	}
+	if len(tokens) == 0 {
+		return time.Time{}, "weak-tokens.json carries no tokens", fmt.Errorf("no weak tokens")
+	}
+	earliest := time.Time{}
+	for fsid, tok := range tokens {
+		exp, perr := jwtmint.ExpiryUnverified(tok)
+		if perr != nil {
+			return time.Time{}, fmt.Sprintf("weak JWT for %s unparseable (%v)", fsid, perr), perr
+		}
+		if exp == 0 {
+			// An exp-less token would never expire; treat it as expired-unsafe so the
+			// set is re-issued (consistent with Verify rejecting an exp-less token).
+			return time.Time{}, fmt.Sprintf("weak JWT for %s carries no expiry", fsid), fmt.Errorf("no expiry")
+		}
+		notAfter := time.Unix(exp, 0)
+		if earliest.IsZero() || notAfter.Before(earliest) {
+			earliest = notAfter
+		}
+	}
+	return earliest, "", nil
 }
 
 // leafNotAfter reads a PEM leaf certificate file and returns its NotAfter. It
