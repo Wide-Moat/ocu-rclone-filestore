@@ -244,16 +244,19 @@ func (f *fakeClient) RemoveFile(ctx context.Context, path string) (*brokerrpc.Ac
 // ---------------------------------------------------------------------------
 
 // newTestFs creates an Fs backed by the given fakeClient. readOnly controls
-// the mount mode.
+// the mount mode. Mirroring NewFs, it builds the Features surface after the
+// literal so Features() serves the construction-time cached field here too.
 func newTestFs(t *testing.T, c *fakeClient, readOnly bool) *Fs {
 	t.Helper()
-	return &Fs{
+	f := &Fs{
 		name:     "ocufs",
 		root:     "/",
 		client:   c,
 		readOnly: readOnly,
 		enc:      defaultEncoding,
 	}
+	f.buildFeatures(context.Background())
+	return f
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,6 +1058,24 @@ func TestFsInfoAccessors(t *testing.T) {
 	feats := f.Features()
 	if feats == nil {
 		t.Error("Features() returned nil")
+	}
+}
+
+// TestFeaturesBuiltOnce pins that the Features surface is built once at
+// construction and that Features() returns the same cached pointer on every
+// call — no per-call fs.Features rebuild and no per-call Fill
+// optional-interface re-scan on the hot path (the VFS layer calls Features()
+// from concurrent FUSE-handler goroutines, so the field must be immutable
+// after construction, never lazily initialized). Pointer identity is the
+// load-bearing assertion.
+func TestFeaturesBuiltOnce(t *testing.T) {
+	f := newTestFs(t, &fakeClient{}, false)
+	first := f.Features()
+	if first == nil {
+		t.Fatal("Features() returned nil")
+	}
+	if second := f.Features(); second != first {
+		t.Errorf("Features() returned a different pointer on the second call (%p != %p); the Features surface must be built once at construction", second, first)
 	}
 }
 
