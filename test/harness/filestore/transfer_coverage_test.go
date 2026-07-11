@@ -6,6 +6,7 @@ package filestore
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -98,6 +99,46 @@ func TestUploadAndDownloadArms(t *testing.T) {
 	// Overwrite allowed -> 200.
 	if w := upload(t, srv, "up.txt", payload, len(payload), true); w.Code != http.StatusOK {
 		t.Fatalf("upload with overwrite returned %d, want 200", w.Code)
+	}
+}
+
+// TestDownloadRejectsOverflowingRange pins the overflow guard: a schema-legal
+// extreme range whose offset+length overflows int64 must be rejected with 400,
+// not answered with a 200 carrying a negative Content-Length and an empty body.
+// The boundary case (the largest non-overflowing length) must still succeed,
+// clamped to the object size, so the guard fires only on genuine overflow.
+func TestDownloadRejectsOverflowingRange(t *testing.T) {
+	root := t.TempDir()
+	srv := MustNewServer(Options{
+		Scopes:      []Scope{{FilesystemID: "fsrw", Root: root, ReadOnly: false}},
+		Credentials: StaticCredentialValidator{Credentials: map[string]string{"rw-cred": "fsrw"}},
+	})
+
+	payload := []byte("overflow-guard-fixture")
+	up := upload(t, srv, "ovf.txt", payload, len(payload), false)
+	if up.Code != http.StatusOK {
+		t.Fatalf("seed upload returned %d, want 200: %s", up.Code, up.Body.String())
+	}
+	var meta struct {
+		File struct {
+			UUID string `json:"uuid"`
+		} `json:"file"`
+	}
+	if err := json.Unmarshal(up.Body.Bytes(), &meta); err != nil {
+		t.Fatalf("decode upload response: %v", err)
+	}
+
+	// offset 1 + length MaxInt64 wraps negative. On the unfixed handler this is a
+	// 200 with a negative Content-Length; the guard makes it a clean 400.
+	if w := download(t, srv, meta.File.UUID, map[string]any{"offset": 1, "length": math.MaxInt64}); w.Code != http.StatusBadRequest {
+		t.Fatalf("overflowing range returned %d, want 400 (Content-Length %q)", w.Code, w.Header().Get("Content-Length"))
+	}
+
+	// Boundary: length == MaxInt64 - start is the largest representable end. It
+	// merely exceeds total, so it clamps to the object and streams the tail — a
+	// 200, proving the guard does not over-reject a large-but-representable range.
+	if w := download(t, srv, meta.File.UUID, map[string]any{"offset": 1, "length": int64(math.MaxInt64) - 1}); w.Code != http.StatusOK {
+		t.Fatalf("largest non-overflowing range returned %d, want 200", w.Code)
 	}
 }
 
