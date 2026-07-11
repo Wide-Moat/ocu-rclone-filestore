@@ -4,9 +4,11 @@
 package mounter
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // scaffoldWalkEntryCeiling bounds the pre-mount walk over the mount
@@ -39,10 +41,7 @@ func ensureMountpointShadowsNoContent(dest string) error {
 	walk = func(dir string) error {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			if dir == dest && os.IsNotExist(err) {
-				return fmt.Errorf("mount destination %q does not exist", dest)
-			}
-			return fmt.Errorf("inspecting mount destination %q: %w", dest, err)
+			return classifyDestReadError(dest, dir, err)
 		}
 		for _, e := range entries {
 			seen++
@@ -60,4 +59,24 @@ func ensureMountpointShadowsNoContent(dest string) error {
 		return nil
 	}
 	return walk(dest)
+}
+
+// classifyDestReadError words a failed ReadDir during the pre-mount walk.
+// Three states are distinguishable and each gets its own remedy:
+//
+//   - a missing destination is the OPPOSITE of the shadow condition (nothing
+//     can be shadowed) and is never worded as a refusal;
+//   - ENOTCONN means a STALE disconnected FUSE mount is still attached at the
+//     path — the previous mount instance died without a clean detach — and the
+//     remedy is a lazy unmount, not entry removal;
+//   - anything else fails closed with the walk error, because an unreadable
+//     tree cannot be proven safe to shadow.
+func classifyDestReadError(dest, dir string, err error) error {
+	if dir == dest && os.IsNotExist(err) {
+		return fmt.Errorf("mount destination %q does not exist", dest)
+	}
+	if errors.Is(err, syscall.ENOTCONN) {
+		return fmt.Errorf("a stale disconnected mount is still attached at %q (a previous mount instance exited without a clean detach); lazy-unmount it (umount -l) and restart the mount: %w", dir, err)
+	}
+	return fmt.Errorf("inspecting mount destination %q: %w", dest, err)
 }
