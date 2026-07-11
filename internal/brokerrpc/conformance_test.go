@@ -124,3 +124,31 @@ func TestGoldenDownloadRequest(t *testing.T) {
 		t.Errorf("download request mismatch\ngot:  %s\nwant: %s", payload, golden)
 	}
 }
+
+// TestGoldenDownloadRequestRanged checks the ranged fileDownload request golden:
+// the {offset, length} window serialises as a nested "range" object with exactly
+// those keys. The fixture is independent text, so a JSON-tag typo on
+// Range/Offset/Length fails here even when a test-side decoder would round-trip
+// through the same struct — this is the absolute-key pin for the live
+// ranged-read hot path.
+func TestGoldenDownloadRequestRanged(t *testing.T) {
+	golden := loadGolden(t, "rest-download-request-ranged.json")
+
+	am, err := StampAuthMeta(OpFileDownload)
+	if err != nil {
+		t.Fatalf("StampAuthMeta: %v", err)
+	}
+	req := FileDownloadRequest{
+		FilesystemID:          "fs-golden-01",
+		UUID:                  "uuid-golden-42",
+		Range:                 &Range{Offset: 100, Length: 512},
+		AuthorizationMetadata: am,
+	}
+	payload, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	if !jsonEqual(payload, golden) {
+		t.Errorf("ranged download request mismatch\ngot:  %s\nwant: %s", payload, golden)
+	}
+}

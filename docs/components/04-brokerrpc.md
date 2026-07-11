@@ -48,8 +48,10 @@ Every request carries an `AuthorizationMetadata` value produced by
 `preview` intent that exists in the service vocabulary — the perimeter-exit
 decision is the broker's to resolve, never the guest's to ask for (SEC-73).
 `filesystem_id` rides at the request top level, not inside the metadata. The
-UUID-addressed ops (`getFileMetadata`, `listFiles`, `fileDownload`) carry a
-broker-minted handle, and the guest never derives scope from it.
+implemented UUID-addressed op (`fileDownload`) carries a broker-minted handle,
+and the guest never derives scope from it. Ops whose bodies the frozen
+contract leaves TBD keep their pinned names in the intent table but have no
+client method and no wire types — a TBD body is never invented.
 
 The unary methods on `Client` are thin: each stamps its op, fills the
 op-specific request fields, and runs the shared `call` helper. `call` marshals
@@ -128,19 +130,19 @@ carries no range echo, so over-delivery is the one verifiable signature of a
 dishonoured range, and it fails as an error rather than being trimmed into
 wrong-but-plausible bytes. A non-2xx maps through `MapHTTPStatus`.
 
-**Cursor pagination.** Listing is paged. `ListDirectory` and `ListFiles` each
-return one page plus a continuation token (`Cursor` and `AfterUUID`
-respectively); the token is exposed so a caller can tell a first page from a
-complete listing instead of mistaking page 1 for the whole result.
-`ListDirectoryAll` and `ListFilesAll` follow the token to completion. The token
-is an `OpaqueCursor` — echoed back verbatim, never parsed or mutated, because it
-may carry broker-internal scope and inspecting it could leak an enumeration path.
-Both loops carry a progress guard: a token that repeats at any distance (a
-pagination cycle, caught by a fixed-size digest set) or a listing that runs
-past the hard page ceiling aborts with an error rather than spinning forever
-with unbounded memory growth inside the mount.
+**Cursor pagination.** Listing is paged. `ListDirectory` returns one page plus
+a continuation token (`Cursor`); the token is exposed so a caller can tell a
+first page from a complete listing instead of mistaking page 1 for the whole
+result. `ListDirectoryStream` follows the token to completion, yielding
+entries as each page arrives; `ListDirectoryAll` is its buffering wrapper. The
+token is an `OpaqueCursor` — echoed back verbatim, never parsed or mutated,
+because it may carry broker-internal scope and inspecting it could leak an
+enumeration path. The loop carries a progress guard: a token that repeats at
+any distance (a pagination cycle, caught by a fixed-size digest set) or a
+listing that runs past the hard page ceiling aborts with an error rather than
+spinning forever with unbounded memory growth inside the mount.
 
-Code: `upload.go` (`Upload`, `isPipeClosure`, `sourceChunkSize`), `download.go` (`Download`, `DownloadRange`, `doDownload`), `cursor.go` (`ListDirectoryAll`, `ListFilesAll`, `OpaqueCursor`).
+Code: `upload.go` (`Upload`, `isPipeClosure`, `sourceChunkSize`), `download.go` (`Download`, `DownloadRange`, `doDownload`), `cursor.go` (`ListDirectoryStream`, `ListDirectoryAll`, `OpaqueCursor`).
 
 ## See also
 

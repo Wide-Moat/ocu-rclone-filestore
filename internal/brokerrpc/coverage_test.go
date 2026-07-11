@@ -143,7 +143,7 @@ func TestCallTooManyRequestsHonoursRetryAfter(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte("throttled"))
 	})
-	_, err := c.CreateFile(context.Background(), "/new.txt")
+	_, err := c.MakeDirectory(context.Background(), "/new-dir")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -363,25 +363,6 @@ func TestListDirectoryAllCallErrorSurfaces(t *testing.T) {
 	}
 	if !errors.Is(err, ErrPermissionDenied) {
 		t.Errorf("underlying 403 must be preserved; got %v", err)
-	}
-}
-
-// TestListFilesAllCallErrorSurfaces drives the call-error branch inside the
-// ListFilesAll paging loop.
-func TestListFilesAllCallErrorSurfaces(t *testing.T) {
-	c, _ := newTLSTestClient(t, "fs-lfa-err", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte("missing"))
-	})
-	_, err := c.ListFilesAll(context.Background(), "root-uuid")
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "ListFilesAll") {
-		t.Errorf("error %q does not name ListFilesAll", err.Error())
-	}
-	if !errors.Is(err, ErrNotFound) {
-		t.Errorf("underlying 404 must be preserved; got %v", err)
 	}
 }
 

@@ -38,30 +38,3 @@ func TestListDirectoryAllZeroEntriesSinglePage(t *testing.T) {
 		t.Error("ranged over a supposedly empty entry list")
 	}
 }
-
-// TestListFilesAllZeroEntriesSinglePage verifies the same empty-listing boundary
-// for the uuid-paginated listFiles path.
-func TestListFilesAllZeroEntriesSinglePage(t *testing.T) {
-	var callCount int
-	c, _ := newTLSTestClient(t, "fs-empty-02", func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		_, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
-	})
-
-	files, err := c.ListFilesAll(context.Background(), "root-uuid")
-	if err != nil {
-		t.Fatalf("ListFilesAll on empty page: %v", err)
-	}
-	if callCount != 1 {
-		t.Errorf("empty after_uuid must terminate after one call, got %d calls", callCount)
-	}
-	if len(files) != 0 {
-		t.Errorf("expected 0 files, got %d", len(files))
-	}
-	for range files {
-		t.Error("ranged over a supposedly empty file list")
-	}
-}

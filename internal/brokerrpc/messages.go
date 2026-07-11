@@ -48,7 +48,8 @@ type Directory struct {
 	Mtime string `json:"mtime,omitempty"`
 }
 
-// Range specifies a byte range for a readFile request.
+// Range is the {offset, length} byte window carried (optionally) by a
+// FileDownloadRequest: the sourced nested-range shape for a partial read.
 type Range struct {
 	Offset int64 `json:"offset"`
 	Length int64 `json:"length"`
@@ -61,8 +62,11 @@ type AckResponse struct{}
 // ---------------------------------------------------------------------------
 // Per-op request types
 // ---------------------------------------------------------------------------
-// Every path-scoped request carries filesystem_id at the top level.
-// uuid-axis ops (getFileMetadata, fileDownload, listFiles) address by UUID.
+// Every path-scoped request carries filesystem_id at the top level. The one
+// uuid-axis request implemented here (fileDownload) addresses by broker-minted
+// UUID. Ops whose bodies are TBD at the frozen contract have no request type
+// in this file — only their operation NAMES are pinned (intent.go); a TBD body
+// is never invented.
 // No request carries a metadata_retention_days field (D6 reject).
 // ---------------------------------------------------------------------------
 
@@ -96,44 +100,10 @@ type RemoveDirectoryRequest struct {
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
-// CreateFileRequest is the request for the createFile op.
-type CreateFileRequest struct {
-	FilesystemID          string                `json:"filesystem_id"`
-	Path                  string                `json:"path"`
-	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
-}
-
-// ReadFileRequest is the request for the readFile op. It carries an optional
-// Range for partial reads; when Range is the zero value the broker returns
-// the full file. readFile is a unary op; the reassembly logic for chunked
-// delivery is in a later phase.
-type ReadFileRequest struct {
-	FilesystemID          string                `json:"filesystem_id"`
-	Path                  string                `json:"path"`
-	Range                 Range                 `json:"range"`
-	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
-}
-
 // ReadMetadataRequest is the request for the readMetadata op.
 type ReadMetadataRequest struct {
 	FilesystemID          string                `json:"filesystem_id"`
 	Path                  string                `json:"path"`
-	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
-}
-
-// GetFileMetadataRequest is the request for the getFileMetadata op.
-// Addresses by broker-minted UUID handle (D7). The guest never derives
-// scope from the UUID.
-type GetFileMetadataRequest struct {
-	FilesystemID          string                `json:"filesystem_id"`
-	UUID                  string                `json:"uuid"`
-	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
-}
-
-// ListFilesRequest is the request for the listFiles op (uuid-axis).
-type ListFilesRequest struct {
-	FilesystemID          string                `json:"filesystem_id"`
-	UUID                  string                `json:"uuid"`
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
@@ -195,32 +165,6 @@ type FileDownloadRequest struct {
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
-// ImportFilesRequest is the request for the importFiles op.
-type ImportFilesRequest struct {
-	FilesystemID          string                `json:"filesystem_id"`
-	Path                  string                `json:"path"`
-	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
-}
-
-// ImportZipRequest is the request for the importZip op.
-type ImportZipRequest struct {
-	FilesystemID          string                `json:"filesystem_id"`
-	Path                  string                `json:"path"`
-	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
-}
-
-// MigrateFilesystemRequest is the request for the migrateFilesystem op.
-type MigrateFilesystemRequest struct {
-	FilesystemID          string                `json:"filesystem_id"`
-	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
-}
-
-// RemoveFilesystemRequest is the request for the removeFilesystem op.
-type RemoveFilesystemRequest struct {
-	FilesystemID          string                `json:"filesystem_id"`
-	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
-}
-
 // ---------------------------------------------------------------------------
 // Per-op response types
 // ---------------------------------------------------------------------------
@@ -253,33 +197,6 @@ type ListDirectoryResponse struct {
 	Cursor  OpaqueCursor   `json:"cursor,omitempty"`
 }
 
-// MakeDirectoryResponse is the bare-ack response for makeDirectory.
-type MakeDirectoryResponse = AckResponse
-
-// MoveDirectoryResponse is the bare-ack response for moveDirectory.
-type MoveDirectoryResponse = AckResponse
-
-// RemoveDirectoryResponse is the bare-ack response for removeDirectory.
-type RemoveDirectoryResponse = AckResponse
-
-// CreateFileResponse wraps the newly created file.
-type CreateFileResponse struct {
-	File FilesystemFile `json:"file"`
-}
-
-// ReadFileResponse is the unary readFile result. It is METADATA-ONLY as shipped:
-// File carries no content/data field, so this type cannot return file bytes —
-// the content body is a TBD per D6 and is never invented here. Bulk content is
-// delivered by the chunked fileDownload op (download.go), not by this
-// unary op. When a content body is pinned in the contract it will be added here;
-// until then a broker that returns a content field has it silently dropped by
-// the tolerant decoder. The Range field on the request selects within that
-// (currently absent) content body; a zero-value Range relies on the broker
-// reading length 0 as "full file".
-type ReadFileResponse struct {
-	File File `json:"file"`
-}
-
 // ReadMetadataResponse returns both a file and a directory (one may be empty
 // depending on what path resolves to).
 type ReadMetadataResponse struct {
@@ -287,51 +204,9 @@ type ReadMetadataResponse struct {
 	Directory Directory `json:"directory"`
 }
 
-// GetFileMetadataResponse wraps the file metadata for a uuid-addressed lookup.
-type GetFileMetadataResponse struct {
-	File FilesystemFile `json:"file"`
-}
-
-// ListFilesResponse wraps the list of files returned for a uuid-axis listing
-// page. AfterUUID is the opaque continuation token: when it is non-empty the
-// broker has more files and this response is only page 1 — callers that need
-// the complete listing must use ListFilesAll. Exposing the field makes silent
-// truncation detectable.
-type ListFilesResponse struct {
-	Files     []FilesystemFile `json:"files,omitempty"`
-	AfterUUID OpaqueCursor     `json:"after_uuid,omitempty"`
-}
-
-// CopyFileResponse is the bare-ack response for copyFile.
-type CopyFileResponse = AckResponse
-
-// MoveFileResponse is the bare-ack response for moveFile.
-type MoveFileResponse = AckResponse
-
-// RemoveFileResponse is the bare-ack response for removeFile.
-type RemoveFileResponse = AckResponse
-
-// FileUploadResponse is the JSON body the broker MAY return on a successful
-// fileUpload, carrying the assembled object's metadata as a FilesystemFile.
-// Success is signalled by the HTTP status; this body, when present, conveys the
-// resulting object's metadata.
-type FileUploadResponse struct {
-	File FilesystemFile `json:"file"`
-}
-
 // Note: a fileDownload 2xx delivers the object bytes directly as a chunked
 // octet-stream body — there is no per-chunk JSON envelope. The
 // FilesystemFile-bearing metadata, when needed, is fetched via the metadata
-// ops, not the download body.
-
-// ImportFilesResponse is the bare-ack response for importFiles.
-type ImportFilesResponse = AckResponse
-
-// ImportZipResponse is the bare-ack response for importZip.
-type ImportZipResponse = AckResponse
-
-// MigrateFilesystemResponse is the bare-ack response for migrateFilesystem.
-type MigrateFilesystemResponse = AckResponse
-
-// RemoveFilesystemResponse is the bare-ack response for removeFilesystem.
-type RemoveFilesystemResponse = AckResponse
+// ops, not the download body. A fileUpload 2xx body is likewise never decoded:
+// success is the HTTP status, the response body is TBD at the frozen contract,
+// and the transport reads it only as a bounded diagnostics prefix (upload.go).

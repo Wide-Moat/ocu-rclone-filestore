@@ -191,9 +191,11 @@ func (c *Client) stamp(op Op) (string, AuthorizationMetadata, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Unary op methods — 16 total (fileUpload and fileDownload have REST
+// Unary op methods — 8 total (fileUpload and fileDownload have REST
 // upload/download transports in upload.go/download.go; types in messages.go).
-// Each routes to <service_url>/v1/filestore/fs/<op> over HTTPS.
+// Each routes to <service_url>/v1/filestore/fs/<op> over HTTPS. Ops whose
+// bodies are TBD at the frozen contract have no client method: only their
+// operation NAMES are pinned (intent.go), and a TBD body is never invented.
 // ---------------------------------------------------------------------------
 
 // ListDirectory lists a single page of the directory at path. When the
@@ -243,33 +245,6 @@ func (c *Client) RemoveDirectory(ctx context.Context, path string) (*AckResponse
 	return &resp, c.call(ctx, OpRemoveDirectory, req, &resp)
 }
 
-// CreateFile creates a file at path and returns the new file's metadata.
-func (c *Client) CreateFile(ctx context.Context, path string) (*CreateFileResponse, error) {
-	fsID, am, err := c.stamp(OpCreateFile)
-	if err != nil {
-		return nil, err
-	}
-	req := CreateFileRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
-	var resp CreateFileResponse
-	return &resp, c.call(ctx, OpCreateFile, req, &resp)
-}
-
-// ReadFile performs the unary readFile op for the file at path. As shipped this
-// op is METADATA-ONLY: the response carries no content body (the content field
-// is a TBD per D6, not invented here), so rng currently selects within an absent
-// body. Bulk content is delivered by the streaming Download/DownloadRange
-// helpers, not this op. A zero-value rng relies on the broker reading length 0
-// as "full file".
-func (c *Client) ReadFile(ctx context.Context, path string, rng Range) (*ReadFileResponse, error) {
-	fsID, am, err := c.stamp(OpReadFile)
-	if err != nil {
-		return nil, err
-	}
-	req := ReadFileRequest{FilesystemID: fsID, Path: path, Range: rng, AuthorizationMetadata: am}
-	var resp ReadFileResponse
-	return &resp, c.call(ctx, OpReadFile, req, &resp)
-}
-
 // ReadMetadata returns metadata for the file or directory at path.
 func (c *Client) ReadMetadata(ctx context.Context, path string) (*ReadMetadataResponse, error) {
 	fsID, am, err := c.stamp(OpReadMetadata)
@@ -279,32 +254,6 @@ func (c *Client) ReadMetadata(ctx context.Context, path string) (*ReadMetadataRe
 	req := ReadMetadataRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
 	var resp ReadMetadataResponse
 	return &resp, c.call(ctx, OpReadMetadata, req, &resp)
-}
-
-// GetFileMetadata returns metadata for the file addressed by broker-minted
-// UUID handle. The guest never derives scope from the UUID (D7).
-func (c *Client) GetFileMetadata(ctx context.Context, uuid string) (*GetFileMetadataResponse, error) {
-	fsID, am, err := c.stamp(OpGetFileMetadata)
-	if err != nil {
-		return nil, err
-	}
-	req := GetFileMetadataRequest{FilesystemID: fsID, UUID: uuid, AuthorizationMetadata: am}
-	var resp GetFileMetadataResponse
-	return &resp, c.call(ctx, OpGetFileMetadata, req, &resp)
-}
-
-// ListFiles returns a single page of files addressed by broker-minted UUID
-// handle (uuid axis). When the returned response carries a non-empty AfterUUID
-// the listing is paginated and this is only the first page; callers needing the
-// complete listing must use ListFilesAll, which follows the cursor across pages.
-func (c *Client) ListFiles(ctx context.Context, uuid string) (*ListFilesResponse, error) {
-	fsID, am, err := c.stamp(OpListFiles)
-	if err != nil {
-		return nil, err
-	}
-	req := ListFilesRequest{FilesystemID: fsID, UUID: uuid, AuthorizationMetadata: am}
-	var resp ListFilesResponse
-	return &resp, c.call(ctx, OpListFiles, req, &resp)
 }
 
 // CopyFile copies the file at sourcePath to destinationPath.
@@ -338,48 +287,4 @@ func (c *Client) RemoveFile(ctx context.Context, path string) (*AckResponse, err
 	req := RemoveFileRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
 	var resp AckResponse
 	return &resp, c.call(ctx, OpRemoveFile, req, &resp)
-}
-
-// ImportFiles imports files into the filesystem at path.
-func (c *Client) ImportFiles(ctx context.Context, path string) (*AckResponse, error) {
-	fsID, am, err := c.stamp(OpImportFiles)
-	if err != nil {
-		return nil, err
-	}
-	req := ImportFilesRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
-	var resp AckResponse
-	return &resp, c.call(ctx, OpImportFiles, req, &resp)
-}
-
-// ImportZip imports a ZIP archive into the filesystem at path.
-func (c *Client) ImportZip(ctx context.Context, path string) (*AckResponse, error) {
-	fsID, am, err := c.stamp(OpImportZip)
-	if err != nil {
-		return nil, err
-	}
-	req := ImportZipRequest{FilesystemID: fsID, Path: path, AuthorizationMetadata: am}
-	var resp AckResponse
-	return &resp, c.call(ctx, OpImportZip, req, &resp)
-}
-
-// MigrateFilesystem requests a migration of the bound filesystem.
-func (c *Client) MigrateFilesystem(ctx context.Context) (*AckResponse, error) {
-	fsID, am, err := c.stamp(OpMigrateFilesystem)
-	if err != nil {
-		return nil, err
-	}
-	req := MigrateFilesystemRequest{FilesystemID: fsID, AuthorizationMetadata: am}
-	var resp AckResponse
-	return &resp, c.call(ctx, OpMigrateFilesystem, req, &resp)
-}
-
-// RemoveFilesystem requests removal of the bound filesystem.
-func (c *Client) RemoveFilesystem(ctx context.Context) (*AckResponse, error) {
-	fsID, am, err := c.stamp(OpRemoveFilesystem)
-	if err != nil {
-		return nil, err
-	}
-	req := RemoveFilesystemRequest{FilesystemID: fsID, AuthorizationMetadata: am}
-	var resp AckResponse
-	return &resp, c.call(ctx, OpRemoveFilesystem, req, &resp)
 }

@@ -6,7 +6,6 @@ package brokerrpc
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -86,62 +85,6 @@ func TestRecursiveCursorEchoedUnmodified(t *testing.T) {
 	}
 }
 
-// TestListFilesCursorEchoedUnmodified verifies that the uuid-paginated
-// listFiles cursor is echoed back verbatim (opaque echo, never inspected).
-func TestListFilesCursorEchoedUnmodified(t *testing.T) {
-	page1Cursor := "after-uuid-ABCDEF"
-	var page2AfterUUID string
-	callCount := 0
-
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		var body struct {
-			AfterUUID string `json:"after_uuid,omitempty"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if callCount == 2 {
-			page2AfterUUID = body.AfterUUID
-		}
-
-		type file struct {
-			UUID string `json:"uuid"`
-		}
-		type resp struct {
-			Files     []file `json:"files,omitempty"`
-			AfterUUID string `json:"after_uuid,omitempty"`
-		}
-		var respBody []byte
-		if callCount == 1 {
-			respBody, _ = json.Marshal(resp{
-				Files:     []file{{UUID: "u1"}},
-				AfterUUID: page1Cursor,
-			})
-		} else {
-			respBody, _ = json.Marshal(resp{
-				Files: []file{{UUID: "u2"}},
-			})
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(respBody)
-	}
-
-	c, _ := newTLSTestClient(t, "fs-cursor-01", handler)
-	files, err := c.ListFilesAll(context.Background(), "root-uuid")
-	if err != nil {
-		t.Fatalf("ListFilesAll: %v", err)
-	}
-	if len(files) != 2 {
-		t.Errorf("expected 2 files across 2 pages, got %d", len(files))
-	}
-	if page2AfterUUID != page1Cursor {
-		t.Errorf("after_uuid echo: got %q, want %q", page2AfterUUID, page1Cursor)
-	}
-	if callCount != 2 {
-		t.Errorf("expected 2 page calls, got %d", callCount)
-	}
-}
-
 // TestListDirectoryAllStopsOnNonAdvancingCursor verifies that a broker echoing
 // the same cursor forever does not spin ListDirectoryAll into an infinite loop
 // with unbounded memory growth; the helper detects the non-progressing cursor
@@ -177,38 +120,6 @@ func TestListDirectoryAllStopsOnNonAdvancingCursor(t *testing.T) {
 	}
 	// The first page sends an empty cursor, the second sends "stuck-cursor",
 	// the third sees the same cursor echoed and aborts — bounded call count.
-	if callCount > 3 {
-		t.Errorf("expected the loop to abort quickly, got %d calls", callCount)
-	}
-}
-
-// TestListFilesAllStopsOnNonAdvancingCursor verifies the same progress guard
-// for the uuid-paginated listFiles path (MD-03).
-func TestListFilesAllStopsOnNonAdvancingCursor(t *testing.T) {
-	callCount := 0
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		type file struct {
-			UUID string `json:"uuid"`
-		}
-		type resp struct {
-			Files     []file `json:"files,omitempty"`
-			AfterUUID string `json:"after_uuid,omitempty"`
-		}
-		respBody, _ := json.Marshal(resp{
-			Files:     []file{{UUID: "u"}},
-			AfterUUID: "stuck-after-uuid",
-		})
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(respBody)
-	}
-
-	c, _ := newTLSTestClient(t, "fs-cursor-01", handler)
-	_, err := c.ListFilesAll(context.Background(), "root-uuid")
-	if err == nil {
-		t.Fatal("expected error on non-advancing after_uuid, got nil (would loop forever)")
-	}
 	if callCount > 3 {
 		t.Errorf("expected the loop to abort quickly, got %d calls", callCount)
 	}
@@ -378,37 +289,6 @@ func TestListDirectoryAllErrorsMidPagination(t *testing.T) {
 	}
 }
 
-// TestListFilesAllErrorsMidPagination is the listFiles analogue: page 1 returns
-// files and an after_uuid cursor, page 2 returns a non-2xx, and the error
-// propagates while paging halts.
-func TestListFilesAllErrorsMidPagination(t *testing.T) {
-	callCount := 0
-	c, _ := newTLSTestClient(t, "fs-lfa-midfail", func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		if callCount == 1 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"files":[{"path":"/f1","uuid":"u1"}],"after_uuid":"page2"}`))
-			return
-		}
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte("page 2 denied"))
-	})
-	files, err := c.ListFilesAll(context.Background(), "root-uuid")
-	if err == nil {
-		t.Fatal("expected a page-2 error, got nil")
-	}
-	if files != nil {
-		t.Errorf("a mid-pagination failure must not return partial files, got %d", len(files))
-	}
-	if !strings.Contains(err.Error(), "ListFilesAll") {
-		t.Errorf("error %q does not name ListFilesAll", err.Error())
-	}
-	if !errors.Is(err, ErrPermissionDenied) {
-		t.Errorf("the underlying 403 must be preserved; got %v", err)
-	}
-}
-
 // TestListDirectoryStreamAbortsCursorCycle verifies the progress guard catches
 // a cursor cycle LONGER than one: a broker paging bug that alternates two
 // cursor values (A,B,A,B,...) never repeats the immediately-preceding cursor,
@@ -452,40 +332,6 @@ func TestListDirectoryStreamAbortsCursorCycle(t *testing.T) {
 	}
 }
 
-// TestListFilesStreamAbortsCursorCycle is the uuid-paginated analogue: an
-// alternating after_uuid cycle must abort rather than loop forever.
-func TestListFilesStreamAbortsCursorCycle(t *testing.T) {
-	callCount := 0
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		callCount++
-		next := "after-A"
-		if callCount%2 == 0 {
-			next = "after-B"
-		}
-		if callCount > 64 {
-			next = ""
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(filePage(callCount-1, 1, next))
-	}
-
-	c, _ := newTLSTestClient(t, "fs-cycle-files", handler)
-	err := c.ListFilesStream(context.Background(), "root-uuid", func(FilesystemFile) error { return nil })
-	if err == nil {
-		t.Fatalf("an A,B,A,B after_uuid cycle must abort pagination, got nil error after %d pages", callCount)
-	}
-	if !strings.Contains(err.Error(), "did not advance") {
-		t.Errorf("error %q does not name the non-advancing-cursor abort", err.Error())
-	}
-	if !strings.Contains(err.Error(), "ListFilesStream") {
-		t.Errorf("error %q does not name the emitting function ListFilesStream", err.Error())
-	}
-	if callCount > 4 {
-		t.Errorf("cycle caught after %d page calls, want it caught at the first repeated cursor", callCount)
-	}
-}
-
 // TestListStreamsEnforcePageCeiling verifies the hard page ceiling: a broker
 // that mints a DISTINCT cursor on every page forever defeats any repeat
 // detection, so the loop must abort at the client's page ceiling instead of
@@ -514,33 +360,6 @@ func TestListStreamsEnforcePageCeiling(t *testing.T) {
 		err := c.ListDirectoryStream(context.Background(), "/d", func(ListDirEntry) error { return nil })
 		if err == nil {
 			t.Fatalf("a never-ending distinct-cursor listing must hit the page ceiling, got nil error after %d pages", callCount)
-		}
-		if !strings.Contains(err.Error(), "ceiling") {
-			t.Errorf("error %q does not name the page ceiling", err.Error())
-		}
-		if callCount > ceiling {
-			t.Errorf("made %d page calls, the %d-page ceiling must bound the loop", callCount, ceiling)
-		}
-	})
-
-	t.Run("listFiles", func(t *testing.T) {
-		callCount := 0
-		handler := func(w http.ResponseWriter, r *http.Request) {
-			callCount++
-			next := fmt.Sprintf("after-%d", callCount)
-			if callCount > 64 {
-				next = ""
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(filePage(callCount-1, 1, next))
-		}
-
-		c, _ := newTLSTestClient(t, "fs-ceiling-files", handler)
-		c.maxListPages = ceiling
-		err := c.ListFilesStream(context.Background(), "root-uuid", func(FilesystemFile) error { return nil })
-		if err == nil {
-			t.Fatalf("a never-ending distinct-after_uuid listing must hit the page ceiling, got nil error after %d pages", callCount)
 		}
 		if !strings.Contains(err.Error(), "ceiling") {
 			t.Errorf("error %q does not name the page ceiling", err.Error())
@@ -674,121 +493,6 @@ func TestListDirectoryAllLargeListing(t *testing.T) {
 		// The guard fires on the first repeat, not on a bounded runaway: the stall
 		// begins at stallAt and the very next request repeats the cursor, so the
 		// loop must stop within a couple of calls of the stall, never spinning.
-		if callCount > stallAt+2 {
-			t.Errorf("guard fired late after %d calls; the loop should abort on the first non-advancing repeat", callCount)
-		}
-	})
-}
-
-// filePage renders a listFiles page of perPage files with unique, increasing
-// paths/uuids. afterUUID, when non-empty, is set on the response.
-func filePage(page, perPage int, afterUUID string) []byte {
-	type file struct {
-		Path string `json:"path"`
-		UUID string `json:"uuid"`
-	}
-	type resp struct {
-		Files     []file `json:"files,omitempty"`
-		AfterUUID string `json:"after_uuid,omitempty"`
-	}
-	out := resp{Files: make([]file, 0, perPage), AfterUUID: afterUUID}
-	for i := 0; i < perPage; i++ {
-		idx := page*perPage + i
-		out.Files = append(out.Files, file{
-			Path: fmt.Sprintf("/f/%06d", idx),
-			UUID: fmt.Sprintf("u-%06d", idx),
-		})
-	}
-	b, _ := json.Marshal(out)
-	return b
-}
-
-// TestListFilesAllLargeListing is the uuid-paginated (listFiles) analog of
-// TestListDirectoryAllLargeListing, two-sided in one test: the advancing arm
-// aggregates many pages completely and in order with no false abort; the stuck
-// arm proves the after_uuid progress guard fires when the broker stalls the
-// cursor deep into a large listing.
-func TestListFilesAllLargeListing(t *testing.T) {
-	const pages, perPage = 50, 200
-	const total = pages * perPage
-
-	t.Run("advancing_volume_completes", func(t *testing.T) {
-		callCount := 0
-		handler := func(w http.ResponseWriter, r *http.Request) {
-			var body struct {
-				AfterUUID string `json:"after_uuid,omitempty"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			page := 0
-			if body.AfterUUID != "" {
-				if _, err := fmt.Sscanf(body.AfterUUID, "after-%d", &page); err != nil {
-					t.Errorf("unexpected after_uuid echo %q", body.AfterUUID)
-				}
-			}
-			callCount++
-			next := ""
-			if page < pages-1 {
-				next = fmt.Sprintf("after-%d", page+1)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(filePage(page, perPage, next))
-		}
-
-		c, _ := newTLSTestClient(t, "fs-large-files", handler)
-		files, err := c.ListFilesAll(context.Background(), "root-uuid")
-		if err != nil {
-			t.Fatalf("ListFilesAll over %d pages: %v", pages, err)
-		}
-		if len(files) != total {
-			t.Fatalf("aggregated %d files, want %d (%d pages × %d)", len(files), total, pages, perPage)
-		}
-		if callCount != pages {
-			t.Errorf("made %d page calls, want %d (one per page)", callCount, pages)
-		}
-		for i, f := range files {
-			want := fmt.Sprintf("/f/%06d", i)
-			if f.Path != want {
-				t.Fatalf("files[%d].Path = %q, want %q — aggregation reordered or dropped files", i, f.Path, want)
-			}
-		}
-	})
-
-	t.Run("stuck_cursor_at_volume_aborts", func(t *testing.T) {
-		const stallAt = 20
-		const stuckAfter = "after-stuck"
-		callCount := 0
-		handler := func(w http.ResponseWriter, r *http.Request) {
-			var body struct {
-				AfterUUID string `json:"after_uuid,omitempty"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			callCount++
-			var next string
-			switch {
-			case body.AfterUUID == stuckAfter:
-				next = stuckAfter
-			case callCount >= stallAt:
-				next = stuckAfter
-			default:
-				next = fmt.Sprintf("after-%d", callCount)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(filePage(callCount-1, perPage, next))
-		}
-
-		c, _ := newTLSTestClient(t, "fs-large-files-stuck", handler)
-		files, err := c.ListFilesAll(context.Background(), "root-uuid")
-		if err == nil {
-			t.Fatalf("a stalled after_uuid at volume must abort, got %d files and nil error", len(files))
-		}
-		if files != nil {
-			t.Errorf("a non-progressing listing must not return a partial result, got %d files", len(files))
-		}
-		if !strings.Contains(err.Error(), "did not advance") {
-			t.Errorf("error %q does not name the non-advancing-cursor abort", err.Error())
-		}
 		if callCount > stallAt+2 {
 			t.Errorf("guard fired late after %d calls; the loop should abort on the first non-advancing repeat", callCount)
 		}
