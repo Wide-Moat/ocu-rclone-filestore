@@ -13,11 +13,13 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -211,6 +213,90 @@ func TestEdgeServeHTTPErrorArms(t *testing.T) {
 	e.ServeHTTP(w3, req3)
 	if w3.Code != http.StatusUnauthorized {
 		t.Fatalf("missing bearer returned %d, want 401", w3.Code)
+	}
+}
+
+// TestEdgeForwardsOversizedBodyWithoutSilentTruncation pins that the edge streams
+// the inbound body to the upstream faithfully, byte-for-byte, rather than
+// buffering it behind a cap that silently truncates (io.LimitReader returns EOF,
+// not an error, so an over-cap body used to reach the upstream short). It stands a
+// capturing upstream that records the exact bytes it receives, drives a body far
+// larger than the old buffering path would have tolerated in a unit, and asserts
+// the upstream saw the whole body. The injected credential and stripped inbound
+// Authorization are asserted alongside so strip+inject stay pinned.
+func TestEdgeForwardsOversizedBodyWithoutSilentTruncation(t *testing.T) {
+	ca, err := localca.New()
+	if err != nil {
+		t.Fatalf("ca: %v", err)
+	}
+	cp, _, exchangeURL, _ := fullChain(t, ca)
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: ca.CertPool(), MinVersion: tls.VersionTLS12}}}
+
+	// A capturing upstream: it records the exact body length and bytes it receives,
+	// plus the forwarded Authorization, then replies 200.
+	var (
+		gotLen         int
+		gotAuth        string
+		gotContentLen  int64
+		bodyFingerHead string
+		bodyFingerTail string
+	)
+	capturing := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotLen = len(b)
+		gotContentLen = r.ContentLength
+		gotAuth = r.Header.Get("Authorization")
+		if len(b) >= 8 {
+			bodyFingerHead = string(b[:8])
+			bodyFingerTail = string(b[len(b)-8:])
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	leaf, _ := ca.IssueLeaf([]string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")})
+	capturing.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}, MinVersion: tls.VersionTLS12}
+	capturing.StartTLS()
+	t.Cleanup(capturing.Close)
+
+	exchanger, err := edgeglue.New(edgeglue.Options{ExchangeURL: exchangeURL, Client: client})
+	if err != nil {
+		t.Fatalf("exchanger: %v", err)
+	}
+	e := &edge{jwks: cp.JWKS(), exchanger: exchanger, upstreamURL: capturing.URL, upstream: client}
+
+	// A body comfortably larger than any in-memory form budget the edge might have
+	// kept, with a recognisable head and tail so a truncation is unmistakable.
+	const size = 4 << 20 // 4 MiB
+	payload := make([]byte, size)
+	copy(payload, []byte("HEADMARK"))
+	copy(payload[size-8:], []byte("TAILMARK"))
+
+	weak, err := cp.Mint("fsrw", "write", false)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/filestore/fs/fileUpload", bytes.NewReader(payload))
+	req.ContentLength = int64(size)
+	req.Header.Set("Authorization", "Bearer "+weak)
+	w := httptest.NewRecorder()
+	e.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("edge returned %d, want 200", w.Code)
+	}
+	if gotLen != size {
+		t.Fatalf("upstream received %d bytes, want the full %d (silent truncation)", gotLen, size)
+	}
+	if gotContentLen != int64(size) {
+		t.Fatalf("upstream Content-Length = %d, want %d", gotContentLen, size)
+	}
+	if bodyFingerHead != "HEADMARK" || bodyFingerTail != "TAILMARK" {
+		t.Fatalf("body corrupted in transit: head=%q tail=%q", bodyFingerHead, bodyFingerTail)
+	}
+	// Strip + inject: the forwarded Authorization is the exchanged credential, not
+	// the inbound weak JWT.
+	fwd := strings.TrimPrefix(gotAuth, "Bearer ")
+	if fwd == "" || fwd == weak {
+		t.Fatalf("forwarded Authorization must be the exchanged credential, not the weak JWT: got %q", gotAuth)
 	}
 }
 
