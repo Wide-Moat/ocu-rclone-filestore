@@ -102,6 +102,48 @@ func TestGoldenUploadParams(t *testing.T) {
 	}
 }
 
+// TestGoldenUploadParamsOverwrite pins the overwrite-in-place form of the
+// multipart "params" field against an independent fixture: with overwrite=true
+// the live upload path must serialise "overwrite_existing": true alongside the
+// unchanged base fields. Together with TestGoldenUploadParams (overwrite=false,
+// key absent) this pins the wire two-sidedly, so a refactor of the params
+// declaration cannot silently drop or rename the field.
+func TestGoldenUploadParamsOverwrite(t *testing.T) {
+	golden := loadGolden(t, "rest-upload-params-overwrite.json")
+
+	var params []byte
+	c, _ := newTLSTestClient(t, "fs-golden-01", func(w http.ResponseWriter, r *http.Request) {
+		_, mp, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err != nil {
+			t.Fatalf("parse Content-Type: %v", err)
+		}
+		mr := multipart.NewReader(r.Body, mp["boundary"])
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("read part: %v", err)
+			}
+			if part.FormName() == "params" {
+				params, _ = io.ReadAll(part)
+			} else {
+				_, _ = io.Copy(io.Discard, part)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+
+	content := bytes.Repeat([]byte("x"), 42)
+	if err := c.Upload(context.Background(), "/golden.bin", bytes.NewReader(content), 42, true); err != nil {
+		t.Fatalf("Upload: %v", err)
+	}
+	if !jsonEqual(params, golden) {
+		t.Errorf("overwrite upload params mismatch\ngot:  %s\nwant: %s", params, golden)
+	}
+}
+
 // TestGoldenDownloadRequest checks the fileDownload request golden matches the
 // live request body (no Connect route/content-type/protocol-version envelope).
 func TestGoldenDownloadRequest(t *testing.T) {

@@ -152,6 +152,94 @@ func TestBareAckDecodes(t *testing.T) {
 	}
 }
 
+// TestFileUploadRequestOverwriteMarshals pins the single fileUpload params
+// declaration two-sidedly: OverwriteExisting=true serialises the
+// overwrite_existing key, and the zero value omits it entirely (omitempty),
+// keeping the create-new form key-free on the wire.
+func TestFileUploadRequestOverwriteMarshals(t *testing.T) {
+	am := brokerrpc.AuthorizationMetadata{Intent: "write", Downloadable: false}
+
+	withOverwrite := brokerrpc.FileUploadRequest{
+		FilesystemID:          "fs-1",
+		Path:                  "/f.bin",
+		DeclaredSizeBytes:     7,
+		OverwriteExisting:     true,
+		AuthorizationMetadata: am,
+	}
+	b, err := json.Marshal(withOverwrite)
+	if err != nil {
+		t.Fatalf("marshal FileUploadRequest: %v", err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	if string(top["overwrite_existing"]) != "true" {
+		t.Errorf("overwrite_existing = %s; want true", top["overwrite_existing"])
+	}
+
+	withoutOverwrite := brokerrpc.FileUploadRequest{
+		FilesystemID:          "fs-1",
+		Path:                  "/f.bin",
+		DeclaredSizeBytes:     7,
+		AuthorizationMetadata: am,
+	}
+	b, err = json.Marshal(withoutOverwrite)
+	if err != nil {
+		t.Fatalf("marshal FileUploadRequest (no overwrite): %v", err)
+	}
+	top = nil
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	if _, present := top["overwrite_existing"]; present {
+		t.Error("zero-value OverwriteExisting must omit the overwrite_existing key")
+	}
+}
+
+// TestListDirectoryRequestCursorMarshals pins the single listDirectory request
+// declaration two-sidedly: a non-empty Cursor serialises the cursor key
+// (page-2+ continuation), and the zero value omits it, keeping the page-1
+// unary form unchanged.
+func TestListDirectoryRequestCursorMarshals(t *testing.T) {
+	am := brokerrpc.AuthorizationMetadata{Intent: "read", Downloadable: false}
+
+	withCursor := brokerrpc.ListDirectoryRequest{
+		FilesystemID:          "fs-1",
+		Path:                  "/d",
+		AuthorizationMetadata: am,
+		Cursor:                brokerrpc.OpaqueCursor("opaque-token"),
+	}
+	b, err := json.Marshal(withCursor)
+	if err != nil {
+		t.Fatalf("marshal ListDirectoryRequest: %v", err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	if string(top["cursor"]) != `"opaque-token"` {
+		t.Errorf("cursor = %s; want \"opaque-token\"", top["cursor"])
+	}
+
+	withoutCursor := brokerrpc.ListDirectoryRequest{
+		FilesystemID:          "fs-1",
+		Path:                  "/d",
+		AuthorizationMetadata: am,
+	}
+	b, err = json.Marshal(withoutCursor)
+	if err != nil {
+		t.Fatalf("marshal ListDirectoryRequest (page 1): %v", err)
+	}
+	top = nil
+	if err := json.Unmarshal(b, &top); err != nil {
+		t.Fatalf("unmarshal to map: %v", err)
+	}
+	if _, present := top["cursor"]; present {
+		t.Error("an empty Cursor must omit the cursor key (page-1 form unchanged)")
+	}
+}
+
 // TestUUIDAxisRequestsDoNotHavePath verifies that the uuid-addressed
 // fileDownload request carries a uuid field, not a path — the guest never
 // addresses that op by path.

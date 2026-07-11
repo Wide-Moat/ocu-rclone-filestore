@@ -170,7 +170,7 @@ The broker assembles the object only when the streamed total equals
 `declared_size_bytes`; any over- or under-send draws `400`/`422`, which maps to a
 permanent no-retry error.
 
-Code: `upload.go` (`Upload`, `writeUploadMultipart`, `isPipeClosure`, `sourceChunkSize`, `uploadParamsFrame`).
+Code: `upload.go` (`Upload`, `writeUploadMultipart`, `isPipeClosure`, `sourceChunkSize`), `messages.go` (`FileUploadRequest`).
 
 ## fileDownload — chunked octet-stream, ranged, UUID-addressed
 
@@ -234,7 +234,7 @@ spinning forever with unbounded memory growth inside the mount.
 a `file` (a full `FilesystemFile`) XOR a `directory`, discriminated by which key
 is present; exactly one arm is non-nil after decoding.
 
-Code: `cursor.go` (`OpaqueCursor`, `pageGuard`, `ListDirectoryStream`, `ListDirectoryAll`, the page request/response types), `messages.go` (`ListDirEntry`, `ListDirectoryResponse`).
+Code: `cursor.go` (`OpaqueCursor`, `pageGuard`, `ListDirectoryStream`, `ListDirectoryAll`), `messages.go` (`ListDirEntry`, `ListDirectoryRequest`, `ListDirectoryResponse`).
 
 ## Error mapping
 

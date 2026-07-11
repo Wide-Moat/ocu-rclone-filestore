@@ -70,11 +70,16 @@ type AckResponse struct{}
 // No request carries a metadata_retention_days field (D6 reject).
 // ---------------------------------------------------------------------------
 
-// ListDirectoryRequest is the request for the listDirectory op.
+// ListDirectoryRequest is the request for the listDirectory op — the single
+// declaration for both the page-1 form and the page-2+ continuation. Cursor is
+// the opaque continuation token echoed verbatim from the previous page's
+// response; omitempty keeps the page-1 form free of any cursor key, so the
+// unary request body is unchanged when no continuation is in progress.
 type ListDirectoryRequest struct {
 	FilesystemID          string                `json:"filesystem_id"`
 	Path                  string                `json:"path"`
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
+	Cursor                OpaqueCursor          `json:"cursor,omitempty"`
 }
 
 // MakeDirectoryRequest is the request for the makeDirectory op.
@@ -140,13 +145,25 @@ type RemoveFileRequest struct {
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
-// FileUploadRequest is the params field for the fileUpload op. It is carried as
-// the JSON "params" field of a multipart/form-data POST alongside the streamed
-// file part (see upload.go).
+// FileUploadRequest is the params field for the fileUpload op — the single
+// declaration for the JSON "params" form field of the multipart/form-data POST
+// that carries the streamed file part (see upload.go).
+//
+// OverwriteExisting selects whether an existing destination is replaced in
+// place (true) or the upload fails on a present path (false). EVERY guest
+// upload sends true: Update so the broker replaces the object atomically
+// rather than the guest staging a remove-then-upload with a non-atomic window
+// between the two, and Put because rclone re-drives it after an ambiguous
+// first attempt (a lost success response on an upload the broker committed),
+// so it must be idempotent at the destination path. The broker's create-only
+// conflict arm is therefore guest-unreachable by design. The field keeps its
+// omitempty tag for wire compatibility: false (never sent by this guest)
+// would serialise no overwrite_existing key at all.
 type FileUploadRequest struct {
 	FilesystemID          string                `json:"filesystem_id"`
 	Path                  string                `json:"path"`
 	DeclaredSizeBytes     int64                 `json:"declared_size_bytes"`
+	OverwriteExisting     bool                  `json:"overwrite_existing,omitempty"`
 	AuthorizationMetadata AuthorizationMetadata `json:"authorization_metadata"`
 }
 
