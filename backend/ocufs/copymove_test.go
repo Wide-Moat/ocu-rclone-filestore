@@ -19,15 +19,19 @@ import (
 // Helpers for Copy/Move/DirMove tests
 // ---------------------------------------------------------------------------
 
-// newTestFsWithRoot returns an Fs backed by fc with the given root.
+// newTestFsWithRoot returns an Fs backed by fc with the given root. Mirroring
+// NewFs, it builds the Features surface after the literal so Features() serves
+// the construction-time cached field here too.
 func newTestFsWithRoot(t *testing.T, c *fakeClient, root string, readOnly bool) *Fs {
 	t.Helper()
-	return &Fs{
+	f := &Fs{
 		name:     "ocufs",
 		root:     root,
 		client:   c,
 		readOnly: readOnly,
 	}
+	f.buildFeatures(context.Background())
+	return f
 }
 
 // ---------------------------------------------------------------------------

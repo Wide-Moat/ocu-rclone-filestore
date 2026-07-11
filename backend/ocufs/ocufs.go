@@ -53,6 +53,12 @@ type Fs struct {
 	client   brokerClient
 	readOnly bool
 	enc      encoder.MultiEncoder
+	// features is the optional-interface surface advertised by Features().
+	// It is built exactly once, during construction (buildFeatures), and is
+	// immutable afterwards: the VFS layer calls Features() from concurrent
+	// FUSE-handler goroutines, so any post-construction write (including a
+	// lazy nil-guard initialization) would be a data race.
+	features *fs.Features
 }
 
 // NewFs constructs an Fs from the provided config. It validates that the
@@ -99,13 +105,15 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		return nil, fmt.Errorf("ocufs: create broker client: %w", err)
 	}
 
-	return &Fs{
+	f := &Fs{
 		name:     name,
 		root:     root,
 		client:   c, // *brokerrpc.Client satisfies brokerClient directly
 		readOnly: opts.ReadOnly,
 		enc:      opts.Enc,
-	}, nil
+	}
+	f.buildFeatures(ctx)
+	return f, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +142,13 @@ func (f *Fs) Precision() time.Duration { return time.Second }
 // the gap; a later phase will wire the confirmed hash type.
 func (f *Fs) Hashes() hash.Set { return hash.NewHashSet() }
 
-// Features returns the optional interface features this Fs implements.
+// buildFeatures computes the optional-interface surface once and stores it on
+// f.features. It must run AFTER the Fs literal exists (Fill's
+// optional-interface scan needs the receiver) and BEFORE the Fs is shared:
+// every constructor path calls it exactly once, and Features() is then a pure
+// read of the immutable field. Do NOT replace this with lazy initialization
+// inside Features() — that read-then-write would race the concurrent
+// FUSE-handler goroutines that call Features() through the VFS layer.
 //
 // Copy, Move, and DirMove are advertised now that their bodies are implemented
 // (03-02). PutStream is intentionally NOT advertised: rclone spools an
@@ -145,15 +159,23 @@ func (f *Fs) Hashes() hash.Set { return hash.NewHashSet() }
 // ListR (recursive listing) is not advertised here. Fs.List implements a
 // depth-1 filter over the recursive ListDirectoryStream call, which is
 // sufficient for rclone's VFS recursion. A dedicated ListR surface is deferred.
-func (f *Fs) Features() *fs.Features {
-	return (&fs.Features{
+func (f *Fs) buildFeatures(ctx context.Context) {
+	f.features = (&fs.Features{
 		ReadMimeType:            true,
 		CanHaveEmptyDirectories: true,
 		Copy:                    f.Copy,
 		Move:                    f.Move,
 		DirMove:                 f.DirMove,
 		// PutStream intentionally absent — see comment above.
-	}).Fill(context.Background(), f)
+	}).Fill(ctx, f)
+}
+
+// Features returns the optional interface features this Fs implements. The
+// surface is built once at construction (see buildFeatures for what is and is
+// not advertised); this is a read of an immutable field, safe for the
+// concurrent FUSE-handler goroutines that reach it through the VFS layer.
+func (f *Fs) Features() *fs.Features {
+	return f.features
 }
 
 // ---------------------------------------------------------------------------
