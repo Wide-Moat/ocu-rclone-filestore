@@ -24,7 +24,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -44,11 +43,6 @@ const (
 	cpIssuer   = "https://control-plane.test"
 	cpAudience = "filestore-edge"
 )
-
-// maxRequestBytes bounds the buffered request body the edge forwards so a
-// hostile client cannot exhaust memory. It is generous relative to the e2e's
-// 9 MiB large-file chunked upload.
-const maxRequestBytes = 1 << 30 // 1 GiB
 
 // edge is the live serving-edge handler. It holds the control-plane JWKS to
 // verify weak JWTs, an exchanger to trade them for real credentials keyed on
@@ -89,26 +83,30 @@ func (e *edge) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
-	if err != nil {
-		http.Error(w, fmt.Sprintf("read request body: %v", err), http.StatusBadRequest)
-		return
-	}
-	_ = r.Body.Close()
-
 	// Stage 2 + 4: FRESH upstream request — the inbound Authorization is NOT
 	// copied (the weak JWT is stripped); the exchanged credential is INJECTED in
 	// its place, then routed to the filestore.
+	//
+	// The inbound body is STREAMED straight into the upstream request rather than
+	// buffered: buffering-then-truncating at a byte cap silently forwarded a short
+	// body (io.LimitReader returns EOF, not an error), so an oversized upload
+	// reached the filestore truncated and failed its declared-size check as a
+	// misleading 4xx instead of a clear limit error — and it pinned the whole body
+	// in edge memory. Streaming forwards faithfully; the filestore multipart reader
+	// is the byte-ceiling authority (maxUploadBytes). ContentLength is propagated so
+	// a known-length body stays framed and an unknown-length (-1) body streams
+	// chunked.
 	//nolint:gosec // G704: this IS the egress edge — forwarding the request to the
 	// FIXED operator-configured filestore upstream (e.upstreamURL) is its entire
 	// purpose. The host is not client-controlled (only the path is, and the
 	// filestore confines every path under the scope root); this is a deliberate
 	// reverse proxy in a harness, not an SSRF sink.
-	up, err := http.NewRequestWithContext(r.Context(), r.Method, e.upstreamURL+r.URL.Path, bytes.NewReader(body))
+	up, err := http.NewRequestWithContext(r.Context(), r.Method, e.upstreamURL+r.URL.Path, r.Body)
 	if err != nil {
 		http.Error(w, "build upstream request", http.StatusBadGateway)
 		return
 	}
+	up.ContentLength = r.ContentLength
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		up.Header.Set("Content-Type", ct)
 	}
