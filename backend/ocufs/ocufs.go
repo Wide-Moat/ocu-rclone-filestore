@@ -143,8 +143,8 @@ func (f *Fs) Hashes() hash.Set { return hash.NewHashSet() }
 // always a real size (D5, design decision 1 from 03-02).
 //
 // ListR (recursive listing) is not advertised here. Fs.List implements a
-// depth-1 filter over the recursive ListDirectoryAll call, which is sufficient
-// for rclone's VFS recursion. A dedicated ListR surface is deferred.
+// depth-1 filter over the recursive ListDirectoryStream call, which is
+// sufficient for rclone's VFS recursion. A dedicated ListR surface is deferred.
 func (f *Fs) Features() *fs.Features {
 	return (&fs.Features{
 		ReadMimeType:            true,
@@ -160,11 +160,12 @@ func (f *Fs) Features() *fs.Features {
 // fs.Fs core methods
 // ---------------------------------------------------------------------------
 
-// List returns the immediate children of dir. It calls ListDirectoryAll (which
-// performs recursive broker paging) and then DEFENSIVELY filters the results
-// to entries that are exactly one path segment below dir — dropping deeper
-// descendants that the recursive op may include. This ensures List always
-// returns depth-1 results as required by rclone (design decision 6).
+// List returns the immediate children of dir. It calls ListDirectoryStream
+// (which performs recursive broker paging, yielding entries as each page
+// arrives) and DEFENSIVELY filters the results to entries that are exactly one
+// path segment below dir — dropping deeper descendants that the recursive op
+// may include. This ensures List always returns depth-1 results as required by
+// rclone (design decision 6).
 //
 // Each surviving entry is classified by the pinned union arm (D6, decision 7):
 //   - file arm (entry.File != nil): a FULLY-POPULATED *Object built directly

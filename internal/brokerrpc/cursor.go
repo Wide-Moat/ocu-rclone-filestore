@@ -117,7 +117,7 @@ func (c *Client) ListDirectoryStream(ctx context.Context, path string, yield fun
 
 		var resp ListDirectoryResponse
 		if err := c.call(ctx, OpListDirectory, req, &resp); err != nil {
-			return fmt.Errorf("brokerrpc: ListDirectoryAll: %w", err)
+			return fmt.Errorf("brokerrpc: ListDirectoryStream: %w", err)
 		}
 
 		for _, e := range resp.Entries {

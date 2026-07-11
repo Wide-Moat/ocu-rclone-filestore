@@ -45,9 +45,10 @@ directly; they come back from `List`, `NewObject`, `Put`, `Copy`, and `Move`.
 
 Reads avoid a metadata round-trip wherever the listing already carries enough.
 
-- `List` calls the recursive `ListDirectoryAll` and then applies a depth-1
-  filter so only the immediate children of `dir` survive — the broker op pages
-  recursively, but rclone's `List` contract demands exactly one level. Each
+- `List` calls the recursive `ListDirectoryStream` and applies a depth-1
+  filter inside the yield so only the immediate children of `dir` survive —
+  the broker op pages recursively, but rclone's `List` contract demands
+  exactly one level. Each
   surviving entry is classified by which arm of the listing union it carries:
   the file arm becomes a fully-populated `Object` (uuid, size, mime, mtime all
   present) built by `objectFromFile`, and the directory arm becomes an
@@ -150,8 +151,8 @@ directories. Two omissions are intentional:
   and re-calls `Put` with a known size, so the backend never needs an
   unknown-total upload path and `declared_size_bytes` is always real.
 - `ListR` is not advertised. `List` already filters the recursive
-  `ListDirectoryAll` down to depth-1, which covers rclone's VFS recursion; a
-  dedicated recursive surface is deferred.
+  `ListDirectoryStream` down to depth-1, which covers rclone's VFS recursion;
+  a dedicated recursive surface is deferred.
 
 `Hashes` reports an empty set and `Object.Hash` returns `hash.ErrUnsupported`:
 the wire carries a `sha` field whose type and key are not yet pinned, so a

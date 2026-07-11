@@ -256,12 +256,14 @@ func TestListDirUnionTwoPageAggregation(t *testing.T) {
 	}
 }
 
-// TestListDirectoryAllErrorsMidPagination drives the call-error branch of the
-// ListDirectoryAll loop AFTER a successful first page: page 1 returns entries and
-// a cursor, page 2 returns a non-2xx. The error must propagate (named
-// ListDirectoryAll, preserving the underlying sentinel) and pagination must halt
-// — partial pages are never returned as a complete listing.
-func TestListDirectoryAllErrorsMidPagination(t *testing.T) {
+// TestListDirectoryStreamErrorsMidPagination drives the call-error branch of
+// the paging loop AFTER a successful first page: page 1 returns entries and a
+// cursor, page 2 returns a non-2xx. The error must propagate naming the
+// function that emits it (ListDirectoryStream — the loop lives there, reached
+// here through its buffering wrapper) while preserving the underlying
+// sentinel, and pagination must halt — partial pages are never returned as a
+// complete listing.
+func TestListDirectoryStreamErrorsMidPagination(t *testing.T) {
 	callCount := 0
 	c, _ := newTLSTestClient(t, "fs-lda-midfail", func(w http.ResponseWriter, r *http.Request) {
 		callCount++
@@ -281,8 +283,8 @@ func TestListDirectoryAllErrorsMidPagination(t *testing.T) {
 	if entries != nil {
 		t.Errorf("a mid-pagination failure must not return partial entries, got %d", len(entries))
 	}
-	if !strings.Contains(err.Error(), "ListDirectoryAll") {
-		t.Errorf("error %q does not name ListDirectoryAll", err.Error())
+	if !strings.Contains(err.Error(), "ListDirectoryStream") {
+		t.Errorf("error %q does not name the emitting function ListDirectoryStream", err.Error())
 	}
 	if callCount != 2 {
 		t.Errorf("expected exactly 2 page calls before the failure halted paging, got %d", callCount)
