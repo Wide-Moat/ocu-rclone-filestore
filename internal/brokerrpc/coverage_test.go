@@ -347,9 +347,11 @@ func TestDownloadRangeErrorStatusSurfaces(t *testing.T) {
 	}
 }
 
-// TestListDirectoryAllCallErrorSurfaces drives the call-error branch inside the
-// ListDirectoryAll paging loop.
-func TestListDirectoryAllCallErrorSurfaces(t *testing.T) {
+// TestListDirectoryStreamCallErrorSurfaces drives the call-error branch inside
+// the paging loop (in ListDirectoryStream, reached through its buffering
+// wrapper): the error must name the emitting function and preserve the
+// underlying sentinel.
+func TestListDirectoryStreamCallErrorSurfaces(t *testing.T) {
 	c, _ := newTLSTestClient(t, "fs-lda-err", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = w.Write([]byte("no"))
@@ -358,8 +360,8 @@ func TestListDirectoryAllCallErrorSurfaces(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if !strings.Contains(err.Error(), "ListDirectoryAll") {
-		t.Errorf("error %q does not name ListDirectoryAll", err.Error())
+	if !strings.Contains(err.Error(), "ListDirectoryStream") {
+		t.Errorf("error %q does not name the emitting function ListDirectoryStream", err.Error())
 	}
 	if !errors.Is(err, ErrPermissionDenied) {
 		t.Errorf("underlying 403 must be preserved; got %v", err)
