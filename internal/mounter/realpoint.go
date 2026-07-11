@@ -237,8 +237,16 @@ func (r *realPointMounter) mountAndWaitReady(ctx context.Context, spec mountSpec
 	}
 
 	if err := r.waitReady(ctx, dest); err != nil {
-		// Best-effort teardown of the half-started mount before surfacing.
-		_ = mp.Unmount()
+		// Best-effort teardown of the half-started mount before surfacing —
+		// through the same bounded discipline doUnmount applies. A bare
+		// mp.Unmount() never returns on the tier whose in-process kernel
+		// detach blocks (the reason doUnmount bounds it), so the readiness-
+		// failure path would wedge run() forever with the ready-file
+		// lifecycle stuck behind it. The drain half is a no-op on a
+		// just-mounted VFS (no writers, no in-use cache items), so this adds
+		// no latency on the failure path.
+		rp := &realPoint{dest: dest, mp: mp}
+		_ = rp.doUnmount()
 		return nil, err
 	}
 
