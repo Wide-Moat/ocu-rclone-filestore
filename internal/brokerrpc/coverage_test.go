@@ -251,15 +251,25 @@ func TestStampAuthMetaUnknownOpErrors(t *testing.T) {
 // sourceChunkSize floor
 // ---------------------------------------------------------------------------
 
-func TestSourceChunkSizeFloorIsThree(t *testing.T) {
-	if got := sourceChunkSize(1); got != 3 {
-		t.Errorf("sourceChunkSize(1): got %d, want 3 (floor)", got)
+// TestSourceChunkSizeFloor pins the honest minimum: the file part streams raw
+// bytes, so forward progress needs exactly 1 byte per read — a ceiling of 1 or
+// 2 is honoured as-is (a read never exceeds the message ceiling), and only a
+// non-positive ceiling is floored to 1.
+func TestSourceChunkSizeFloor(t *testing.T) {
+	if got := sourceChunkSize(1); got != 1 {
+		t.Errorf("sourceChunkSize(1): got %d, want 1 (ceiling honoured)", got)
 	}
-	if got := sourceChunkSize(2); got != 3 {
-		t.Errorf("sourceChunkSize(2): got %d, want 3 (floor)", got)
+	if got := sourceChunkSize(2); got != 2 {
+		t.Errorf("sourceChunkSize(2): got %d, want 2 (ceiling honoured)", got)
 	}
-	// The file part now streams raw bytes, so the chunk is simply the ceiling
-	// once above the floor — no base64 or JSON-envelope arithmetic.
+	if got := sourceChunkSize(0); got != 1 {
+		t.Errorf("sourceChunkSize(0): got %d, want 1 (progress floor)", got)
+	}
+	if got := sourceChunkSize(-1); got != 1 {
+		t.Errorf("sourceChunkSize(-1): got %d, want 1 (progress floor)", got)
+	}
+	// The file part streams raw bytes, so the chunk is simply the ceiling —
+	// no base64 or JSON-envelope arithmetic.
 	if got := sourceChunkSize(64 * 1024); got != 64*1024 {
 		t.Errorf("sourceChunkSize(64KiB): got %d, want %d (flat ceiling)", got, 64*1024)
 	}

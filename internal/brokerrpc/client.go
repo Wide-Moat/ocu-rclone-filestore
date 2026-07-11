@@ -25,19 +25,18 @@ const restBase = "v1/filestore/fs/"
 // travel this path — fileDownload streams through the octet-stream body instead.
 const maxJSONResponseBytes int64 = 64 << 20 // 64 MiB
 
-// defaultMessageCeiling is the default maximum payload size for a single
-// streaming chunk frame, measured on the ENCODED frame payload. The chunker
-// sizes each source read so the base64-plus-JSON-envelope frame payload stays
-// strictly below this value, so the broker never receives a frame at or above
-// the ceiling (D4: a transport frame over the ceiling draws resource_exhausted).
+// defaultMessageCeiling is the default maximum number of raw source bytes per
+// single upload file-part write. The chunker sizes each source read at this
+// ceiling so no single write exceeds it (D4: a transport frame over the
+// ceiling draws resource_exhausted); the file part streams raw bytes with no
+// per-chunk encoding.
 const defaultMessageCeiling = 256 * 1024 // 256 KiB
 
 // ClientOptions carries construction-time tunables for Client.
 type ClientOptions struct {
-	// MessageCeiling is the maximum number of bytes per ENCODED chunk frame
-	// payload (the base64-plus-JSON-envelope on-wire frame). The chunker keeps
-	// every frame strictly below this value. A value of 0 uses the default
-	// (256 KiB).
+	// MessageCeiling is the maximum number of raw source bytes per upload
+	// file-part write; the chunker never reads (and so never writes) more
+	// than this in one step. A value of 0 uses the default (256 KiB).
 	MessageCeiling int
 
 	// MaxDownloadBytes caps how many bytes a single whole-object download may

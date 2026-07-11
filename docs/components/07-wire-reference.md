@@ -157,14 +157,14 @@ verdict must never be masked, or the SEC-46 posture (D4) is destroyed.
 Because the multipart body is rebuilt from the same source on each attempt, a
 `429` retry replays byte-identical content (the SC2 invariant).
 
-### Chunk arithmetic
+### Chunk sizing
 
 `sourceChunkSize` answers: how many raw source bytes per read keep a single
-`Write` comfortably under the ceiling? The file part now streams raw bytes (no
-per-chunk base64 envelope), so the budget is `ceiling − jsonEnvelopeOverhead`
-and the read size is `3 × (budget / 4)`, floored at 3 so progress is guaranteed
-even under a tiny ceiling. The conservative factor keeps each write well clear of
-the ceiling.
+`Write` within the ceiling? The file part streams raw bytes — no per-chunk
+envelope, no encoding expansion — so the read size is exactly the ceiling,
+floored at 1 only for a non-positive ceiling (forward progress needs one
+byte; a ceiling of 1 or 2 is honoured as-is, so a single read never exceeds
+the message ceiling).
 
 The broker assembles the object only when the streamed total equals
 `declared_size_bytes`; any over- or under-send draws `400`/`422`, which maps to a

@@ -134,13 +134,13 @@ func isPipeClosure(err error) bool {
 }
 
 // sourceChunkSize returns the number of raw source bytes to read per file-part
-// write so a single write stays under the message ceiling. The file part now
+// write so a single write never exceeds the message ceiling. The file part
 // streams raw bytes (no base64 expansion, no per-chunk JSON envelope), so the
-// buffer is just the ceiling bounded below to guarantee forward progress even
-// for a tiny ceiling.
+// buffer is exactly the ceiling; forward progress needs just 1 byte, so only a
+// non-positive ceiling is floored to 1.
 func sourceChunkSize(ceiling int) int {
-	if ceiling < 3 {
-		return 3
+	if ceiling < 1 {
+		return 1
 	}
 	return ceiling
 }
