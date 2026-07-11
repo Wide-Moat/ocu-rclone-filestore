@@ -122,6 +122,27 @@ func TestVerifyExpiryBoundary(t *testing.T) {
 	}
 }
 
+// TestVerifyRejectsMissingExpiry pins the security tightening: a signed token
+// carrying no exp (Expiry == 0, the zero-value-vs-absent JSON pitfall) must be
+// rejected, not accepted forever. Every production mint stamps a non-zero exp, so
+// the only token that hits this arm is exactly the unsafe never-expiring one.
+func TestVerifyRejectsMissingExpiry(t *testing.T) {
+	priv := mustKey(t)
+	now := time.Unix(1_700_000_000, 0)
+	claims := sampleClaims(now)
+	claims.Expiry = 0 // exp serialises as "exp":0; Verify sees Expiry == 0
+
+	tok, err := Sign(priv, "kid-1", claims)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	jwks := JWKS{Keys: []JWK{JWKFromPublic("kid-1", &priv.PublicKey)}}
+
+	if _, err := Verify(tok, jwks, claims.Issuer, claims.Audience, now); !errors.Is(err, ErrNoExpiry) {
+		t.Fatalf("expected ErrNoExpiry for an exp-less token, got %v", err)
+	}
+}
+
 func TestVerifyRejectsBadSignature(t *testing.T) {
 	priv := mustKey(t)
 	now := time.Unix(1_700_000_000, 0)

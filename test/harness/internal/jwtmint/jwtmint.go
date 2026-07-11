@@ -31,6 +31,12 @@ var (
 	// ErrExpired is returned when the token's exp is at or before the
 	// verification clock.
 	ErrExpired = errors.New("jwtmint: token expired")
+	// ErrNoExpiry is returned when the token carries no exp (absent, or the JSON
+	// zero value). A token with no expiry never dies, which defeats the
+	// short-lived-session-JWT property every harness verifier relies on, so it is
+	// rejected rather than accepted forever. It is distinct from ErrExpired so a
+	// caller can tell "expired" from "never-safe".
+	ErrNoExpiry = errors.New("jwtmint: token has no expiry")
 	// ErrBadSignature is returned when the ES256 signature does not verify
 	// against the selected JWK.
 	ErrBadSignature = errors.New("jwtmint: bad signature")
@@ -170,7 +176,16 @@ func Verify(token string, jwks JWKS, expectedIss, expectedAud string, now time.T
 	if expectedAud != "" && c.Audience != expectedAud {
 		return Claims{}, fmt.Errorf("%w: audience %q != expected %q", ErrUntrusted, c.Audience, expectedAud)
 	}
-	if c.Expiry != 0 && !now.Before(time.Unix(c.Expiry, 0)) {
+	// An absent/zero exp is the Go zero-value-vs-absent JSON pitfall: exp is not
+	// omitempty, so a token minted without it deserialises to Expiry == 0. Such a
+	// token would never expire, silently voiding the short-lived-session property,
+	// so it is rejected here. The harness always stamps a non-zero exp, so no
+	// legitimate token regresses (see ExpiryUnverified, which deliberately does
+	// NOT apply this policy — it is a raw lifetime probe, not the verifier).
+	if c.Expiry == 0 {
+		return Claims{}, ErrNoExpiry
+	}
+	if !now.Before(time.Unix(c.Expiry, 0)) {
 		return Claims{}, ErrExpired
 	}
 
