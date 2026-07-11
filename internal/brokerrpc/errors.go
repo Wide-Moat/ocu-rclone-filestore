@@ -26,6 +26,7 @@ package brokerrpc
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -68,6 +69,10 @@ const maxRetryAfterSeconds = 3600
 // string. It is the package's one bound for every error-body read (unary,
 // upload, download error paths).
 const maxErrorBodyBytes int64 = 64 << 10 // 64 KiB
+
+// errorBodyTruncationMarker is appended to a capped error-body capture so a
+// truncated diagnostics page is never mistaken for the complete broker output.
+const errorBodyTruncationMarker = " ...[truncated]"
 
 // ErrPermanentOther is the sentinel for any non-2xx status not in the mapped
 // table. These map to a permanent no-retry error. The explicit default
@@ -153,12 +158,37 @@ func MapHTTPStatus(status int, body []byte, retryAfterRaw string) error {
 	}
 }
 
-// boundErrorBody returns the diagnostics prefix of a non-2xx body, truncated
-// to maxErrorBodyBytes with an explicit marker so a capped page is never
-// mistaken for the complete broker output.
+// captureErrorBody is the single capture point for a non-2xx response body.
+// It reads at most maxErrorBodyBytes from r; when the cap was reached and at
+// least one more byte is pending, it appends the truncation marker so a capped
+// page is never mistaken for the complete broker output. All three transport
+// error paths (unary call, upload, download) capture through this helper —
+// none reads the wire past the diagnostics budget. Read errors are swallowed:
+// the body is diagnostics-only and the HTTP status already carries the
+// verdict.
+func captureErrorBody(r io.Reader) []byte {
+	body, _ := io.ReadAll(io.LimitReader(r, maxErrorBodyBytes))
+	if int64(len(body)) == maxErrorBodyBytes {
+		// Probe for one pending byte to distinguish a body exactly at the cap
+		// (complete, no marker) from one that overflows it (marked truncated).
+		var probe [1]byte
+		if n, _ := io.ReadFull(r, probe[:]); n > 0 {
+			return append(body, errorBodyTruncationMarker...)
+		}
+	}
+	return body
+}
+
+// boundErrorBody is the in-mapper choke point: it truncates an
+// already-materialized body to maxErrorBodyBytes with the explicit marker, so
+// even a caller that captured unbounded cannot balloon the error string. On
+// the production transport paths the capture is already capped and marked by
+// captureErrorBody; re-bounding such a capture is idempotent (the marked
+// capture is body[:cap]+marker, and re-truncation reproduces exactly that
+// string).
 func boundErrorBody(body []byte) string {
 	if int64(len(body)) <= maxErrorBodyBytes {
 		return string(body)
 	}
-	return string(body[:maxErrorBodyBytes]) + " ...[truncated]"
+	return string(body[:maxErrorBodyBytes]) + errorBodyTruncationMarker
 }

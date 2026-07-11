@@ -89,28 +89,32 @@ func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBy
 	}
 	defer func() { _ = httpResp.Body.Close() }()
 
-	// Bounded read: only a diagnostics-sized prefix of the body is ever kept
-	// (the shared maxErrorBodyBytes budget — the body is diagnostics on both
-	// branches; the HTTP status is authoritative). Consequence on the 2xx
-	// branch: a transport failure occurring PAST the cap is invisible here —
-	// the LimitReader ends the read cleanly at the cap — so the call reports
-	// success on the strength of the 2xx status alone. That is the intended
-	// semantics: the broker committed the upload when it issued the 2xx, and
-	// the remainder of the body carries no data the guest acts on.
-	respBody, readErr := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodyBytes))
-
-	// Collect the body-writing result (blocks until the goroutine finishes).
-	writeErr := <-errCh
-
 	// Success/failure is the HTTP status. A non-2xx is authoritative and must be
 	// preferred over a writer-pipe error: when the broker terminates early — the
 	// SEC-46 429 throttle case, a permission failure — it replies without
 	// draining the request body, the transport closes the pipe, and the writer
 	// goroutine fails with io.ErrClosedPipe. That pipe-closure error must never
-	// mask the retryable backpressure verdict the status carries.
+	// mask the retryable backpressure verdict the status carries. The error body
+	// is diagnostics-only, so it goes through the shared bounded capture (capped
+	// at the diagnostics budget, truncation marked).
 	if httpResp.StatusCode < 200 || httpResp.StatusCode > 299 {
+		respBody := captureErrorBody(httpResp.Body)
+		// Drain the writer goroutine so it does not leak; its result is
+		// superseded by the status verdict.
+		<-errCh
 		return MapHTTPStatus(httpResp.StatusCode, respBody, httpResp.Header.Get("Retry-After"))
 	}
+
+	// 2xx: bounded drain — only a diagnostics-sized prefix of the body is ever
+	// read (the shared maxErrorBodyBytes budget; the body carries no data the
+	// guest acts on). Consequence: a transport failure occurring PAST the cap is
+	// invisible here — the LimitReader ends the read cleanly at the cap — so the
+	// call reports success on the strength of the 2xx status alone. That is the
+	// intended semantics: the broker committed the upload when it issued the 2xx.
+	_, readErr := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodyBytes))
+
+	// Collect the body-writing result (blocks until the goroutine finishes).
+	writeErr := <-errCh
 
 	// 2xx but the body read failed: surface it.
 	if readErr != nil {
