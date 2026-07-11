@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: FSL-1.1-Apache-2.0
 // Copyright (c) 2025 Open Computer Use Contributors
 
-//go:build linux || (darwin && amd64)
+// Deliberately untagged, like teardown.go itself: the deploy-invariant tests
+// below must run on every development platform, not only the mount-capable
+// legs, so a compose-grace regression reds locally rather than first in CI.
 
 package mounter
 

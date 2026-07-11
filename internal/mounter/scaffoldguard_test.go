@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -105,6 +106,39 @@ func TestEnsureMountpointShadowsNoContent(t *testing.T) {
 		}
 		if strings.Contains(err.Error(), "refusing to shadow") {
 			t.Errorf("error %q words a missing destination as shadow-refusal", err.Error())
+		}
+	})
+}
+
+// TestClassifyDestReadError pins the three wordings of a failed pre-mount
+// walk read: missing destination (never a refusal), a stale disconnected
+// FUSE mount (ENOTCONN — the remedy is a lazy unmount, not entry removal),
+// and the generic fail-closed wrap for everything else.
+func TestClassifyDestReadError(t *testing.T) {
+	t.Run("stale disconnected mount names the lazy-unmount remedy", func(t *testing.T) {
+		err := classifyDestReadError("/mnt/user-data", "/mnt/user-data/outputs", &os.PathError{Op: "open", Path: "/mnt/user-data/outputs", Err: syscall.ENOTCONN})
+		if err == nil {
+			t.Fatal("ENOTCONN classified as nil")
+		}
+		if !strings.Contains(err.Error(), "stale disconnected mount") || !strings.Contains(err.Error(), "umount -l") {
+			t.Errorf("error %q lacks the stale-mount wording or the lazy-unmount remedy", err.Error())
+		}
+		if !strings.Contains(err.Error(), "/mnt/user-data/outputs") {
+			t.Errorf("error %q does not name the stale path", err.Error())
+		}
+	})
+
+	t.Run("missing destination is not a refusal", func(t *testing.T) {
+		err := classifyDestReadError("/mnt/x", "/mnt/x", &os.PathError{Op: "open", Path: "/mnt/x", Err: syscall.ENOENT})
+		if err == nil || !strings.Contains(err.Error(), "does not exist") {
+			t.Errorf("missing destination classified as %v; want the does-not-exist message", err)
+		}
+	})
+
+	t.Run("other errors fail closed with the walk error", func(t *testing.T) {
+		err := classifyDestReadError("/mnt/x", "/mnt/x/sub", &os.PathError{Op: "open", Path: "/mnt/x/sub", Err: syscall.EACCES})
+		if err == nil || !strings.Contains(err.Error(), "inspecting mount destination") {
+			t.Errorf("EACCES classified as %v; want the fail-closed inspection wrap", err)
 		}
 	})
 }
