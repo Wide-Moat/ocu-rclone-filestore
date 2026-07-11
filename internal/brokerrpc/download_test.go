@@ -452,6 +452,29 @@ func TestDownloadRangeOverDeliveryIsAnError(t *testing.T) {
 	})
 }
 
+// TestDownloadDeclaredOverCapFastFails pins the whole-object arm of the
+// declared-length fast-fail: a response declaring more bytes than the download
+// cap is rejected up front — Download itself errors before handing out a
+// reader, instead of streaming to the cap and failing there.
+func TestDownloadDeclaredOverCapFastFails(t *testing.T) {
+	content := bytes.Repeat([]byte("C"), 100)
+	c := newTLSTestClientOpts(t, "fs-dl-cap-cl", ClientOptions{MaxDownloadBytes: 10}, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", "100")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(content)
+	})
+	rc, err := c.Download(context.Background(), "uuid-cap-cl")
+	if err == nil {
+		got, rerr := readAllClose(t, rc)
+		t.Fatalf("a declared 100-byte body over a 10-byte cap must fail up front, got a reader (read %d bytes, read err %v)", len(got), rerr)
+	}
+	if !strings.Contains(err.Error(), "exceeding") {
+		t.Errorf("error %q does not name the exceeded cap", err.Error())
+	}
+}
+
 // scriptedBody is an io.ReadCloser that first serves its data bytes, then
 // replays the scripted tail results one Read at a time (a step with n == 1
 // yields its payload byte), and finally reports io.EOF. It lets a test place
