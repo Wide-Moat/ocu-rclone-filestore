@@ -74,6 +74,191 @@ func newWired(t *testing.T) (*controlplane.Server, map[string]string, *httptest.
 	return cp, sink, ts, ct
 }
 
+// newWiredJWT stands up the control-plane + exchange peers with a JWT credential
+// issuer (which stamps a real exp on each issued credential) over a caller-shared
+// clock and a TTL, so a test can drive the cache's TTL bound. The clock function
+// is shared with the issuer AND the exchange subject-token verification so that a
+// re-exchange after the clock advances produces a credential that is live as of
+// the advanced clock (its exp is clock()+ttl). It returns the control-plane (to
+// mint weak JWTs) and a counting transport over the exchange handler.
+func newWiredJWT(t *testing.T, ttl time.Duration, clock func() time.Time) (*controlplane.Server, *countingTransport) {
+	t.Helper()
+	cp, err := controlplane.NewServer(controlplane.Options{
+		Issuer:   issuer,
+		Audience: audience,
+		Kid:      "kid-cp",
+		Now:      fixedNow,
+	})
+	if err != nil {
+		t.Fatalf("control-plane: %v", err)
+	}
+	credKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("cred key: %v", err)
+	}
+	credIssuer, err := exchange.NewJWTCredentialIssuerFromKey(credKey, exchange.CredentialIssuerOptions{
+		Issuer: "https://exchange.test", Audience: "filestore", Kid: "kid-cred", TTL: ttl, Now: clock,
+	})
+	if err != nil {
+		t.Fatalf("cred issuer: %v", err)
+	}
+	// The subject-token (weak JWT) is minted at fixedNow with a short life; keep the
+	// exchange's own verification clock at fixedNow so the weak JWT stays valid
+	// across the test even as the credential clock advances. Only the CREDENTIAL
+	// lifetime (issuer clock) is what the edge cache TTL is bound to.
+	ex := exchange.MustNewServer(exchange.Options{
+		JWKS:        cp,
+		Issuer:      issuer,
+		Audience:    audience,
+		Credentials: credIssuer,
+		Now:         fixedNow,
+	})
+	ct := &countingTransport{delegate: ex.Handler()}
+	return cp, ct
+}
+
+// TestResolveReExchangesExpiredCachedCredential is the M2 keystone RED-baseline:
+// a cached JWT credential whose own exp has passed must trigger a FRESH exchange,
+// not be served stale. On the pre-M2 cache (no TTL) the exchange is hit exactly
+// once and the expired credential is served on the second Resolve; with the TTL
+// bound the exchange is hit twice.
+func TestResolveReExchangesExpiredCachedCredential(t *testing.T) {
+	const credTTL = 10 * time.Minute
+	var (
+		clockMu sync.Mutex
+		clock   = fixedNow()
+	)
+	now := func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return clock }
+	advance := func(d time.Duration) { clockMu.Lock(); clock = clock.Add(d); clockMu.Unlock() }
+
+	cp, ct := newWiredJWT(t, credTTL, now)
+	g, err := New(Options{
+		ExchangeURL: "http://exchange.test" + exchange.ExchangePath,
+		Client:      &http.Client{Transport: ct},
+		Now:         now,
+		RenewSkew:   30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	weak, _ := cp.Mint("fs-outputs", "write", false)
+
+	// First Resolve populates the cache with a credential expiring at now()+credTTL.
+	if _, err := g.Resolve(context.Background(), "fs-outputs", "write", weak); err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	if got := atomic.LoadInt64(&ct.calls); got != 1 {
+		t.Fatalf("first Resolve hit exchange %d times, want 1", got)
+	}
+
+	// Advance the clock PAST the cached credential's exp.
+	advance(credTTL + time.Minute)
+
+	// Second Resolve must re-exchange, not serve the expired cached credential.
+	if _, err := g.Resolve(context.Background(), "fs-outputs", "write", weak); err != nil {
+		t.Fatalf("second Resolve: %v", err)
+	}
+	if got := atomic.LoadInt64(&ct.calls); got != 2 {
+		t.Fatalf("expired cached credential was served stale: exchange hit %d times, want 2", got)
+	}
+}
+
+// TestResolveServesLiveCachedCredential pins that the TTL does not over-evict: a
+// second Resolve while the clock is still comfortably inside the credential
+// window is a cache HIT, so the exchange is hit exactly once.
+func TestResolveServesLiveCachedCredential(t *testing.T) {
+	const credTTL = time.Hour
+	var (
+		clockMu sync.Mutex
+		clock   = fixedNow()
+	)
+	now := func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return clock }
+
+	cp, ct := newWiredJWT(t, credTTL, now)
+	g, err := New(Options{
+		ExchangeURL: "http://exchange.test" + exchange.ExchangePath,
+		Client:      &http.Client{Transport: ct},
+		Now:         now,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	weak, _ := cp.Mint("fs-outputs", "write", false)
+
+	if _, err := g.Resolve(context.Background(), "fs-outputs", "write", weak); err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	// Advance only part-way into the window.
+	clockMu.Lock()
+	clock = clock.Add(credTTL / 2)
+	clockMu.Unlock()
+	if _, err := g.Resolve(context.Background(), "fs-outputs", "write", weak); err != nil {
+		t.Fatalf("second Resolve: %v", err)
+	}
+	if got := atomic.LoadInt64(&ct.calls); got != 1 {
+		t.Fatalf("a live cached credential must be served from cache: exchange hit %d times, want 1", got)
+	}
+	if _, ok := g.Cached("fs-outputs", "write"); !ok {
+		t.Fatalf("a live credential must be reported by Cached")
+	}
+}
+
+// TestResolveSingleFlightAcrossTTLEviction pins that a stale-eviction re-exchange
+// still funnels through the single-flight machinery: N concurrent Resolves after
+// the credential has expired must trigger EXACTLY ONE re-exchange, not N. The
+// existing concurrency test uses the never-expiring opaque issuer and so does not
+// exercise the eviction race.
+func TestResolveSingleFlightAcrossTTLEviction(t *testing.T) {
+	const credTTL = 5 * time.Minute
+	var (
+		clockMu sync.Mutex
+		clock   = fixedNow()
+	)
+	now := func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return clock }
+
+	cp, ct := newWiredJWT(t, credTTL, now)
+	g, err := New(Options{
+		ExchangeURL: "http://exchange.test" + exchange.ExchangePath,
+		Client:      &http.Client{Transport: ct},
+		Now:         now,
+		RenewSkew:   30 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	weak, _ := cp.Mint("fs-outputs", "write", false)
+
+	if _, err := g.Resolve(context.Background(), "fs-outputs", "write", weak); err != nil {
+		t.Fatalf("seed Resolve: %v", err)
+	}
+	if got := atomic.LoadInt64(&ct.calls); got != 1 {
+		t.Fatalf("seed Resolve hit exchange %d times, want 1", got)
+	}
+
+	// Advance past the credential window, then fire N concurrent Resolves.
+	clockMu.Lock()
+	clock = clock.Add(credTTL + time.Minute)
+	clockMu.Unlock()
+
+	const n = 16
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			if _, rerr := g.Resolve(context.Background(), "fs-outputs", "write", weak); rerr != nil {
+				t.Errorf("concurrent Resolve: %v", rerr)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Exactly one re-exchange across the eviction (seed + one re-exchange = 2).
+	if got := atomic.LoadInt64(&ct.calls); got != 2 {
+		t.Fatalf("stale eviction did not funnel through single-flight: exchange hit %d times, want 2", got)
+	}
+}
+
 func TestResolveIssuesAcceptedCredential(t *testing.T) {
 	cp, sink, ts, _ := newWired(t)
 	g, err := New(Options{ExchangeURL: ts.URL + exchange.ExchangePath})
