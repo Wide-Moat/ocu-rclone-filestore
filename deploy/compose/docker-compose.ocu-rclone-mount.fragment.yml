@@ -55,6 +55,13 @@ services:
       context: ../..
       dockerfile: Dockerfile
 
+    # Teardown budget: on SIGTERM the mount drains VFS write-back for up to
+    # 120s (the broker-throttle settle window, SEC-46) plus a 3s kernel-detach
+    # grace before exiting. Without this key the compose default (10s)
+    # SIGKILLs the drain mid-flight and silently discards the newest writes.
+    # A unit test asserts this value against the binary's real constants.
+    stop_grace_period: 150s
+
     # ocu-mount-facing ONLY. No ocu-edge-backend membership — the guest has no
     # L3 route to the filestore; the edge (`ocu-egress`) is the only hop.
     networks:

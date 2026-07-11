@@ -46,28 +46,9 @@ import (
 // forever.
 const waitMountReadyTimeout = 30 * time.Second
 
-// writebackDrainTimeout bounds how long teardown waits for in-flight VFS
-// write-back uploads to reach the broker before unmounting. A write-back cache
-// holds dirty bytes locally and uploads them asynchronously; unmounting before
-// that queue drains discards whatever has not yet been sent, silently losing
-// the most recent writes. Bounding the wait keeps a wedged upload from blocking
-// teardown forever while still giving the queue a real chance to flush.
-const writebackDrainTimeout = 30 * time.Second
-
-// unmountDetachGrace bounds how long teardown waits for the in-process kernel
-// detach (server.Unmount) to RETURN before proceeding to let the process exit.
-//
-// On a native kernel the detach returns in well under this window, so the
-// bound never fires and teardown is unchanged. On a userspace-kernel sandbox
-// the in-process FUSE server's Unmount() does not return at all — the sentry
-// services the unmount but the call never unblocks — so without a bound the
-// teardown goroutine wedges forever, the orchestrator's run() never returns,
-// and the ready-file is never retracted. Bounding only the detach (the drain
-// above still runs to completion, so no write-back bytes are dropped) lets the
-// process exit on SIGTERM; the sandbox then reclaims the still-served FUSE
-// mount, which is the teardown contract on that tier (SIGTERM -> process exit
-// -> sandbox reclaims the mount).
-const unmountDetachGrace = 3 * time.Second
+// writebackDrainTimeout and unmountDetachGrace live in teardown.go (untagged)
+// so the compose-grace invariant test references the real constants on every
+// platform.
 
 // errDetachDidNotReturn is the typed result when the in-process kernel detach
 // did not return within unmountDetachGrace. It is NOT a failure to unmount: the
