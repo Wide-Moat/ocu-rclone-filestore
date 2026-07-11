@@ -32,16 +32,6 @@ import (
 	"net/http"
 )
 
-// maxUploadResponseBytes bounds the fileUpload response-body read. The body is
-// used solely as diagnostics for MapHTTPStatus — the HTTP status, not the body,
-// is authoritative for success or failure — so the small error-body bound
-// (matching the fileDownload error path) is the right discipline on both the
-// 2xx and non-2xx branches. A longer body is silently capped rather than
-// buffered whole into guest memory: the guest is the least-provisioned party
-// and must never let a runaway or desynced response size an unbounded read
-// into OOM.
-const maxUploadResponseBytes = 64 * 1024
-
 // Upload performs the fileUpload op. It reads all bytes from src and sends them
 // as the file part of a multipart/form-data body, preceded by a "params" field
 // carrying the total source size as declared_size_bytes. The broker assembles
@@ -100,13 +90,14 @@ func (c *Client) Upload(ctx context.Context, path string, src io.Reader, totalBy
 	defer func() { _ = httpResp.Body.Close() }()
 
 	// Bounded read: only a diagnostics-sized prefix of the body is ever kept
-	// (see maxUploadResponseBytes). Consequence on the 2xx branch: a transport
-	// failure occurring PAST the cap is invisible here — the LimitReader ends
-	// the read cleanly at the cap — so the call reports success on the strength
-	// of the 2xx status alone. That is the intended semantics: the broker
-	// committed the upload when it issued the 2xx, and the remainder of the
-	// body carries no data the guest acts on.
-	respBody, readErr := io.ReadAll(io.LimitReader(httpResp.Body, maxUploadResponseBytes))
+	// (the shared maxErrorBodyBytes budget — the body is diagnostics on both
+	// branches; the HTTP status is authoritative). Consequence on the 2xx
+	// branch: a transport failure occurring PAST the cap is invisible here —
+	// the LimitReader ends the read cleanly at the cap — so the call reports
+	// success on the strength of the 2xx status alone. That is the intended
+	// semantics: the broker committed the upload when it issued the 2xx, and
+	// the remainder of the body carries no data the guest acts on.
+	respBody, readErr := io.ReadAll(io.LimitReader(httpResp.Body, maxErrorBodyBytes))
 
 	// Collect the body-writing result (blocks until the goroutine finishes).
 	writeErr := <-errCh
