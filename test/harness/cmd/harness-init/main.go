@@ -47,7 +47,9 @@ var serviceNames = []string{"filestore", "control-plane", "exchange", "edge"}
 // weakJWTScopes are the filesystem_ids the guest mounts; the init step mints one
 // weak session JWT per scope for the fixture's per-mount auth_token. fsrw is
 // used by two mount entries (the cold-read second mount), fsthrottle by the SC2
-// throttle mount, fsro by the read-only mount.
+// throttle mount, fsro by the read-only mount. fs-fleet is the deployment scope
+// the fleet guest-config template pins for both its outputs and uploads mounts;
+// the render keys the token map on the filesystem_id, so one entry covers both.
 var weakJWTScopes = []struct {
 	fsid   string
 	intent string
@@ -56,6 +58,7 @@ var weakJWTScopes = []struct {
 	{"fsthrottle", "write"},
 	{"fsro", "read"},
 	{"fsconf", "write"},
+	{"fs-fleet", "write"},
 }
 
 const (
