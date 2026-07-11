@@ -228,7 +228,17 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, scope Scope, body com
 		if start > total {
 			start = total
 		}
+		// The offset/length window is caller-supplied and schema-legal at the
+		// extreme, but start+length must be representable. Both start and Length are
+		// non-negative here (start clamped to [0,total], Length guarded >= 0 above),
+		// so a sum that wraps below start is an int64 overflow: an unsatisfiable
+		// range, mapped to 400 like the negative-range arm rather than a 200 with a
+		// negative Content-Length and an empty body.
 		end := start + db.Range.Length
+		if end < start {
+			writeError(w, http.StatusBadRequest, "range overflows")
+			return
+		}
 		if end > total {
 			end = total
 		}
