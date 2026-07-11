@@ -28,6 +28,9 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
+
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/jwtmint"
 )
 
 // Token-exchange request constants, fixed by RFC 8693.
@@ -39,6 +42,14 @@ const (
 // maxResponseBytes bounds the exchange response body read so a misbehaving or
 // hostile peer cannot exhaust memory.
 const maxResponseBytes = 1 << 20
+
+// defaultRenewSkew is how far before an exchanged credential's own expiry the
+// cache treats its entry as stale and re-exchanges. It is small so the edge
+// re-exchanges just BEFORE the filestore would reject the credential rather than
+// serving one that dies mid-flight — the same renew-before posture the cert and
+// weak-JWT guards use. A credential with no readable expiry (an opaque, non-JWT
+// credential) is never TTL-expired; only a JWT credential gains this bound.
+const defaultRenewSkew = 30 * time.Second
 
 // tokenResponse is the RFC-8693 success body the exchange peer returns.
 type tokenResponse struct {
@@ -62,6 +73,21 @@ type scopeClaims struct {
 // claims, so a per-fsID cache would answer the outputs mount's exchange with the
 // uploads mount's credential and flatten the intent). It is safe for concurrent
 // use.
+//
+// Each cache entry is bound to the exchanged credential's OWN lifetime: a JWT
+// credential carries an exp, and the entry is treated as a miss once the clock is
+// within renewSkew of that exp, so the edge re-exchanges rather than injecting a
+// credential the filestore would reject as expired. An opaque (non-JWT)
+// credential has no readable exp and caches indefinitely, as before. This bounds
+// the cache to the credential it holds; a stand up longer than the credential
+// lifetime no longer keeps injecting a stale credential until an edge restart.
+//
+// A downstream-401 evict path (re-exchange when the filestore itself rejects the
+// injected credential) is a possible future belt-and-braces but is deliberately
+// NOT implemented here: the TTL bound already closes the described failure, and
+// evict-on-401 adds a false-evict axis (a scope/authz 401 is not a credential
+// expiry) that needs its own design. The TTL is the complete fix for the
+// credential-outliving-its-entry defect.
 type Exchanger struct {
 	// exchangeURL is the absolute URL of the exchange peer's token endpoint
 	// (its base URL joined with exchange.ExchangePath).
@@ -70,13 +96,26 @@ type Exchanger struct {
 	// test can count or intercept the round trips.
 	client *http.Client
 
+	// now is the clock, seamed for tests; defaults to time.Now.
+	now func() time.Time
+	// renewSkew evicts a cached credential this far before its own expiry.
+	renewSkew time.Duration
+
 	mu    sync.Mutex
-	cache map[string]string
+	cache map[string]cacheEntry
 	// inflight serialises concurrent first-resolvers for the same
 	// {filesystem_id, intent} key so a session triggers exactly one exchange per
 	// mount even under a stampede. Each entry is created under mu and closed when
 	// its exchange settles.
 	inflight map[string]*flight
+}
+
+// cacheEntry is a cached exchanged credential plus the instant it stops being
+// usable. A zero notAfter means "no lifetime known" (an opaque, non-JWT
+// credential whose exp cannot be read) and is never TTL-expired.
+type cacheEntry struct {
+	cred     string
+	notAfter time.Time
 }
 
 // flight tracks one in-progress exchange for a filesystem_id. Waiters block on
@@ -94,6 +133,11 @@ type Options struct {
 	// Client, when set, is used for the exchange round trip; otherwise
 	// http.DefaultClient is used.
 	Client *http.Client
+	// Now, when set, fixes the clock for deterministic tests; otherwise time.Now.
+	Now func() time.Time
+	// RenewSkew, when positive, overrides how far before a credential's own exp
+	// the cache re-exchanges; otherwise defaultRenewSkew.
+	RenewSkew time.Duration
 }
 
 // New constructs an Exchanger. It returns an error on an empty exchange URL: an
@@ -106,10 +150,20 @@ func New(opts Options) (*Exchanger, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
+	renewSkew := opts.RenewSkew
+	if renewSkew <= 0 {
+		renewSkew = defaultRenewSkew
+	}
 	return &Exchanger{
 		exchangeURL: opts.ExchangeURL,
 		client:      client,
-		cache:       make(map[string]string),
+		now:         now,
+		renewSkew:   renewSkew,
+		cache:       make(map[string]cacheEntry),
 		inflight:    make(map[string]*flight),
 	}, nil
 }
@@ -149,10 +203,20 @@ func (e *Exchanger) Resolve(ctx context.Context, filesystemID, intent, weakJWT s
 	// value.
 	key := filesystemID + "\x00" + intent
 
+	// The stale-check, the eviction of a stale entry, and the inflight lookup +
+	// flight registration all sit under ONE lock acquisition: releasing between
+	// the stale-delete and the inflight check would let two goroutines both see the
+	// miss and both register a flight across a TTL eviction, defeating the
+	// single-flight guarantee.
 	e.mu.Lock()
-	if cred, ok := e.cache[key]; ok {
-		e.mu.Unlock()
-		return cred, nil
+	if entry, ok := e.cache[key]; ok {
+		if e.isLive(entry) {
+			e.mu.Unlock()
+			return entry.cred, nil
+		}
+		// A known-lifetime entry within renewSkew of its own expiry is stale: evict
+		// it and fall through to a fresh exchange under the same lock.
+		delete(e.cache, key)
 	}
 	// If an exchange for this scope is already in flight, wait for it rather than
 	// launching a second one: one exchange per session even under a stampede.
@@ -177,7 +241,7 @@ func (e *Exchanger) Resolve(ctx context.Context, filesystemID, intent, weakJWT s
 	e.mu.Lock()
 	fl.cred, fl.err = cred, err
 	if err == nil {
-		e.cache[key] = cred
+		e.cache[key] = cacheEntry{cred: cred, notAfter: credentialNotAfter(cred)}
 	}
 	delete(e.inflight, key)
 	e.mu.Unlock()
@@ -186,14 +250,44 @@ func (e *Exchanger) Resolve(ctx context.Context, filesystemID, intent, weakJWT s
 	return cred, err
 }
 
-// Cached reports the cached credential for a {filesystem_id, intent}, if any. It
-// exists so a caller (or a test) can observe the cache without forcing an
-// exchange.
+// isLive reports whether a cache entry is still usable as of now(). An entry with
+// no known lifetime (zero notAfter — an opaque, non-JWT credential) is always
+// live; an entry with a known lifetime is live only while now()+renewSkew is
+// still before its notAfter. The IsZero guard is load-bearing: without it a zero
+// notAfter would compare as always-expired and evict an opaque entry on every
+// hit.
+func (e *Exchanger) isLive(entry cacheEntry) bool {
+	return entry.notAfter.IsZero() || e.now().Add(e.renewSkew).Before(entry.notAfter)
+}
+
+// credentialNotAfter reads the exp of an issued credential to bound its cache
+// lifetime. A JWT credential carries an exp and returns its instant; an opaque
+// (non-JWT) credential — no dots, so not a compact JWS — returns the zero time,
+// meaning "no lifetime known, never TTL-expire". A parse error never fails the
+// exchange: the credential is already issued and returned to the caller; only the
+// cache bookkeeping degrades to cache-forever.
+func credentialNotAfter(cred string) time.Time {
+	exp, err := jwtmint.ExpiryUnverified(cred)
+	if err != nil || exp == 0 {
+		return time.Time{}
+	}
+	return time.Unix(exp, 0)
+}
+
+// Cached reports the cached credential for a {filesystem_id, intent}, if a still
+// LIVE entry exists. It exists so a caller (or a test) can observe the cache
+// without forcing an exchange. It applies the same liveness predicate as Resolve
+// — an entry within renewSkew of its own expiry is reported as absent — but stays
+// a pure observer: it never evicts, so a stale entry it hides is still cleaned up
+// by the next Resolve.
 func (e *Exchanger) Cached(filesystemID, intent string) (string, bool) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	cred, ok := e.cache[filesystemID+"\x00"+intent]
-	return cred, ok
+	entry, ok := e.cache[filesystemID+"\x00"+intent]
+	if !ok || !e.isLive(entry) {
+		return "", false
+	}
+	return entry.cred, true
 }
 
 // exchange performs one RFC-8693 token exchange and returns the issued
