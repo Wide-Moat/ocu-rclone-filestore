@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/httpjson"
 )
 
 // uploadParams mirrors the "params" JSON form field the guest writes for a
@@ -55,31 +57,31 @@ const maxUploadBytes int64 = 1 << 30 // 1 GiB
 func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	subjectFSID, err := s.credentials.Validate(r.Header.Get("Authorization"))
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "missing or unknown credential")
+		httpjson.Error(w, http.StatusUnauthorized, "missing or unknown credential")
 		return
 	}
 
 	// The parse is bounded: 1 MiB of in-memory form parts; the file part itself
 	// is separately capped by maxUploadBytes when copied below.
 	if err := r.ParseMultipartForm(1 << 20); err != nil { //nolint:gosec // G120: the in-memory budget is bounded and the file copy is LimitReader-capped
-		writeError(w, http.StatusBadRequest, "malformed multipart body")
+		httpjson.Error(w, http.StatusBadRequest, "malformed multipart body")
 		return
 	}
 
 	rawParams := r.FormValue("params")
 	if rawParams == "" {
-		writeError(w, http.StatusBadRequest, "missing params field")
+		httpjson.Error(w, http.StatusBadRequest, "missing params field")
 		return
 	}
 	var params uploadParams
 	if err := json.Unmarshal([]byte(rawParams), &params); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed params field")
+		httpjson.Error(w, http.StatusBadRequest, "malformed params field")
 		return
 	}
 
 	scope, status, msg := s.authorize(opFileUpload, subjectFSID, params.FilesystemID)
 	if status != 0 {
-		writeError(w, status, msg)
+		httpjson.Error(w, status, msg)
 		return
 	}
 
@@ -88,7 +90,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	// throttle status (the guest surfaces it as a non-retryable EIO) before the
 	// destination is touched.
 	if !s.chargePerOp(params.FilesystemID) {
-		writeError(w, throttleRefusalStatus, "per-op ceiling exceeded; back off and retry")
+		httpjson.Error(w, throttleRefusalStatus, "per-op ceiling exceeded; back off and retry")
 		return
 	}
 
@@ -97,31 +99,31 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	// destination untouched.
 	if s.throttled() {
 		w.Header().Set("Retry-After", "1")
-		writeError(w, http.StatusTooManyRequests, "throttled; retry after backoff")
+		httpjson.Error(w, http.StatusTooManyRequests, "throttled; retry after backoff")
 		return
 	}
 
 	abs, err := resolveUnder(scope.Root, params.Path)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "path escapes scope")
+		httpjson.Error(w, http.StatusBadRequest, "path escapes scope")
 		return
 	}
 
 	part, _, err := r.FormFile("file")
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "missing file part")
+		httpjson.Error(w, http.StatusBadRequest, "missing file part")
 		return
 	}
 	defer func() { _ = part.Close() }()
 
 	if !params.OverwriteExisting {
 		if _, statErr := os.Stat(abs); statErr == nil {
-			writeError(w, http.StatusConflict, "destination exists")
+			httpjson.Error(w, http.StatusConflict, "destination exists")
 			return
 		}
 	}
 	if mkErr := os.MkdirAll(filepath.Dir(abs), 0o750); mkErr != nil {
-		writeError(w, http.StatusInternalServerError, "mkdir parent failed")
+		httpjson.Error(w, http.StatusInternalServerError, "mkdir parent failed")
 		return
 	}
 
@@ -133,11 +135,11 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	written, copyErr := io.Copy(f, io.LimitReader(part, maxUploadBytes))
 	closeErr := f.Close()
 	if copyErr != nil {
-		writeError(w, http.StatusInternalServerError, "write failed")
+		httpjson.Error(w, http.StatusInternalServerError, "write failed")
 		return
 	}
 	if closeErr != nil {
-		writeError(w, http.StatusInternalServerError, "close failed")
+		httpjson.Error(w, http.StatusInternalServerError, "close failed")
 		return
 	}
 
@@ -148,7 +150,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	// defaulting to 0) is rejected rather than silently accepted.
 	if written != params.DeclaredSizeBytes {
 		_ = os.Remove(abs)
-		writeError(w, http.StatusUnprocessableEntity, "streamed size does not match declared size")
+		httpjson.Error(w, http.StatusUnprocessableEntity, "streamed size does not match declared size")
 		return
 	}
 
@@ -157,7 +159,7 @@ func (s *Server) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		writeMetaError(w, statErr)
 		return
 	}
-	writeJSON(w, struct {
+	httpjson.OK(w, struct {
 		File wireFile `json:"file"`
 	}{File: wireFile{Path: params.Path, Size: size, Mtime: mtime, Mode: mode, UUID: uuid}})
 }
@@ -182,22 +184,22 @@ func (s *Server) throttled() bool {
 func (s *Server) handleFileDownload(w http.ResponseWriter, scope Scope, body commonBody) {
 	var db downloadBody
 	if err := json.Unmarshal(body.raw, &db); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed body")
+		httpjson.Error(w, http.StatusBadRequest, "malformed body")
 		return
 	}
 	if db.UUID == "" {
-		writeError(w, http.StatusBadRequest, "uuid is required")
+		httpjson.Error(w, http.StatusBadRequest, "uuid is required")
 		return
 	}
 
 	rel, ok := relPathForUUID(scope, db.UUID)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not found")
+		httpjson.Error(w, http.StatusNotFound, "not found")
 		return
 	}
 	abs, err := resolveUnder(scope.Root, rel)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "path escapes scope")
+		httpjson.Error(w, http.StatusBadRequest, "path escapes scope")
 		return
 	}
 
@@ -221,7 +223,7 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, scope Scope, body com
 	start, length := int64(0), total
 	if db.Range != nil {
 		if db.Range.Offset < 0 || db.Range.Length < 0 {
-			writeError(w, http.StatusBadRequest, "negative range")
+			httpjson.Error(w, http.StatusBadRequest, "negative range")
 			return
 		}
 		start = db.Range.Offset
@@ -236,7 +238,7 @@ func (s *Server) handleFileDownload(w http.ResponseWriter, scope Scope, body com
 		// negative Content-Length and an empty body.
 		end := start + db.Range.Length
 		if end < start {
-			writeError(w, http.StatusBadRequest, "range overflows")
+			httpjson.Error(w, http.StatusBadRequest, "range overflows")
 			return
 		}
 		if end > total {
