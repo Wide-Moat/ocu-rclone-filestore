@@ -27,6 +27,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/httpjson"
 )
 
 // restBase mirrors the guest client's REST path prefix. Each op routes to
@@ -204,7 +206,7 @@ func (s *Server) TLSServer() (*httptest.Server, []byte) {
 // scope, then dispatches to the per-op handler.
 func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
+		httpjson.Error(w, http.StatusMethodNotAllowed, "only POST is supported")
 		return
 	}
 	opName := op(strings.TrimPrefix(r.URL.Path, restBase))
@@ -221,20 +223,20 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	// Authenticate the injected credential.
 	subjectFSID, err := s.credentials.Validate(r.Header.Get("Authorization"))
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "missing or unknown credential")
+		httpjson.Error(w, http.StatusUnauthorized, "missing or unknown credential")
 		return
 	}
 
 	// Decode the JSON body far enough to read the filesystem_id and intent.
 	body, err := decodeCommon(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "malformed request body")
+		httpjson.Error(w, http.StatusBadRequest, "malformed request body")
 		return
 	}
 
 	scope, status, msg := s.authorize(opName, subjectFSID, body.FilesystemID)
 	if status != 0 {
-		writeError(w, status, msg)
+		httpjson.Error(w, status, msg)
 		return
 	}
 
@@ -243,7 +245,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	// status (the guest surfaces it as a non-retryable EIO). This is charged
 	// AFTER auth so an unauthorised caller is never told to back off.
 	if !s.chargePerOp(body.FilesystemID) {
-		writeError(w, throttleRefusalStatus, "per-op ceiling exceeded; back off and retry")
+		httpjson.Error(w, throttleRefusalStatus, "per-op ceiling exceeded; back off and retry")
 		return
 	}
 
@@ -339,25 +341,6 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, opName op, sco
 	case opFileDownload:
 		s.handleFileDownload(w, scope, body)
 	default:
-		writeError(w, http.StatusNotFound, "unimplemented operation")
+		httpjson.Error(w, http.StatusNotFound, "unimplemented operation")
 	}
-}
-
-// writeJSON writes a 200 JSON response.
-func writeJSON(w http.ResponseWriter, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// errorBody is the JSON shape returned for a non-2xx outcome.
-type errorBody struct {
-	Error string `json:"error"`
-}
-
-// writeError writes a non-2xx JSON error response.
-func writeError(w http.ResponseWriter, status int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(errorBody{Error: msg})
 }

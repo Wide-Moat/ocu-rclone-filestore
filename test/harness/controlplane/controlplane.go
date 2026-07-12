@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"time"
 
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/httpjson"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/jwtmint"
 )
 
@@ -141,7 +142,7 @@ func (s *Server) Mint(filesystemID, intent string, downloadable bool) (string, e
 // handleJWKS serves the verification key set.
 func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "only GET is supported")
+		httpjson.Error(w, http.StatusMethodNotAllowed, "only GET is supported")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -164,16 +165,16 @@ type mintResponse struct {
 // handleMint issues a weak session JWT for the requested filesystem_id.
 func (s *Server) handleMint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "only POST is supported")
+		httpjson.Error(w, http.StatusMethodNotAllowed, "only POST is supported")
 		return
 	}
 	var req mintRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "malformed request body")
+		httpjson.Error(w, http.StatusBadRequest, "malformed request body")
 		return
 	}
 	if req.FilesystemID == "" {
-		writeError(w, http.StatusBadRequest, "filesystem_id is required")
+		httpjson.Error(w, http.StatusBadRequest, "filesystem_id is required")
 		return
 	}
 	intent := req.Intent
@@ -182,22 +183,10 @@ func (s *Server) handleMint(w http.ResponseWriter, r *http.Request) {
 	}
 	tok, err := s.Mint(req.FilesystemID, intent, req.Downloadable)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "mint failed")
+		httpjson.Error(w, http.StatusInternalServerError, "mint failed")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(mintResponse{Token: tok})
-}
-
-// errorBody is the JSON shape returned for a non-2xx outcome.
-type errorBody struct {
-	Error string `json:"error"`
-}
-
-// writeError writes a non-2xx JSON error response.
-func writeError(w http.ResponseWriter, status int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(errorBody{Error: msg})
 }
