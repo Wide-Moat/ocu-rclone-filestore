@@ -9,15 +9,13 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/x509"
-	"encoding/pem"
 	"flag"
 	"fmt"
 	"os"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/controlplane"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/serve"
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/signingkey"
 )
 
 const (
@@ -52,7 +50,7 @@ func mainWith(args []string) error {
 }
 
 func run(addr, certPath, keyPath, signingKeyPath string) error {
-	signingKey, err := loadSigningKey(signingKeyPath)
+	signingKey, err := signingkey.Load(signingKeyPath, "signing key", false)
 	if err != nil {
 		return err
 	}
@@ -71,25 +69,4 @@ func run(addr, certPath, keyPath, signingKeyPath string) error {
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "controlplane: serving mint + JWKS on %s\n", addr)
 	return serve.Run(addr, tlsConf, srv.Handler())
-}
-
-// loadSigningKey reads the PKCS#8 EC signing key PEM harness-init wrote.
-func loadSigningKey(path string) (*ecdsa.PrivateKey, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: path is the harness signing key on the shared volume
-	if err != nil {
-		return nil, fmt.Errorf("read signing key %q: %w", path, err)
-	}
-	block, _ := pem.Decode(raw)
-	if block == nil {
-		return nil, fmt.Errorf("signing key %q is not PEM", path)
-	}
-	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse signing key %q: %w", path, err)
-	}
-	ecKey, ok := key.(*ecdsa.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("signing key %q is not an EC key", path)
-	}
-	return ecKey, nil
 }

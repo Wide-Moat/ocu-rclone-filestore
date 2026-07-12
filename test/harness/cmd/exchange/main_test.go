@@ -24,6 +24,7 @@ import (
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/controlplane"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/localca"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/serve"
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/signingkey"
 )
 
 // leafFiles writes a CA, a localhost leaf, and the CA path into a dir.
@@ -147,10 +148,11 @@ func TestMainWith(t *testing.T) {
 	}
 }
 
-// TestLoadCredentialSigningKey drives every arm of loadCredentialSigningKey: the
-// empty-path ephemeral fallback, a present-and-valid PKCS#8 EC key, and the four
-// failure arms (unreadable path, non-PEM bytes, parseable-but-not-PKCS#8 PEM, and
-// a PKCS#8 key that is not an EC key). Each failure arm must be a hard error, not
+// TestLoadCredentialSigningKey drives every arm of the credential key loader
+// (signingkey.Load with the empty-path fallback allowed): the empty-path
+// ephemeral fallback, a present-and-valid PKCS#8 EC key, and the four failure
+// arms (unreadable path, non-PEM bytes, parseable-but-not-PKCS#8 PEM, and a
+// PKCS#8 key that is not an EC key). Each failure arm must be a hard error, not
 // a silent fallback — a silent fallback would reintroduce the non-restart-durable
 // ephemeral path under a configuration that asked for a persisted key.
 func TestLoadCredentialSigningKey(t *testing.T) {
@@ -159,8 +161,8 @@ func TestLoadCredentialSigningKey(t *testing.T) {
 	// Empty path: the only acceptable (nil, nil) — the caller then generates an
 	// ephemeral key. A non-nil key here would mean an empty flag silently loaded
 	// something.
-	if key, err := loadCredentialSigningKey(""); err != nil || key != nil {
-		t.Fatalf("loadCredentialSigningKey(\"\") = (%v, %v); want (nil, nil) ephemeral fallback", key, err)
+	if key, err := signingkey.Load("", "credential signing key", true); err != nil || key != nil {
+		t.Fatalf("signingkey.Load(empty) = (%v, %v); want (nil, nil) ephemeral fallback", key, err)
 	}
 
 	// A valid persisted PKCS#8 EC key loads and round-trips to the same key.
@@ -176,17 +178,17 @@ func TestLoadCredentialSigningKey(t *testing.T) {
 	if err := os.WriteFile(validPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
 		t.Fatalf("write valid key: %v", err)
 	}
-	got, err := loadCredentialSigningKey(validPath)
+	got, err := signingkey.Load(validPath, "credential signing key", true)
 	if err != nil {
-		t.Fatalf("loadCredentialSigningKey(valid) errored: %v", err)
+		t.Fatalf("signingkey.Load(valid) errored: %v", err)
 	}
 	if got == nil || !got.Equal(want) {
-		t.Fatal("loadCredentialSigningKey did not round-trip the persisted key")
+		t.Fatal("signingkey.Load did not round-trip the persisted key")
 	}
 
 	// A present-but-unreadable path is a hard error, never an ephemeral fallback.
-	if _, err := loadCredentialSigningKey(filepath.Join(dir, "does-not-exist.pem")); err == nil {
-		t.Fatal("loadCredentialSigningKey accepted a missing path; want a hard error")
+	if _, err := signingkey.Load(filepath.Join(dir, "does-not-exist.pem"), "credential signing key", true); err == nil {
+		t.Fatal("signingkey.Load accepted a missing path; want a hard error")
 	}
 
 	// Bytes that are not PEM at all.
@@ -194,8 +196,8 @@ func TestLoadCredentialSigningKey(t *testing.T) {
 	if err := os.WriteFile(nonPEM, []byte("this is not pem"), 0o600); err != nil {
 		t.Fatalf("write non-pem: %v", err)
 	}
-	if _, err := loadCredentialSigningKey(nonPEM); err == nil {
-		t.Fatal("loadCredentialSigningKey accepted non-PEM bytes; want a hard error")
+	if _, err := signingkey.Load(nonPEM, "credential signing key", true); err == nil {
+		t.Fatal("signingkey.Load accepted non-PEM bytes; want a hard error")
 	}
 
 	// PEM that decodes but is not a PKCS#8 private key.
@@ -203,8 +205,8 @@ func TestLoadCredentialSigningKey(t *testing.T) {
 	if err := os.WriteFile(notPKCS8, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("garbage")}), 0o600); err != nil {
 		t.Fatalf("write not-pkcs8: %v", err)
 	}
-	if _, err := loadCredentialSigningKey(notPKCS8); err == nil {
-		t.Fatal("loadCredentialSigningKey accepted PEM that is not a PKCS#8 key; want a hard error")
+	if _, err := signingkey.Load(notPKCS8, "credential signing key", true); err == nil {
+		t.Fatal("signingkey.Load accepted PEM that is not a PKCS#8 key; want a hard error")
 	}
 
 	// A valid PKCS#8 key that is not an EC key (RSA) — the credential issuer needs
@@ -221,7 +223,7 @@ func TestLoadCredentialSigningKey(t *testing.T) {
 	if err := os.WriteFile(notEC, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: rsaDER}), 0o600); err != nil {
 		t.Fatalf("write not-ec: %v", err)
 	}
-	if _, err := loadCredentialSigningKey(notEC); err == nil {
-		t.Fatal("loadCredentialSigningKey accepted a non-EC PKCS#8 key; want a hard error")
+	if _, err := signingkey.Load(notEC, "credential signing key", true); err == nil {
+		t.Fatal("signingkey.Load accepted a non-EC PKCS#8 key; want a hard error")
 	}
 }

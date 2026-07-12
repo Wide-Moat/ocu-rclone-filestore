@@ -18,6 +18,7 @@ import (
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/localca"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/serve"
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/signingkey"
 )
 
 // shared writes a CA, a "localhost" leaf, and a control-plane signing key into a
@@ -84,13 +85,13 @@ func TestControlPlaneRunServesJWKS(t *testing.T) {
 
 func TestLoadSigningKeyErrors(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := loadSigningKey(filepath.Join(dir, "missing")); err == nil {
-		t.Fatal("loadSigningKey accepted a missing path")
+	if _, err := signingkey.Load(filepath.Join(dir, "missing"), "signing key", false); err == nil {
+		t.Fatal("signingkey.Load accepted a missing path")
 	}
 	notPEM := filepath.Join(dir, "not.pem")
 	_ = os.WriteFile(notPEM, []byte("nope"), 0o600)
-	if _, err := loadSigningKey(notPEM); err == nil {
-		t.Fatal("loadSigningKey accepted a non-PEM file")
+	if _, err := signingkey.Load(notPEM, "signing key", false); err == nil {
+		t.Fatal("signingkey.Load accepted a non-PEM file")
 	}
 }
 
