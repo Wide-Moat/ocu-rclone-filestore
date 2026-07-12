@@ -413,7 +413,7 @@ func TestExchangeIssuedCredentialCarriesIntent(t *testing.T) {
 				t.Fatalf("mint weak JWT: %v", err)
 			}
 			resp := exchangeToken(t, ts, weak)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusOK {
 				t.Fatalf("exchange status = %d, want 200", resp.StatusCode)
 			}
