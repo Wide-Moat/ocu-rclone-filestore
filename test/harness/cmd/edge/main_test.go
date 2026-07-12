@@ -25,6 +25,7 @@ import (
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/edgeglue"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/exchange"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/filestore"
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/cmdtest"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/localca"
 )
 
@@ -35,24 +36,6 @@ func leafFiles(t *testing.T, ca *localca.CA, dir string) (certPath, keyPath, caP
 		t.Fatalf("write leaf files: %v", err)
 	}
 	return certPath, keyPath, caPath
-}
-
-func ephemeralAddr(t *testing.T) string {
-	t.Helper()
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
-}
-
-func tlsSrv(t *testing.T, ca *localca.CA, h http.Handler) *httptest.Server {
-	t.Helper()
-	leaf, _ := ca.IssueLeaf([]string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")})
-	srv := httptest.NewUnstartedServer(h)
-	srv.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}, MinVersion: tls.VersionTLS12}
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
-	return srv
 }
 
 // fullChain stands up the control-plane, exchange, and filestore over TLS issued
@@ -67,7 +50,7 @@ func fullChain(t *testing.T, ca *localca.CA) (cp *controlplane.Server, cpJWKS, e
 	if err != nil {
 		t.Fatalf("control-plane: %v", err)
 	}
-	cpSrv := tlsSrv(t, ca, cp.Handler())
+	cpSrv := cmdtest.NewTLSServer(t, ca, cp.Handler())
 	cpJWKS = cpSrv.URL + "/.well-known/jwks.json"
 
 	issuer, err := exchange.NewJWTCredentialIssuer(exchange.CredentialIssuerOptions{
@@ -79,14 +62,14 @@ func fullChain(t *testing.T, ca *localca.CA) (cp *controlplane.Server, cpJWKS, e
 	ex := exchange.MustNewServer(exchange.Options{
 		JWKS: cp, Issuer: cpIssuer, Audience: cpAudience, Credentials: issuer,
 	})
-	exSrv := tlsSrv(t, ca, ex.Handler())
+	exSrv := cmdtest.NewTLSServer(t, ca, ex.Handler())
 	exchangeURL = exSrv.URL + exchange.ExchangePath
 
 	fs := filestore.MustNewServer(filestore.Options{
 		Scopes:      []filestore.Scope{{FilesystemID: "fsrw", Root: t.TempDir(), ReadOnly: false}},
 		Credentials: filestore.JWTCredentialValidator{JWKS: issuer.JWKS(), Issuer: "https://exchange.test", Audience: "filestore"},
 	})
-	fsSrv := tlsSrv(t, ca, fs.Handler())
+	fsSrv := cmdtest.NewTLSServer(t, ca, fs.Handler())
 	upstreamURL = fsSrv.URL
 	return cp, cpJWKS, exchangeURL, upstreamURL
 }
@@ -103,11 +86,11 @@ func TestEdgeRunFullFlow(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath, caPath := leafFiles(t, ca, dir)
 	cp, cpJWKS, exchangeURL, upstreamURL := fullChain(t, ca)
-	addr := ephemeralAddr(t)
+	addr := cmdtest.EphemeralAddr(t)
 
 	go func() { _ = run(addr, certPath, keyPath, caPath, cpJWKS, exchangeURL, upstreamURL) }()
 
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: ca.CertPool(), MinVersion: tls.VersionTLS12}}}
+	client := cmdtest.HTTPClient(ca)
 
 	// Wait until the edge is up: a no-token request returns 401.
 	deadline := time.Now().Add(10 * time.Second)
@@ -158,7 +141,7 @@ func TestEdgeServeHTTPErrorArms(t *testing.T) {
 		t.Fatalf("ca: %v", err)
 	}
 	cp, _, exchangeURL, _ := fullChain(t, ca)
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: ca.CertPool(), MinVersion: tls.VersionTLS12}}}
+	client := cmdtest.HTTPClient(ca)
 
 	// Valid token, but the upstream URL points at nothing reachable: validate and
 	// exchange succeed, the route to the upstream fails -> 502.
@@ -221,7 +204,7 @@ func TestEdgeForwardsOversizedBodyWithoutSilentTruncation(t *testing.T) {
 		t.Fatalf("ca: %v", err)
 	}
 	cp, _, exchangeURL, _ := fullChain(t, ca)
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: ca.CertPool(), MinVersion: tls.VersionTLS12}}}
+	client := cmdtest.HTTPClient(ca)
 
 	// A capturing upstream: it records the exact body length and bytes it receives,
 	// plus the forwarded Authorization, then replies 200.
@@ -380,7 +363,7 @@ func TestEdgeStreamsBodyWithoutFullyBufferingFirst(t *testing.T) {
 		t.Fatalf("ca: %v", err)
 	}
 	cp, _, exchangeURL, _ := fullChain(t, ca)
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: ca.CertPool(), MinVersion: tls.VersionTLS12}}}
+	client := cmdtest.HTTPClient(ca)
 
 	upstreamReading := make(chan struct{})
 	var (
@@ -450,7 +433,7 @@ func TestRunRejectsBadCA(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad-ca.pem")
 	_ = os.WriteFile(bad, []byte("not a cert"), 0o600)
-	if err := run(ephemeralAddr(t), "c", "k", bad,
+	if err := run(cmdtest.EphemeralAddr(t), "c", "k", bad,
 		"https://127.0.0.1:1/jwks", "https://127.0.0.1:1/token", "https://127.0.0.1:1"); err == nil {
 		t.Fatal("run accepted a CA file with no certificate")
 	}

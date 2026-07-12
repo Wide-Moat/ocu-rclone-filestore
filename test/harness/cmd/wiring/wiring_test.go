@@ -20,9 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +30,7 @@ import (
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/edgeglue"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/exchange"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/filestore"
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/cmdtest"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/jwtmint"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/localca"
 )
@@ -119,32 +118,13 @@ type chain struct {
 	rec     *recordingFilestore
 }
 
-// tlsServer starts an httptest TLS server whose serving cert is issued by ca
-// for the given SAN host, and returns it plus a client trusting the CA.
-func tlsServer(t *testing.T, ca *localca.CA, h http.Handler) *httptest.Server {
-	t.Helper()
-	leaf, err := ca.IssueLeaf([]string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")})
-	if err != nil {
-		t.Fatalf("issue leaf: %v", err)
-	}
-	srv := httptest.NewUnstartedServer(h)
-	srv.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}, MinVersion: tls.VersionTLS12}
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
-	return srv
-}
-
-func caClient(ca *localca.CA) *http.Client {
-	return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: ca.CertPool(), MinVersion: tls.VersionTLS12}}}
-}
-
 func newChain(t *testing.T, throttle *filestore.PerOpThrottle) *chain {
 	t.Helper()
 	ca, err := localca.New()
 	if err != nil {
 		t.Fatalf("ca: %v", err)
 	}
-	client := caClient(ca)
+	client := cmdtest.HTTPClient(ca)
 
 	// Control-plane with a stable key.
 	cpKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -170,7 +150,7 @@ func newChain(t *testing.T, throttle *filestore.PerOpThrottle) *chain {
 	exSrv := exchange.MustNewServer(exchange.Options{
 		JWKS: cp, Issuer: cpIssuer, Audience: cpAudience, Credentials: issuer,
 	})
-	exTS := tlsServer(t, ca, exSrv.Handler())
+	exTS := cmdtest.NewTLSServer(t, ca, exSrv.Handler())
 
 	// Filestore peer (validates injected credential against the issuer JWKS).
 	rwDir, roDir, thDir := t.TempDir(), t.TempDir(), t.TempDir()
@@ -185,7 +165,7 @@ func newChain(t *testing.T, throttle *filestore.PerOpThrottle) *chain {
 	}
 	fs := filestore.MustNewServer(fsOpts)
 	rec := &recordingFilestore{delegate: fs.Handler()}
-	fsTS := tlsServer(t, ca, rec)
+	fsTS := cmdtest.NewTLSServer(t, ca, rec)
 
 	// The live serving edge.
 	exchanger, err := edgeglue.New(edgeglue.Options{ExchangeURL: exTS.URL + exchange.ExchangePath, Client: client})
@@ -193,7 +173,7 @@ func newChain(t *testing.T, throttle *filestore.PerOpThrottle) *chain {
 		t.Fatalf("exchanger: %v", err)
 	}
 	edge := &liveEdge{jwks: cp.JWKS(), exchanger: exchanger, upstreamURL: fsTS.URL, upstream: client}
-	edgeTS := tlsServer(t, ca, edge)
+	edgeTS := cmdtest.NewTLSServer(t, ca, edge)
 
 	return &chain{cp: cp, edgeURL: edgeTS.URL, rec: rec}
 }

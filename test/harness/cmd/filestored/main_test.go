@@ -4,17 +4,15 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
-	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/exchange"
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/cmdtest"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/localca"
 )
 
@@ -25,14 +23,6 @@ func leafFiles(t *testing.T, ca *localca.CA, dir string) (certPath, keyPath, caP
 		t.Fatalf("write leaf files: %v", err)
 	}
 	return certPath, keyPath, caPath
-}
-
-func ephemeralAddr(t *testing.T) string {
-	t.Helper()
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	addr := ln.Addr().String()
-	_ = ln.Close()
-	return addr
 }
 
 // startCredentialJWKS serves the exchange's credential JWKS over TLS so the
@@ -49,11 +39,7 @@ func startCredentialJWKS(t *testing.T, ca *localca.CA) string {
 	mux.HandleFunc("/credential-jwks", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(issuer.JWKS())
 	})
-	leaf, _ := ca.IssueLeaf([]string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")})
-	srv := httptest.NewUnstartedServer(mux)
-	srv.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}, MinVersion: tls.VersionTLS12}
-	srv.StartTLS()
-	t.Cleanup(srv.Close)
+	srv := cmdtest.NewTLSServer(t, ca, mux)
 	return srv.URL + "/credential-jwks"
 }
 
@@ -66,13 +52,13 @@ func TestFilestoredRunServes(t *testing.T) {
 	certPath, keyPath, caPath := leafFiles(t, ca, dir)
 	credJWKS := startCredentialJWKS(t, ca)
 	root := filepath.Join(dir, "workspace")
-	addr := ephemeralAddr(t)
+	addr := cmdtest.EphemeralAddr(t)
 
 	go func() { _ = run(addr, certPath, keyPath, caPath, credJWKS, root) }()
 
 	// Poll until the filestore answers. A POST with no credential draws 401,
 	// which proves it is up and validating.
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: ca.CertPool(), MinVersion: tls.VersionTLS12}}}
+	client := cmdtest.HTTPClient(ca)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		resp, err := client.Post("https://"+addr+"/v1/filestore/fs/listDirectory", "application/json", nil)
@@ -102,7 +88,7 @@ func TestRunRejectsBadCA(t *testing.T) {
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "bad-ca.pem")
 	_ = os.WriteFile(bad, []byte("not a cert"), 0o600)
-	if err := run(ephemeralAddr(t), "c", "k", bad, "https://127.0.0.1:1/jwks", filepath.Join(dir, "ws")); err == nil {
+	if err := run(cmdtest.EphemeralAddr(t), "c", "k", bad, "https://127.0.0.1:1/jwks", filepath.Join(dir, "ws")); err == nil {
 		t.Fatal("run accepted a CA file with no certificate")
 	}
 }
