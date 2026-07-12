@@ -132,6 +132,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # This job only reads files and runs the parity script — no git
+          # operations after checkout — so it does not need the token persisted
+          # in the local git config.
+          persist-credentials: false
       - name: Verify the vendored contract against its pin and canon ref
         env:
           OCU_CANON_REF_CHECK: "1"
