@@ -52,7 +52,10 @@ func AssertMainExitsNonZero(t *testing.T, binaryName, runFilter string, mainFn f
 		mainFn()
 		return // unreachable: mainFn exits on the error path
 	}
-	cmd := exec.Command(os.Args[0], "-test.run="+runFilter, "-test.v")
+	// os.Args[0] is this test binary re-executing itself, and runFilter is a
+	// literal test-name anchor supplied by the calling test — neither is
+	// external input, so the re-exec is not a command-injection surface.
+	cmd := exec.Command(os.Args[0], "-test.run="+runFilter, "-test.v") //nolint:gosec // G204: re-exec of the test binary with a test-supplied literal run filter
 	cmd.Env = append(os.Environ(), mainExitGuard+"=1")
 	out, err := cmd.CombinedOutput()
 	var exitErr *exec.ExitError
