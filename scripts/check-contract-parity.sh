@@ -81,7 +81,7 @@ if [[ "${OCU_CANON_REF_CHECK:-}" == "1" ]]; then
   fi
   fetched="$(mktemp)"
   trap 'rm -f "${fetched}"' EXIT
-  if ! curl -fsSL --retry 3 "${CANON_RAW_BASE}/${ref}/${CANON_SCHEMA_PATH}" -o "${fetched}"; then
+  if ! curl -fsSL --retry 3 --connect-timeout 10 --max-time 60 "${CANON_RAW_BASE}/${ref}/${CANON_SCHEMA_PATH}" -o "${fetched}"; then
     echo "error: could not fetch the canon schema at commit ${ref} from the public architecture repository; failing closed (an unreachable pin is a re-bless signal, not a pass)." >&2
     exit 1
   fi
