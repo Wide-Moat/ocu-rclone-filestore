@@ -99,9 +99,11 @@ func NewJWTCredentialIssuerFromKey(priv *ecdsa.PrivateKey, opts CredentialIssuer
 
 // Issue mints a fresh credential JWT bound to filesystemID, carrying the
 // given intent claim (ADR-0029: the engine's claims-bind reads it into a
-// single-intent grant), and returns its compact serialization. An empty intent
-// omits the claim. A signing failure surfaces as an empty string, which the
-// exchange handler treats as no credential (the round trip fails closed).
+// single-intent grant), and returns its compact serialization. The intent
+// claim is always present (present-and-empty for an empty intent); the claims
+// shape carries no omitempty. A signing failure surfaces as an empty string,
+// which the exchange handler treats as no credential (the round trip fails
+// closed).
 func (i *JWTCredentialIssuer) Issue(filesystemID, intent string) string {
 	now := i.now()
 	claims := jwtmint.Claims{
