@@ -277,9 +277,12 @@ func needsReissue(out string, renewBefore time.Duration, now time.Time) (bool, s
 	}
 
 	// Token axis: the weak JWTs are their own artifact with their own lifetime.
+	// A torn, absent, or unparseable token set is not a fatal error here — it is
+	// exactly the state that must trigger a reissue, and `why` already carries the
+	// human-readable cause, so returning (true, why, nil) is deliberate.
 	tokenNotAfter, why, err := weakTokensNotAfter(out)
 	if err != nil {
-		return true, why, nil
+		return true, why, nil //nolint:nilerr // a bad token set means "reissue", not a fatal error
 	}
 	if remaining := tokenNotAfter.Sub(now); remaining < renewBefore {
 		return true, fmt.Sprintf("weak JWT expires in %s (< renew-before %s)", remaining.Round(time.Second), renewBefore), nil
