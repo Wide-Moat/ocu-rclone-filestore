@@ -300,16 +300,38 @@ func TestEdgeForwardsOversizedBodyWithoutSilentTruncation(t *testing.T) {
 	}
 }
 
+// gatedBufferFirstBackstop bounds how long gatedBody withholds its tail from a
+// consumer that never starts the upstream read (a buffer-everything-first edge).
+// It exists ONLY to keep such a broken edge from hanging the test forever, so it
+// is set far above any plausible streaming round trip: the streaming (correct)
+// path releases the tail the instant the upstream begins reading (via the
+// upstreamReading gate, typically within ~1s even on a saturated runner), so it
+// never comes near this backstop. Only a genuinely buffer-first edge — one that
+// drains the whole inbound body before ever contacting the upstream — waits it
+// out, and does so deterministically rather than racing a tight wall-clock
+// budget against a slow-but-correct stream under heavy `-race` compile
+// contention. A generous backstop plus the test-context release below removes
+// that flake vector without weakening the discriminator.
+const gatedBufferFirstBackstop = 30 * time.Second
+
 // gatedBody is an inbound request body whose second half is withheld until the
 // upstream has begun consuming the first half. It emits headChunk, then blocks
-// the next Read on upstreamReading (bounded by a deadline) before emitting
-// tailChunk and EOF. If the wait times out it returns io.ErrUnexpectedEOF so the
-// consumer observes a hard, fast failure rather than hanging.
+// the next Read until one of three things happens: the upstream starts reading
+// (upstreamReading closes — the streaming happy path releases the tail); the test
+// is tearing down (stop closes — the consumer is released so no goroutine leaks
+// past the test); or the buffer-first backstop elapses (a broken buffer-first
+// edge never starts the upstream read, so it is failed fast rather than hung). In
+// the latter two arms it returns io.ErrUnexpectedEOF so the consumer observes a
+// hard failure rather than a silent short read.
 type gatedBody struct {
 	headChunk       []byte
 	tailChunk       []byte
 	upstreamReading <-chan struct{}
-	deadline        time.Duration
+	// stop is closed when the test ends (fed from t.Context().Done()); it
+	// releases a still-blocked Read so a buffer-first edge under test cannot pin a
+	// goroutine past the test. Gating on this lifecycle signal keeps the guard
+	// deterministic instead of racing a wall-clock budget.
+	stop <-chan struct{}
 
 	headDone bool
 	tailDone bool
@@ -327,11 +349,16 @@ func (g *gatedBody) Read(p []byte) (int, error) {
 	if !g.tailDone {
 		// The gate: the tail is only released once the upstream has started
 		// reading. A path that streams r.Body straight to the upstream unblocks
-		// here; a path that must fully buffer r.Body before building the upstream
-		// request deadlocks and trips the deadline.
+		// here as soon as the upstream begins consuming — no wall-clock budget
+		// bounds the correct path, so a slow-but-streaming edge is never spuriously
+		// tripped. A path that must fully buffer r.Body before building the upstream
+		// request never closes upstreamReading, so it waits out the generous
+		// buffer-first backstop (or the test-teardown stop signal) and fails hard.
 		select {
 		case <-g.upstreamReading:
-		case <-time.After(g.deadline):
+		case <-g.stop:
+			return 0, io.ErrUnexpectedEOF
+		case <-time.After(gatedBufferFirstBackstop):
 			return 0, io.ErrUnexpectedEOF
 		}
 		n := copy(p, g.tailChunk)
@@ -403,7 +430,11 @@ func TestEdgeStreamsBodyWithoutFullyBufferingFirst(t *testing.T) {
 		headChunk:       append([]byte{}, head...),
 		tailChunk:       append([]byte{}, tail...),
 		upstreamReading: upstreamReading,
-		deadline:        3 * time.Second,
+		// stop is the test's own lifecycle: t.Context() is cancelled when the test
+		// finishes, releasing a still-blocked Read so a buffer-first edge cannot
+		// leak a goroutine past the test. The correct streaming edge releases via
+		// upstreamReading long before this ever matters.
+		stop: t.Context().Done(),
 	}
 	// Unknown inbound length: a chunked/streamed body is exactly the case a
 	// buffer-first path could not forward faithfully, and it lets the upstream
