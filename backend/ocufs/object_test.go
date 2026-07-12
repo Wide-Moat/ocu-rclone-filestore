@@ -525,3 +525,41 @@ func TestObjectResolveConcurrentNoRace(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// TestMimeTypeResolvesAckOnlyObject verifies that MimeType() on a uuid-less
+// (ack-only) Object with no mime yet triggers the defensive resolve, so a
+// caller that asks for the MIME independently of ModTime/Size (e.g. rclone
+// serve content-type detection) gets the broker-declared type rather than the
+// extension-guess fallback.
+func TestMimeTypeResolvesAckOnlyObject(t *testing.T) {
+	c := &fakeClient{}
+	c.readMetadataResult = func(ctx context.Context, path string) (*brokerrpc.ReadMetadataResponse, error) {
+		return &brokerrpc.ReadMetadataResponse{
+			File: brokerrpc.File{
+				UUID:  "resolved-uuid",
+				Size:  10,
+				Path:  path,
+				Mtime: "2026-05-01T00:00:00Z",
+				MIME:  "text/markdown",
+			},
+		}, nil
+	}
+	f := newTestFsWithRoot(t, c, "/", false)
+
+	// Ack-only shape: no uuid, no mime (as Put/Copy/Move leave it).
+	obj := &Object{fs: f, path: "/docs/readme", remote: "docs/readme"}
+
+	got := obj.MimeType(context.Background())
+	if got != "text/markdown" {
+		t.Errorf("MimeType() = %q, want the broker-declared %q", got, "text/markdown")
+	}
+	if c.readMetadataCount != 1 {
+		t.Errorf("ReadMetadata called %d times, want 1 (the ack-only MIME resolve)", c.readMetadataCount)
+	}
+
+	// A second call must not re-resolve: mime is now populated.
+	_ = obj.MimeType(context.Background())
+	if c.readMetadataCount != 1 {
+		t.Errorf("ReadMetadata called %d times after a second MimeType(), want 1 (no re-resolve once known)", c.readMetadataCount)
+	}
+}

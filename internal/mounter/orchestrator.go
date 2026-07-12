@@ -236,7 +236,14 @@ func (o *orchestrator) buildSpecs(cfg *mountcfg.Config) ([]mountSpec, error) {
 		if m.MemoryStoreID != nil {
 			return nil, fmt.Errorf("mount %q: memory-store mounts are not yet supported (no memory scope axis)", m.Destination)
 		}
-		if _, dup := seen[m.Destination]; dup {
+		// Key the seen-set on the CLEANED destination so normalization-
+		// equivalent paths (e.g. "/mnt/data" and "/mnt/data/") collide here
+		// rather than slipping past both this check (distinct raw keys) and the
+		// nesting check below (identical cleaned paths are neither ancestor nor
+		// descendant of each other), which would let two mounts land on the same
+		// effective destination — the silent shadowing this check exists to stop.
+		cleaned := filepath.Clean(m.Destination)
+		if _, dup := seen[cleaned]; dup {
 			return nil, fmt.Errorf("mount %q: duplicate destination across mounts (a second mount would silently shadow the first)", m.Destination)
 		}
 		// Ancestor/descendant destination pairs are rejected so the pre-mount
@@ -244,14 +251,12 @@ func (o *orchestrator) buildSpecs(cfg *mountcfg.Config) ([]mountSpec, error) {
 		// under a mounted point would make the later guard's walk read broker
 		// content and refuse bringup on any real session file. Checked on the
 		// cleaned paths at a separator boundary, both directions.
-		cleaned := filepath.Clean(m.Destination)
 		for prior := range seen {
-			p := filepath.Clean(prior)
-			if strings.HasPrefix(cleaned, p+string(filepath.Separator)) || strings.HasPrefix(p, cleaned+string(filepath.Separator)) {
+			if strings.HasPrefix(cleaned, prior+string(filepath.Separator)) || strings.HasPrefix(prior, cleaned+string(filepath.Separator)) {
 				return nil, fmt.Errorf("mount %q: destination is nested with %q (the later mount's pre-mount inspection would traverse the earlier live mount)", m.Destination, prior)
 			}
 		}
-		seen[m.Destination] = struct{}{}
+		seen[cleaned] = struct{}{}
 		specs = append(specs, mountSpec{mount: m, readOnly: readOnly, serviceURL: o.serviceURL, caCertPEM: o.caCertPEM})
 	}
 	return specs, nil

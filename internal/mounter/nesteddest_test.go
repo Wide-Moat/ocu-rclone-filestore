@@ -60,3 +60,25 @@ func TestBuildSpecsRejectsNestedDestinations(t *testing.T) {
 		t.Fatalf("buildSpecs = %d specs for two sibling destinations; want 2", len(specs))
 	}
 }
+
+// TestBuildSpecsRejectsNormalizationEquivalentDestinations pins that two mounts
+// whose destinations differ only by normalization (a trailing separator) are
+// rejected as duplicates: they clean to the same effective path, so keying the
+// seen-set on the raw string would let both pass the duplicate check (distinct
+// raw keys) AND the nesting check (identical cleaned paths are neither ancestor
+// nor descendant), landing two mounts on the same destination.
+func TestBuildSpecsRejectsNormalizationEquivalentDestinations(t *testing.T) {
+	o := &orchestrator{
+		seam:       newFake(),
+		readiness:  ReadinessConfig{},
+		signals:    make(chan os.Signal, 1),
+		serviceURL: "https://broker.example",
+		caCertPEM:  "pem",
+	}
+	cfg := &mountcfg.Config{
+		Mounts: []mountcfg.Mount{writableEntry("/mnt/user-data"), writableEntry("/mnt/user-data/")},
+	}
+	if _, err := o.buildSpecs(cfg); err == nil {
+		t.Fatal("buildSpecs accepted /mnt/user-data and /mnt/user-data/ (normalization-equivalent); want a duplicate-destination error")
+	}
+}
