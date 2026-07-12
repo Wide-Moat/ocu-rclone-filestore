@@ -29,17 +29,10 @@ import (
 // leafFiles writes a CA, a localhost leaf, and the CA path into a dir.
 func leafFiles(t *testing.T, ca *localca.CA, dir string) (certPath, keyPath, caPath string) {
 	t.Helper()
-	leaf, err := ca.IssueLeaf([]string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")})
+	certPath, keyPath, caPath, err := ca.WriteLeafFiles(dir)
 	if err != nil {
-		t.Fatalf("leaf: %v", err)
+		t.Fatalf("write leaf files: %v", err)
 	}
-	certPath = filepath.Join(dir, "leaf.cert.pem")
-	keyPath = filepath.Join(dir, "leaf.key.pem")
-	caPath = filepath.Join(dir, "ca.pem")
-	_ = os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Certificate[0]}), 0o600)
-	der, _ := x509.MarshalPKCS8PrivateKey(leaf.PrivateKey.(*ecdsa.PrivateKey))
-	_ = os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600)
-	_ = os.WriteFile(caPath, ca.CertPEM(), 0o600)
 	return certPath, keyPath, caPath
 }
 
