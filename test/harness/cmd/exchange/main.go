@@ -12,10 +12,7 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"flag"
 	"fmt"
 	"net"
@@ -26,6 +23,7 @@ import (
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/exchange"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/jwtmint"
 	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/serve"
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/signingkey"
 )
 
 const (
@@ -104,7 +102,7 @@ func runCtx(ctx context.Context, addr, certPath, keyPath, caPath, cpJWKSURL, cre
 	// JWKS does not desync and reject a valid token after the exchange reboots.
 	// An empty path falls back to an ephemeral generated key (test convenience),
 	// which is explicitly NOT restart-durable.
-	credKey, err := loadCredentialSigningKey(credKeyPath)
+	credKey, err := signingkey.Load(credKeyPath, "credential signing key", true)
 	if err != nil {
 		return err
 	}
@@ -144,32 +142,4 @@ func runCtx(ctx context.Context, addr, certPath, keyPath, caPath, cpJWKSURL, cre
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "exchange: serving token + credential JWKS on %s\n", addr)
 	return serve.RunContext(ctx, addr, tlsConf, mux, onReady)
-}
-
-// loadCredentialSigningKey reads the stable PKCS#8 EC credential signing key
-// harness-init writes to the shared volume. An empty path returns (nil, nil) so
-// the caller falls back to an ephemeral generated key — the only place a missing
-// path is acceptable, since an ephemeral key is not restart-durable. A present
-// but unreadable or malformed path is a hard error, never a silent fallback.
-func loadCredentialSigningKey(path string) (*ecdsa.PrivateKey, error) {
-	if path == "" {
-		return nil, nil
-	}
-	raw, err := os.ReadFile(path) //nolint:gosec // G304: path is the harness credential signing key on the shared volume
-	if err != nil {
-		return nil, fmt.Errorf("read credential signing key %q: %w", path, err)
-	}
-	block, _ := pem.Decode(raw)
-	if block == nil {
-		return nil, fmt.Errorf("credential signing key %q is not PEM", path)
-	}
-	key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse credential signing key %q: %w", path, err)
-	}
-	ecKey, ok := key.(*ecdsa.PrivateKey)
-	if !ok {
-		return nil, fmt.Errorf("credential signing key %q is not an EC key", path)
-	}
-	return ecKey, nil
 }
