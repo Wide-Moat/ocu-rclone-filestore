@@ -5,8 +5,13 @@ package cmdtest
 
 import (
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"testing"
+
+	"github.com/Wide-Moat/ocu-rclone-filestore/test/harness/internal/localca"
 )
 
 // exitingMain models a peer main's error path: it prints the "<name>:" prefixed
@@ -24,4 +29,45 @@ func exitingMain() {
 // assertion on the success path.
 func TestAssertMainExitsNonZero(t *testing.T) {
 	AssertMainExitsNonZero(t, "cmdtestbin", "^TestAssertMainExitsNonZero$", exitingMain)
+}
+
+// TestNewTLSServerAndHTTPClientRoundTrip stands up a CA-served TLS endpoint and
+// proves a client from HTTPClient — trusting only that CA — completes the
+// handshake and reads the body back, covering NewTLSServer and HTTPClient.
+func TestNewTLSServerAndHTTPClientRoundTrip(t *testing.T) {
+	ca, err := localca.New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	srv := NewTLSServer(t, ca, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "ok")
+	}))
+	resp, err := HTTPClient(ca).Get(srv.URL)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != "ok" {
+		t.Fatalf("body = %q; want %q", body, "ok")
+	}
+}
+
+// TestEphemeralAddr checks EphemeralAddr returns a parsable loopback host:port
+// the kernel handed out and then released.
+func TestEphemeralAddr(t *testing.T) {
+	addr := EphemeralAddr(t)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("SplitHostPort(%q): %v", addr, err)
+	}
+	if host != "127.0.0.1" {
+		t.Fatalf("host = %q; want 127.0.0.1", host)
+	}
+	if port == "" || port == "0" {
+		t.Fatalf("port = %q; want a concrete port", port)
+	}
 }
