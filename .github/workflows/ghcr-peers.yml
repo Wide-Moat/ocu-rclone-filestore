@@ -15,10 +15,19 @@ name: ghcr-peers
 #
 # Push to main and tags only: every PR already builds all five images via the
 # network-e2e compose (`up --build` in ci.yml), so a broken peer.Dockerfile
-# reds the PR there. Signing is a per-peer needs:-gated matrix job; the digest
-# crosses jobs as a per-peer artifact because parallel matrix legs overwrite
-# shared job outputs (last-writer-wins) - an artifact per leg cannot collide.
-# No publish trigger exists that skips signing.
+# reds the PR there. Signing is a needs:-gated job; each digest crosses jobs
+# as a per-peer artifact because parallel matrix legs overwrite shared job
+# outputs (last-writer-wins) - an artifact per leg cannot collide. The sign
+# job discovers the digest artifacts BY PATTERN and derives each peer name
+# from the artifact filename, so the peer list exists exactly once (the build
+# matrix): a peer added there is signed automatically - there is no second
+# list to forget, which would be a pushed-but-unsigned image under a green
+# run. No publish trigger exists that skips signing.
+#
+# Partial-failure note: with fail-fast disabled, one red build leg skips the
+# sign job entirely, leaving the OTHER pushed peers unsigned under a RED run
+# (the invariant "unsigned on the registry means a red run" holds). Fix the
+# red leg and RE-RUN THE WORKFLOW so every pushed digest gets its signature.
 
 on:
   push:
@@ -107,10 +116,11 @@ jobs:
           if-no-files-found: error
 
   sign:
-    # Signing is needs:-gated on the pushes and runs per peer: what gets
-    # signed is exactly the digest the matching build leg pushed. The job is
-    # separate from the build so the OIDC token never coexists with the build
-    # steps in one job environment.
+    # Signing is needs:-gated on the pushes: what gets signed is exactly the
+    # set of digests the build legs pushed, discovered by artifact pattern
+    # (one peer list, see the header). The job is separate from the build so
+    # the OIDC token never coexists with the build steps in one job
+    # environment.
     needs: build-push
     runs-on: ubuntu-latest
     permissions:
@@ -121,10 +131,6 @@ jobs:
       # long-lived signing key exists.
       packages: write
       id-token: write
-    strategy:
-      fail-fast: false
-      matrix:
-        peer: [harness-init, controlplane, exchange, filestored, edge]
     steps:
       - name: install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -137,23 +143,34 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: digest-${{ matrix.peer }}
-      - name: cosign keyless sign + SPDX attest - by digest
+          pattern: digest-*
+          merge-multiple: true
+      - name: cosign keyless sign + SPDX attest - every pushed digest
         env:
           REPO: ${{ github.repository }}
-          PEER: ${{ matrix.peer }}
         run: |
           set -euo pipefail
-          digest="$(cat "digest-${PEER}.txt")"
-          # The build leg already refused an empty digest; refuse again here
-          # fail-closed rather than sign a malformed reference.
-          case "$digest" in
-            sha256:*) ;;
-            *) echo "digest artifact for ${PEER} is not a sha256 digest: ${digest}" >&2; exit 1 ;;
-          esac
+          shopt -s nullglob
+          files=(digest-*.txt)
+          # Zero artifacts means no build leg exported a digest - nothing to
+          # sign is a failure, never a pass (every build leg fail-louds its
+          # export and uploads with if-no-files-found: error).
+          [ "${#files[@]}" -gt 0 ] || { echo "no digest artifacts found - nothing was pushed or the exports broke; refuse to green a sign job that signed nothing" >&2; exit 1; }
           # OCI references must be lowercase; github.repository preserves the
           # org's original case.
-          ref="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]')/south-${PEER}@${digest}"
-          cosign sign --yes "$ref"
-          syft "$ref" -o spdx-json > sbom.spdx.json
-          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$ref"
+          repo="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]')"
+          for f in "${files[@]}"; do
+            peer="${f#digest-}"; peer="${peer%.txt}"
+            digest="$(cat "$f")"
+            # The build leg already refused an empty digest; refuse again
+            # fail-closed rather than sign a malformed reference.
+            case "$digest" in
+              sha256:*) ;;
+              *) echo "digest artifact for ${peer} is not a sha256 digest: ${digest}" >&2; exit 1 ;;
+            esac
+            ref="${repo}/south-${peer}@${digest}"
+            echo "--- signing ${ref}"
+            cosign sign --yes "$ref"
+            syft "$ref" -o spdx-json > "sbom-${peer}.spdx.json"
+            cosign attest --yes --type spdxjson --predicate "sbom-${peer}.spdx.json" "$ref"
+          done
