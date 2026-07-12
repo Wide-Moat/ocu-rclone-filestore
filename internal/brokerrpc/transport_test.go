@@ -4,17 +4,14 @@
 package brokerrpc
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/pem"
 	"io"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
+
+	"github.com/Wide-Moat/ocu-rclone-filestore/internal/testca"
 )
 
 // certPEMOf returns the PEM-encoded leaf certificate of an httptest TLS server.
@@ -33,24 +30,14 @@ func certPEMOf(t *testing.T, srv *httptest.Server) []byte {
 // server, used to prove that an edge presenting an untrusted chain is rejected.
 func unrelatedCAPEM(t *testing.T) []byte {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	raw, err := testca.PEM(testca.Options{
+		CommonName: "unrelated-test-ca",
+		KeyUsage:   x509.KeyUsageCertSign,
+	})
 	if err != nil {
-		t.Fatalf("generate key: %v", err)
+		t.Fatalf("mint CA: %v", err)
 	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "unrelated-test-ca"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("create certificate: %v", err)
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	return raw
 }
 
 // TestHTTPSTransportTrustsSuppliedCA verifies that a transport built from a
