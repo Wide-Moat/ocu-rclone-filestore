@@ -300,6 +300,129 @@ func TestEdgeForwardsOversizedBodyWithoutSilentTruncation(t *testing.T) {
 	}
 }
 
+// gatedBody is an inbound request body whose second half is withheld until the
+// upstream has begun consuming the first half. It emits headChunk, then blocks
+// the next Read on upstreamReading (bounded by a deadline) before emitting
+// tailChunk and EOF. If the wait times out it returns io.ErrUnexpectedEOF so the
+// consumer observes a hard, fast failure rather than hanging.
+type gatedBody struct {
+	headChunk       []byte
+	tailChunk       []byte
+	upstreamReading <-chan struct{}
+	deadline        time.Duration
+
+	headDone bool
+	tailDone bool
+}
+
+func (g *gatedBody) Read(p []byte) (int, error) {
+	if !g.headDone {
+		n := copy(p, g.headChunk)
+		g.headChunk = g.headChunk[n:]
+		if len(g.headChunk) == 0 {
+			g.headDone = true
+		}
+		return n, nil
+	}
+	if !g.tailDone {
+		// The gate: the tail is only released once the upstream has started
+		// reading. A path that streams r.Body straight to the upstream unblocks
+		// here; a path that must fully buffer r.Body before building the upstream
+		// request deadlocks and trips the deadline.
+		select {
+		case <-g.upstreamReading:
+		case <-time.After(g.deadline):
+			return 0, io.ErrUnexpectedEOF
+		}
+		n := copy(p, g.tailChunk)
+		g.tailChunk = g.tailChunk[n:]
+		if len(g.tailChunk) == 0 {
+			g.tailDone = true
+		}
+		return n, nil
+	}
+	return 0, io.EOF
+}
+
+func (g *gatedBody) Close() error { return nil }
+
+// TestEdgeStreamsBodyWithoutFullyBufferingFirst is the red-first guard for
+// F-40/F-41: it distinguishes a streaming forward from a buffer-everything-first
+// forward by ordering, not by size (a size-based test cannot go red against the
+// old 1 GiB in-memory cap without allocating a gigabyte). The inbound body
+// withholds its tail until the upstream has begun reading. The streaming edge
+// hands r.Body straight to the upstream, so the upstream reads the head, which
+// releases the tail, and the full body arrives. A buffer-first edge must drain
+// the whole inbound body before it ever builds the upstream request, so the tail
+// is never released, the body reader trips its deadline, and the forward fails —
+// exactly the class of silent-truncation/stall the cap-and-buffer form caused.
+func TestEdgeStreamsBodyWithoutFullyBufferingFirst(t *testing.T) {
+	ca, err := localca.New()
+	if err != nil {
+		t.Fatalf("ca: %v", err)
+	}
+	cp, _, exchangeURL, _ := fullChain(t, ca)
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: ca.CertPool(), MinVersion: tls.VersionTLS12}}}
+
+	upstreamReading := make(chan struct{})
+	var (
+		gotBody   []byte
+		signalled bool
+	)
+	capturing := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Signal the moment the upstream starts consuming the body: read the first
+		// byte, close the gate channel, then drain the rest.
+		buf := make([]byte, 1)
+		n, _ := r.Body.Read(buf)
+		if n > 0 && !signalled {
+			signalled = true
+			close(upstreamReading)
+		}
+		rest, _ := io.ReadAll(r.Body)
+		gotBody = append(append([]byte{}, buf[:n]...), rest...)
+		w.WriteHeader(http.StatusOK)
+	}))
+	leaf, _ := ca.IssueLeaf([]string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")})
+	capturing.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}, MinVersion: tls.VersionTLS12}
+	capturing.StartTLS()
+	t.Cleanup(capturing.Close)
+
+	exchanger, err := edgeglue.New(edgeglue.Options{ExchangeURL: exchangeURL, Client: client})
+	if err != nil {
+		t.Fatalf("exchanger: %v", err)
+	}
+	e := &edge{jwks: cp.JWKS(), exchanger: exchanger, upstreamURL: capturing.URL, upstream: client}
+
+	weak, err := cp.Mint("fsrw", "write", false)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	head := []byte("HEADMARK-first-half-of-the-inbound-body-")
+	tail := []byte("-second-half-of-the-inbound-body-TAILMARK")
+	body := &gatedBody{
+		headChunk:       append([]byte{}, head...),
+		tailChunk:       append([]byte{}, tail...),
+		upstreamReading: upstreamReading,
+		deadline:        3 * time.Second,
+	}
+	// Unknown inbound length: a chunked/streamed body is exactly the case a
+	// buffer-first path could not forward faithfully, and it lets the upstream
+	// start reading as soon as the first chunk arrives.
+	req := httptest.NewRequest(http.MethodPost, "/v1/filestore/fs/fileUpload", body)
+	req.ContentLength = -1
+	req.Header.Set("Authorization", "Bearer "+weak)
+	w := httptest.NewRecorder()
+	e.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("streamed forward returned %d, want 200 (a buffer-first edge stalls on the withheld tail)", w.Code)
+	}
+	want := string(head) + string(tail)
+	if string(gotBody) != want {
+		t.Fatalf("upstream body = %q, want %q (streaming forward incomplete)", string(gotBody), want)
+	}
+}
+
 // TestRunRejectsBadCA covers the CAClient error arm of run.
 func TestRunRejectsBadCA(t *testing.T) {
 	dir := t.TempDir()
