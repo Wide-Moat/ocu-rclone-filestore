@@ -125,10 +125,23 @@ func (o *Object) Storable() bool { return true }
 // implementing the optional fs.MimeTyper interface that the advertised
 // ReadMimeType feature promises. The mime is decoded and stored on every
 // constructor path (listing entries and metadata lookups); on the ack-only
-// path resolve() populates it exactly as it populates mtime. An empty string
-// is the correct "unknown" answer per rclone convention — the core then falls
-// back to extension-based guessing — so no wire call is issued here.
+// path (a uuid-less Put/Copy/Move object with no mime yet) it triggers the
+// same defensive resolve() ModTime uses, since rclone may call MimeType
+// independently of ModTime/Size. Once mime is known (or resolve fails), an
+// empty string is the correct "unknown" answer per rclone convention — the
+// core then falls back to extension-based guessing.
 func (o *Object) MimeType(ctx context.Context) string {
+	o.mu.Lock()
+	unresolved := o.uuid == "" && o.mime == ""
+	o.mu.Unlock()
+	if unresolved {
+		// rclone calls MimeType independently of ModTime/Size (e.g. serve
+		// http/webdav content-type detection), so an ack-only object built by
+		// Put/Copy/Move must resolve here too, exactly as ModTime does, or the
+		// first MIME lookup falls back to extension guessing instead of the
+		// broker-declared type.
+		_ = o.resolve(ctx) // best-effort; return whatever we have
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.mime
