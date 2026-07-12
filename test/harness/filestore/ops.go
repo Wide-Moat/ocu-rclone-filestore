@@ -305,8 +305,13 @@ func resolveSrcDst(scope Scope, sd srcDstBody) (srcAbs, dstAbs string, status in
 	return srcAbs, dstAbs, 0, ""
 }
 
-// handleCopyFile copies source to destination, honouring overwrite_existing.
-func (s *Server) handleCopyFile(w http.ResponseWriter, scope Scope, body commonBody) {
+// applySrcDstOp runs the shared copy/move preamble — decode the
+// source/destination body, resolve both under the scope, refuse to clobber an
+// existing destination unless overwrite_existing is set (409), and create the
+// destination parent — then invokes op(srcAbs, dstAbs). It writes the same error
+// responses the individual handlers wrote inline and an empty 200 on success, so
+// the three ops differ only in their terminal filesystem action.
+func (s *Server) applySrcDstOp(w http.ResponseWriter, scope Scope, body commonBody, op func(srcAbs, dstAbs string) error) {
 	sd, err := srcDstFromBody(body)
 	if err != nil {
 		httpjson.Error(w, http.StatusBadRequest, "malformed body")
@@ -327,11 +332,16 @@ func (s *Server) handleCopyFile(w http.ResponseWriter, scope Scope, body commonB
 		httpjson.Error(w, http.StatusInternalServerError, fmt.Sprintf("mkdir parent failed: %v", mkErr))
 		return
 	}
-	if cErr := copyFileContents(srcAbs, dstAbs); cErr != nil {
-		writeMetaError(w, cErr)
+	if opErr := op(srcAbs, dstAbs); opErr != nil {
+		writeMetaError(w, opErr)
 		return
 	}
 	httpjson.OK(w, struct{}{})
+}
+
+// handleCopyFile copies source to destination, honouring overwrite_existing.
+func (s *Server) handleCopyFile(w http.ResponseWriter, scope Scope, body commonBody) {
+	s.applySrcDstOp(w, scope, body, copyFileContents)
 }
 
 // copyFileContents streams src to dst so a large file copy does not read the
@@ -356,31 +366,7 @@ func copyFileContents(srcAbs, dstAbs string) error {
 
 // handleMoveFile moves source to destination, honouring overwrite_existing.
 func (s *Server) handleMoveFile(w http.ResponseWriter, scope Scope, body commonBody) {
-	sd, err := srcDstFromBody(body)
-	if err != nil {
-		httpjson.Error(w, http.StatusBadRequest, "malformed body")
-		return
-	}
-	srcAbs, dstAbs, status, msg := resolveSrcDst(scope, sd)
-	if status != 0 {
-		httpjson.Error(w, status, msg)
-		return
-	}
-	if !sd.OverwriteExisting {
-		if _, statErr := os.Stat(dstAbs); statErr == nil {
-			httpjson.Error(w, http.StatusConflict, "destination exists")
-			return
-		}
-	}
-	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o750); mkErr != nil {
-		httpjson.Error(w, http.StatusInternalServerError, fmt.Sprintf("mkdir parent failed: %v", mkErr))
-		return
-	}
-	if rErr := os.Rename(srcAbs, dstAbs); rErr != nil {
-		writeMetaError(w, rErr)
-		return
-	}
-	httpjson.OK(w, struct{}{})
+	s.applySrcDstOp(w, scope, body, os.Rename)
 }
 
 // handleMoveDirectory moves the directory at source to destination. Like
@@ -388,29 +374,5 @@ func (s *Server) handleMoveFile(w http.ResponseWriter, scope Scope, body commonB
 // overwrite_existing is set, returning 409 Conflict — without this a move onto a
 // present path would silently replace it.
 func (s *Server) handleMoveDirectory(w http.ResponseWriter, scope Scope, body commonBody) {
-	sd, err := srcDstFromBody(body)
-	if err != nil {
-		httpjson.Error(w, http.StatusBadRequest, "malformed body")
-		return
-	}
-	srcAbs, dstAbs, status, msg := resolveSrcDst(scope, sd)
-	if status != 0 {
-		httpjson.Error(w, status, msg)
-		return
-	}
-	if !sd.OverwriteExisting {
-		if _, statErr := os.Stat(dstAbs); statErr == nil {
-			httpjson.Error(w, http.StatusConflict, "destination exists")
-			return
-		}
-	}
-	if mkErr := os.MkdirAll(filepath.Dir(dstAbs), 0o750); mkErr != nil {
-		httpjson.Error(w, http.StatusInternalServerError, fmt.Sprintf("mkdir parent failed: %v", mkErr))
-		return
-	}
-	if rErr := os.Rename(srcAbs, dstAbs); rErr != nil {
-		writeMetaError(w, rErr)
-		return
-	}
-	httpjson.OK(w, struct{}{})
+	s.applySrcDstOp(w, scope, body, os.Rename)
 }
