@@ -1,0 +1,159 @@
+# SPDX-License-Identifier: FSL-1.1-Apache-2.0
+# Copyright (c) 2025 Open Computer Use Contributors
+name: ghcr-peers
+
+# Publishes the five south-face peer images the fleet assembly runs
+# (harness-init, control-plane, exchange, filestored, edge - one
+# deploy/compose/peer.Dockerfile, a different CMD_PKG main per image) to GHCR
+# and signs each in the same run. Until this workflow existed the fleet built
+# them from a sibling checkout: unpullable, unreproducible, unsigned.
+#
+# These are the HARNESS peers under test/harness (see the Dockerfile header) -
+# they are what the assembled application's south leg actually boots today.
+# Publishing them makes that fact pullable and attestable; it does not promote
+# them to a component contract.
+#
+# Push to main and tags only: every PR already builds all five images via the
+# network-e2e compose (`up --build` in ci.yml), so a broken peer.Dockerfile
+# reds the PR there. Signing is a per-peer needs:-gated matrix job; the digest
+# crosses jobs as a per-peer artifact because parallel matrix legs overwrite
+# shared job outputs (last-writer-wins) - an artifact per leg cannot collide.
+# No publish trigger exists that skips signing.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghcr-peers-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # packages:write only here, only for the registry push.
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - peer: harness-init
+            cmd_pkg: ./test/harness/cmd/harness-init
+          - peer: controlplane
+            cmd_pkg: ./test/harness/cmd/controlplane
+          - peer: exchange
+            cmd_pkg: ./test/harness/cmd/exchange
+          - peer: filestored
+            cmd_pkg: ./test/harness/cmd/filestored
+          - peer: edge
+            cmd_pkg: ./test/harness/cmd/edge
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: derive the image tags and OCI labels
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          # Nested GHCR name: <repo>/south-<peer>; metadata-action lowercases it.
+          images: ghcr.io/${{ github.repository }}/south-${{ matrix.peer }}
+          tags: |
+            type=ref,event=branch
+            # Extract a v* tag name verbatim (no semver pattern assumption).
+            type=match,pattern=v(.*),group=1
+            type=sha,format=long
+      - name: build and push linux/amd64 + linux/arm64
+        id: push
+        # peer.Dockerfile compiles CMD_PKG natively per platform (no
+        # cross-compile stage), so arm64 builds under QEMU - slow but off the
+        # PR hot path; the layer cache below the final compile is shared.
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: deploy/compose/peer.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            CMD_PKG=${{ matrix.cmd_pkg }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - name: export the pushed digest for the sign job
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Fail loudly HERE if the push produced no digest - the sign leg
+          # must never be skipped because its input artifact was empty.
+          [ -n "$DIGEST" ] || { echo "the push step exported no digest" >&2; exit 1; }
+          printf '%s' "$DIGEST" > "digest-${{ matrix.peer }}.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.peer }}
+          path: digest-${{ matrix.peer }}.txt
+          if-no-files-found: error
+
+  sign:
+    # Signing is needs:-gated on the pushes and runs per peer: what gets
+    # signed is exactly the digest the matching build leg pushed. The job is
+    # separate from the build so the OIDC token never coexists with the build
+    # steps in one job environment.
+    needs: build-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # packages:write lets cosign push the signature and the SBOM
+      # attestation next to the image; id-token:write mints the OIDC token
+      # keyless signing exchanges for a short-lived Fulcio certificate - no
+      # long-lived signing key exists.
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        peer: [harness-init, controlplane, exchange, filestored, edge]
+    steps:
+      - name: install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: install syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: digest-${{ matrix.peer }}
+      - name: cosign keyless sign + SPDX attest - by digest
+        env:
+          REPO: ${{ github.repository }}
+          PEER: ${{ matrix.peer }}
+        run: |
+          set -euo pipefail
+          digest="$(cat "digest-${PEER}.txt")"
+          # The build leg already refused an empty digest; refuse again here
+          # fail-closed rather than sign a malformed reference.
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "digest artifact for ${PEER} is not a sha256 digest: ${digest}" >&2; exit 1 ;;
+          esac
+          # OCI references must be lowercase; github.repository preserves the
+          # org's original case.
+          ref="ghcr.io/$(echo "$REPO" | tr '[:upper:]' '[:lower:]')/south-${PEER}@${digest}"
+          cosign sign --yes "$ref"
+          syft "$ref" -o spdx-json > sbom.spdx.json
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$ref"
