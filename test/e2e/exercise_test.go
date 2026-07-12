@@ -471,6 +471,42 @@ func TestE2EExercise(t *testing.T) {
 				"(the bytes must have traversed the broker fileDownload path, not a cache)",
 				mountBPath, len(got), len(coldData))
 		}
+
+		// Cold RANGED read (offset > 0) of the SAME cold object through a fresh
+		// handle on mount B. The full read above proved mount B can see and
+		// download this object, and mount B never wrote it, so a read at a
+		// mid-file window can only be served by the broker's ranged
+		// fileDownload (DownloadRange) — not a warm write-back cache. Asserting
+		// the returned bytes are the requested WINDOW is the case a broker that
+		// ignored the offset (streaming from byte 0) would silently corrupt and
+		// the mount now fails closed on. Reusing coldData avoids a second
+		// eventual-consistency race: mount B holds its listing for the full
+		// dir_cache window (3600s here), so a freshly-written NEW name would not
+		// reappear on mount B within the test budget. coldData is 64 KiB, so a
+		// window starting well past byte 0 stays in range.
+		const rOff = 32 << 10 // 32 KiB in — unambiguously past byte 0
+		const rN = 8192
+		if rOff+rN > len(coldData) {
+			t.Fatalf("test setup: ranged window %d+%d exceeds cold object size %d", rOff, rN, len(coldData))
+		}
+		rf, err := os.Open(mountBPath)
+		if err != nil {
+			t.Fatalf("open cold object for a ranged read on mount B: %v", err)
+		}
+		defer func() { _ = rf.Close() }()
+		rbuf := make([]byte, rN)
+		rn, err := rf.ReadAt(rbuf, rOff)
+		if err != nil {
+			t.Fatalf("cold ranged read at offset %d on mount B: %v", rOff, err)
+		}
+		if rn != rN {
+			t.Fatalf("cold ranged read short: got %d want %d", rn, rN)
+		}
+		if !bytes.Equal(rbuf, coldData[rOff:rOff+rN]) {
+			t.Fatalf("cold ranged read at offset %d returned the wrong window: the broker "+
+				"served bytes that are not [%d,%d) — an offset-ignoring download would look "+
+				"exactly like this", rOff, rOff, rOff+rN)
+		}
 	})
 
 	// Step 12 — throttle fires, caller-retry recovers byte-identical (SC2).
