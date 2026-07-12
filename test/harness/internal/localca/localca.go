@@ -28,6 +28,8 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -141,6 +143,37 @@ func (c *CA) IssueLeaf(dnsNames []string, ipAddrs []net.IP) (tls.Certificate, er
 		PrivateKey:  leafKey,
 		Leaf:        mustParse(der),
 	}, nil
+}
+
+// WriteLeafFiles issues a localhost serving leaf and writes three PEM files into
+// dir: the leaf certificate, its PKCS#8 private key, and the CA certificate. It
+// returns their paths so a caller can point a peer's TLS flags at on-disk key
+// material. The leaf carries 127.0.0.1 and ::1 so a client dialing loopback
+// verifies it against the CA.
+func (c *CA) WriteLeafFiles(dir string) (certPath, keyPath, caPath string, err error) {
+	leaf, err := c.IssueLeaf([]string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")})
+	if err != nil {
+		return "", "", "", fmt.Errorf("localca: issue leaf: %w", err)
+	}
+	certPath = filepath.Join(dir, "leaf.cert.pem")
+	keyPath = filepath.Join(dir, "leaf.key.pem")
+	caPath = filepath.Join(dir, "ca.pem")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Certificate[0]})
+	if err = os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		return "", "", "", fmt.Errorf("localca: write leaf cert: %w", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(leaf.PrivateKey.(*ecdsa.PrivateKey))
+	if err != nil {
+		return "", "", "", fmt.Errorf("localca: marshal leaf key: %w", err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	if err = os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		return "", "", "", fmt.Errorf("localca: write leaf key: %w", err)
+	}
+	if err = os.WriteFile(caPath, c.CertPEM(), 0o600); err != nil {
+		return "", "", "", fmt.Errorf("localca: write CA: %w", err)
+	}
+	return certPath, keyPath, caPath, nil
 }
 
 // CertPool returns an x509.CertPool containing only this CA, suitable for a

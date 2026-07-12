@@ -8,6 +8,8 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -188,6 +190,60 @@ func TestCertPoolTrustsOnlyTheCA(t *testing.T) {
 	badLeaf, _ := x509.ParseCertificate(bad.Certificate[0])
 	if _, err := badLeaf.Verify(x509.VerifyOptions{Roots: pool, DNSName: "host"}); err == nil {
 		t.Fatal("leaf from an unrelated CA verified against the pool; the pool must trust only its own CA")
+	}
+}
+
+// TestWriteLeafFilesLandsThreeParsablePEMs checks WriteLeafFiles writes a leaf
+// cert, its key, and the CA into dir, and that each file is a parsable PEM: the
+// cert and CA parse as certificates and the key parses as a PKCS#8 EC key.
+func TestWriteLeafFilesLandsThreeParsablePEMs(t *testing.T) {
+	ca, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	dir := t.TempDir()
+	certPath, keyPath, caPath, err := ca.WriteLeafFiles(dir)
+	if err != nil {
+		t.Fatalf("WriteLeafFiles: %v", err)
+	}
+	for _, tc := range []struct {
+		path, kind string
+	}{
+		{certPath, "CERTIFICATE"},
+		{keyPath, "PRIVATE KEY"},
+		{caPath, "CERTIFICATE"},
+	} {
+		raw, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.path, err)
+		}
+		block, _ := pem.Decode(raw)
+		if block == nil || block.Type != tc.kind {
+			t.Fatalf("%s did not decode to a %s PEM block", tc.path, tc.kind)
+		}
+		switch tc.kind {
+		case "CERTIFICATE":
+			if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+				t.Fatalf("parse certificate at %s: %v", tc.path, err)
+			}
+		case "PRIVATE KEY":
+			if _, err := x509.ParsePKCS8PrivateKey(block.Bytes); err != nil {
+				t.Fatalf("parse key at %s: %v", tc.path, err)
+			}
+		}
+	}
+}
+
+// TestWriteLeafFilesSurfacesAWriteError checks WriteLeafFiles returns the write
+// error rather than swallowing it when the target directory does not exist.
+func TestWriteLeafFilesSurfacesAWriteError(t *testing.T) {
+	ca, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	if _, _, _, err := ca.WriteLeafFiles(missing); err == nil {
+		t.Fatal("WriteLeafFiles into a missing directory returned nil; want a write error")
 	}
 }
 
