@@ -395,7 +395,8 @@ func decodeJWTPayload(t *testing.T, tok string) map[string]any {
 // TestExchangeIssuedCredentialCarriesIntent pins the ADR-0029 seam: the intent
 // claim minted on the weak session JWT survives the exchange onto the issued
 // real credential, so the engine's claims-bind mode sees a single-intent grant
-// per mount. A weak JWT without an intent yields a credential without one.
+// per mount. A weak JWT with an empty intent yields a credential whose intent
+// claim is present and empty (the claims shape carries no omitempty).
 func TestExchangeIssuedCredentialCarriesIntent(t *testing.T) {
 	cp, ts := newJWTPaired(t)
 
@@ -405,7 +406,7 @@ func TestExchangeIssuedCredentialCarriesIntent(t *testing.T) {
 	}{
 		{name: "write intent propagates", intent: "write"},
 		{name: "read intent propagates", intent: "read"},
-		{name: "absent intent stays absent", intent: ""},
+		{name: "empty intent carries an empty claim", intent: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			weak, err := cp.Mint("fsrw", tc.intent, false)
@@ -424,7 +425,16 @@ func TestExchangeIssuedCredentialCarriesIntent(t *testing.T) {
 				t.Fatalf("decode response: %v", err)
 			}
 			claims := decodeJWTPayload(t, body.AccessToken)
-			got, _ := claims["intent"].(string)
+			// The intent claim carries no omitempty, so it is always present on
+			// the issued credential — present-and-empty for an empty intent, not
+			// absent. Assert presence separately from value so the empty case
+			// verifies the real key-present-empty contract instead of collapsing
+			// an absent key and an empty string into the same "".
+			raw, present := claims["intent"]
+			if !present {
+				t.Fatalf("issued credential omits the intent claim; the exchange must always carry it (present-and-empty for an empty intent)")
+			}
+			got, _ := raw.(string)
 			if got != tc.intent {
 				t.Fatalf("issued credential intent = %q, want %q (the exchange must carry the weak JWT's minted claim)", got, tc.intent)
 			}
