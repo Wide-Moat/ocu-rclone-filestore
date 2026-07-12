@@ -6,14 +6,10 @@
 package mounter
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
-	"math/big"
 	"testing"
-	"time"
+
+	"github.com/Wide-Moat/ocu-rclone-filestore/internal/testca"
 )
 
 // validCAPEM mints a self-signed CA certificate and returns it PEM-encoded.
@@ -24,22 +20,12 @@ import (
 // mount options without contacting any edge.
 func validCAPEM(t *testing.T) string {
 	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	raw, err := testca.PEM(testca.Options{
+		CommonName: "ocufs-unit-test-ca",
+		KeyUsage:   x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	})
 	if err != nil {
-		t.Fatalf("generate key: %v", err)
+		t.Fatalf("mint CA: %v", err)
 	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "ocufs-unit-test-ca"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("create certificate: %v", err)
-	}
-	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	return string(raw)
 }
