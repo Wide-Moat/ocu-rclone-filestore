@@ -264,3 +264,44 @@ func TestBuildOcufsConfigmapMemoryStoreIsHardError(t *testing.T) {
 		t.Errorf("error = %q; want it to name the memory-store axis", err.Error())
 	}
 }
+
+// TestBuildVFSOptionsWriteBackSet proves a configured vfs_write_back maps onto
+// opt.WriteBack (the #189 async-flush knob): "1s" -> 1 second. RED-probes the
+// mapping -- if the opt.WriteBack assignment is dropped, WriteBack stays at the
+// registered 5s default and this fails.
+func TestBuildVFSOptionsWriteBackSet(t *testing.T) {
+	m := writableMount()
+	m.VfsWriteBack = "1s"
+	opt, err := buildVFSOptions(m, false)
+	if err != nil {
+		t.Fatalf("buildVFSOptions: %v", err)
+	}
+	if want := fs.Duration(time.Second); opt.WriteBack != want {
+		t.Errorf("WriteBack = %v; want %v (vfs_write_back=1s must map onto opt.WriteBack)", opt.WriteBack, want)
+	}
+}
+
+// TestBuildVFSOptionsWriteBackDefault proves an ABSENT vfs_write_back leaves
+// opt.WriteBack at the registered rclone default (5s) -- the additive/optional
+// contract: an existing config that omits the knob is unchanged.
+func TestBuildVFSOptionsWriteBackDefault(t *testing.T) {
+	m := writableMount() // no VfsWriteBack set
+	opt, err := buildVFSOptions(m, false)
+	if err != nil {
+		t.Fatalf("buildVFSOptions: %v", err)
+	}
+	if opt.WriteBack != vfscommon.Opt.WriteBack {
+		t.Errorf("WriteBack = %v; want the registered default %v (absent vfs_write_back must not change it)",
+			opt.WriteBack, vfscommon.Opt.WriteBack)
+	}
+}
+
+// TestBuildVFSOptionsWriteBackMalformed proves a non-empty but unparseable
+// vfs_write_back is a hard error, not a silent fallback.
+func TestBuildVFSOptionsWriteBackMalformed(t *testing.T) {
+	m := writableMount()
+	m.VfsWriteBack = "not-a-duration"
+	if _, err := buildVFSOptions(m, false); err == nil {
+		t.Fatalf("buildVFSOptions with a malformed vfs_write_back = nil error; want a parse error")
+	}
+}

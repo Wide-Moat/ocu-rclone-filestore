@@ -60,6 +60,19 @@ func buildVFSOptions(m mountcfg.Mount, readOnly bool) (vfscommon.Options, error)
 	}
 	opt.DirCacheTime = fs.Duration(time.Duration(seconds) * time.Second)
 
+	// vfs_write_back: the delay before the VFS writes a dirty file back to the broker.
+	// Empty leaves opt.WriteBack at the registered default (5s) -- the value that sets
+	// the ~5s cross-context read-after-write window on the outputs mount. A deployment
+	// that wants a tighter window sets a small duration (e.g. "1s"); it never maps 0
+	// (the object store is async, so 0 would just spin per-write uploads).
+	if m.VfsWriteBack != "" {
+		var wb fs.Duration
+		if err := wb.Set(m.VfsWriteBack); err != nil {
+			return vfscommon.Options{}, fmt.Errorf("vfs_write_back %q: %w", m.VfsWriteBack, err)
+		}
+		opt.WriteBack = wb
+	}
+
 	var dirPerms vfscommon.FileMode
 	if err := dirPerms.Set(m.DirPerms); err != nil {
 		return vfscommon.Options{}, fmt.Errorf("dir_perms %q: %w", m.DirPerms, err)
