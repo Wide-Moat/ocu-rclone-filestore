@@ -32,6 +32,13 @@ type Mount struct {
 	VfsCacheMaxSize string  `json:"vfs_cache_max_size"`
 	DirPerms        string  `json:"dir_perms"`
 	FilePerms       string  `json:"file_perms"`
+	// VfsWriteBack is the rclone vfs_write_back delay (a duration string, e.g. "1s"):
+	// how long the VFS holds a dirty file before writing it back to the broker. Absent
+	// (empty) inherits rclone's registered default (5s). A smaller value on the outputs
+	// mount shrinks the cross-context read-after-write window (the async-flush latency);
+	// it cannot be 0 (an object store is inherently async). Additive/optional so an
+	// existing config that omits it is unchanged.
+	VfsWriteBack string `json:"vfs_write_back,omitempty"`
 }
 
 // Config is the guest mount config. It carries the top-level trust anchor
