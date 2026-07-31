@@ -18,10 +18,14 @@
 # where the common vulnerable dependencies (the golang.org/x/* set, the git
 # libraries, and similar) publish their advisories at HIGH, not CRITICAL. Gating
 # on CRITICAL alone let a HIGH-severity dependency vulnerability pass the gate
-# unblocked. Blocking on CRITICAL,HIGH restores real SCA coverage. The job name
-# below is kept verbatim ("CRITICAL blocks") so the branch-protection required
-# status-check context still matches; the threshold it enforces is now
-# CRITICAL,HIGH.
+# unblocked. Blocking on CRITICAL,HIGH restores real SCA coverage.
+#
+# The job name states that threshold. Renaming a job is not a cosmetic edit here:
+# branch protection matches required checks by the literal name string, so a
+# rename stops the required context being reported at all -- not failed, absent --
+# and every open pull request waits forever on a check that no longer exists. The
+# name and the protection contexts were therefore changed together, and any future
+# rename has to travel with the same paired edit.
 
 name: sca
 
@@ -35,7 +39,7 @@ permissions:
 
 jobs:
   trivy:
-    name: trivy fs (CRITICAL blocks)
+    name: trivy fs (CRITICAL+HIGH blocks)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
