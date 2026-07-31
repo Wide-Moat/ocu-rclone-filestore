@@ -103,8 +103,17 @@ git -C "$WORK/dirty" -c user.email=probe@local -c user.name=probe commit -qm "tr
 # detected form, a rule that does not ship -- and each of them yields a dirty
 # leg that is green for a reason having nothing to do with the gate. Checking
 # the payloads first turns "the gate did not fire" into an unambiguous claim.
-solo_detects() { # $1 = payload filename -> 0 when the scanner fires on it alone
-  local p="$1" solo="$WORK/solo-$p"
+# solo_detects returns 0 when the scanner genuinely fires on this payload alone.
+# It refuses to read a non-zero exit as detection: gitleaks exits non-zero when
+# it cannot run at all, so an exit code outside {0,1} is an environment failure,
+# reported as such and never retried. Retrying it would make a broken container
+# look like five unlucky draws and earn the verdict "this class is
+# undetectable" -- a fabricated finding standing in for a diagnosis.
+# Detection also requires the payload file to be NAMED in the output; a count
+# alone would let a finding from anything else stand in for ours.
+SOLO_ENV_FAILURE=0
+solo_detects() { # $1 = payload filename
+  local p="$1" solo="$WORK/solo-$p" rc found
   rm -rf "$solo"; mkdir -p "$solo"
   cp "$WORK/dirty/$p" "$solo/"
   git -C "$solo" init -q .
@@ -112,7 +121,17 @@ solo_detects() { # $1 = payload filename -> 0 when the scanner fires on it alone
   git -C "$solo" -c user.email=probe@local -c user.name=probe commit -qm "solo $p"
   docker run --rm --platform linux/amd64 -v "$solo:/repo:ro" "$GITLEAKS_IMAGE" \
     detect --source=/repo --redact --verbose --exit-code=1 > "$WORK/solo.$p.out" 2>&1
-  [ $? -ne 0 ]
+  rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    echo "FAIL preflight: scanner exited $rc on $p -- it did not run. This is an environment failure, not a payload result."
+    sed -n '1,10p' "$WORK/solo.$p.out"
+    SOLO_ENV_FAILURE=1
+    return 0   # stop the redraw loop; the caller aborts on SOLO_ENV_FAILURE
+  fi
+  [ "$rc" -eq 1 ] || return 1
+  found="$(sed -n 's/.*leaks found: \([0-9]*\).*/\1/p' "$WORK/solo.$p.out" | head -1)"
+  [ -n "$found" ] && [ "$found" -ge 1 ] || return 1
+  grep -qE "^File:[[:space:]]+$p\$" "$WORK/solo.$p.out"
 }
 
 preflight_fail=0
@@ -128,6 +147,9 @@ for spec in "planted_aws.txt:gen_planted_aws" "planted_pat.env:gen_planted_pat" 
     attempt=$((attempt + 1))
     "$gen"
   done
+  if [ "$SOLO_ENV_FAILURE" -ne 0 ]; then
+    echo; echo "SECRETS GATE RED-PROBE ABORTED (scanner did not run)"; exit 2
+  fi
   if [ "$preflight_fail" -eq 0 ]; then
     if [ "$attempt" -eq 1 ]; then
       echo "ok   preflight: payload $p is detectable in isolation"
@@ -162,19 +184,30 @@ th_clean_rc="$(run_trufflehog clean)"; th_dirty_rc="$(run_trufflehog dirty)"
 fail=0
 note() { echo "$1"; }
 
-# Delivery first. A dirty leg that scanned no more than the clean leg never
-# received the payload, and its result -- green or red -- is about the harness,
-# not the gate.
-gl_bytes() { sed -n 's/.*scanned ~\([0-9]*\) bytes.*/\1/p' "$WORK/gitleaks.$1.out" | head -1; }
-c_bytes="$(gl_bytes clean)"; d_bytes="$(gl_bytes dirty)"
-if [ -z "$c_bytes" ] || [ -z "$d_bytes" ]; then
-  note "FAIL delivery: no scanned-byte count; the scanner did not run as expected"
-  sed -n '1,15p' "$WORK/gitleaks.dirty.out"; fail=1
-elif [ "$d_bytes" -le "$c_bytes" ]; then
-  note "FAIL delivery: dirty scanned $d_bytes bytes, clean $c_bytes -- payload never reached the scanned tree"
+# Delivery first: a dirty leg that never received the payload produces a result
+# about the harness, not the gate.
+#
+# This asserts the payloads are in the dirty leg's COMMITTED tree, not that its
+# scanned-byte count grew. The byte delta is only a proxy and it drifts for
+# unrelated reasons -- a mutation that left the payloads uncommitted still moved
+# the count by a few hundred bytes and would have been waved through as
+# delivered. Both scanners read history, so presence in HEAD is the property
+# that actually matters, and it is checkable exactly.
+delivered=0; undelivered=""
+for p in planted_aws.txt planted_pat.env planted_key.pem; do
+  if git -C "$WORK/dirty" cat-file -e "HEAD:$p" 2>/dev/null; then
+    delivered=$((delivered + 1))
+  else
+    undelivered="$undelivered $p"
+  fi
+done
+if [ -n "$undelivered" ]; then
+  note "FAIL delivery: these payloads are absent from the dirty leg's committed tree:$undelivered"
+  note "     Both scanners read git history, so an uncommitted payload is invisible and its green says nothing."
   fail=1
 else
-  note "ok   delivery: payload reached the scanned tree (+$((d_bytes - c_bytes)) bytes)"
+  gl_bytes() { sed -n 's/.*scanned ~\([0-9]*\) bytes.*/\1/p' "$WORK/gitleaks.$1.out" | head -1; }
+  note "ok   delivery: all $delivered payloads present in the dirty leg's committed tree (scanned $(gl_bytes dirty) vs $(gl_bytes clean) bytes)"
 fi
 
 # --- gitleaks ---------------------------------------------------------------
@@ -199,7 +232,19 @@ else
     note "FAIL gitleaks dirty: only $found of 3 planted classes detected -- a detector is allowlisted or absent"
     fail=1
   else
-    note "ok   gitleaks dirty: reddened on all planted classes (exit $gl_dirty_rc, leaks found: $found)"
+    # A count proves the gate reddened, not that it reddened on OUR payload: a
+    # pre-existing secret elsewhere in the tree would satisfy it while every
+    # planted class went unseen. Require each planted file to be named.
+    missing=""
+    for p in planted_aws.txt planted_pat.env planted_key.pem; do
+      grep -qE "^File:[[:space:]]+$p\$" "$WORK/gitleaks.dirty.out" || missing="$missing $p"
+    done
+    if [ -n "$missing" ]; then
+      note "FAIL gitleaks dirty: $found finding(s) but these planted files were never named:$missing"
+      fail=1
+    else
+      note "ok   gitleaks dirty: reddened naming all 3 planted files (exit $gl_dirty_rc, leaks found: $found)"
+    fi
   fi
 fi
 
