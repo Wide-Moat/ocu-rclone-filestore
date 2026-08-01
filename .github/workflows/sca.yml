@@ -58,6 +58,32 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Assert every builder in the tree carries the same pin
+        # The scan below reads the digest from the root Dockerfile. That is only
+        # an honest stand-in for "the toolchain we ship" while every builder in
+        # the tree agrees; if they diverge, this job verifies one image and says
+        # nothing about the rest, while still reporting green. Unmerged work in
+        # this repository adds three more builder stages, so the divergence is a
+        # live risk rather than a hypothetical one.
+        #
+        # A floating tag is rejected outright: a mutable reference cannot be
+        # scanned reproducibly, and the upstream image is rebuilt in place when
+        # its base OS is patched.
+        run: |
+          set -euo pipefail
+          floating=$(grep -rl 'FROM golang:' --include='*Dockerfile*' . || true)
+          if [ -n "${floating}" ]; then
+            echo "::error::builder referenced by a mutable tag in: ${floating}"
+            exit 1
+          fi
+          pins=$(grep -rhoE 'FROM golang@sha256:[0-9a-f]{64}' --include='*Dockerfile*' . | sort -u)
+          count=$(printf '%s\n' "${pins}" | grep -c . || true)
+          echo "distinct builder pins: ${count}"
+          printf '  %s\n' ${pins}
+          if [ "${count}" -ne 1 ]; then
+            echo "::error::builder pins diverge; the scan would cover only one of them"
+            exit 1
+          fi
       - name: Run govulncheck inside the pinned builder image
         # The scan runs in the same image the release binary is built from,
         # with the digest read out of the Dockerfile rather than repeated here.
