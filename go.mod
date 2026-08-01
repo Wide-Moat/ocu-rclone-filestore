@@ -3,10 +3,10 @@ module github.com/Wide-Moat/ocu-rclone-filestore
 go 1.26
 
 require (
-	github.com/hanwen/go-fuse/v2 v2.10.1
-	github.com/rclone/rclone v1.74.3
+	github.com/hanwen/go-fuse/v2 v2.11.0
+	github.com/rclone/rclone v1.74.4
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
-	golang.org/x/sync v0.21.0
+	golang.org/x/sync v0.22.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -61,10 +61,10 @@ require (
 	github.com/zeebo/blake3 v0.2.4 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/term v0.43.0 // indirect
+	golang.org/x/crypto v0.53.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/term v0.44.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
