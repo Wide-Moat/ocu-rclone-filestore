@@ -13,8 +13,8 @@
 # build so the gated test package enters the context.
 
 # Builder. Pinned by digest; the tag comment records the human-readable
-# reference next to the digest. golang:1.26-bookworm.
-FROM golang@sha256:5f68ec6805843bd3981a951ffada82a26a0bd2631045c8f7dba483fa868f5ec5 AS builder
+# reference next to the digest. golang:1.26.5-bookworm.
+FROM golang@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS builder
 
 WORKDIR /src
 
