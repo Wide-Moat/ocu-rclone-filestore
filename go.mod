@@ -3,10 +3,10 @@ module github.com/Wide-Moat/ocu-rclone-filestore
 go 1.26
 
 require (
-	github.com/hanwen/go-fuse/v2 v2.10.1
+	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/rclone/rclone v1.74.4
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
-	golang.org/x/sync v0.21.0
+	golang.org/x/sync v0.22.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
