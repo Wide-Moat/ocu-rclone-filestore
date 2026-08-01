@@ -297,11 +297,49 @@ func TestBuildVFSOptionsWriteBackDefault(t *testing.T) {
 }
 
 // TestBuildVFSOptionsWriteBackMalformed proves a non-empty but unparseable
-// vfs_write_back is a hard error, not a silent fallback.
+// vfs_write_back is a hard error, not a silent fallback. The error has to name
+// both the field and the offending value: an operator reading a mount failure
+// gets no help from "invalid duration" alone when the config carries several
+// duration-shaped fields.
 func TestBuildVFSOptionsWriteBackMalformed(t *testing.T) {
 	m := writableMount()
 	m.VfsWriteBack = "not-a-duration"
-	if _, err := buildVFSOptions(m, false); err == nil {
+	_, err := buildVFSOptions(m, false)
+	if err == nil {
 		t.Fatalf("buildVFSOptions with a malformed vfs_write_back = nil error; want a parse error")
+	}
+	if !strings.Contains(err.Error(), "vfs_write_back") || !strings.Contains(err.Error(), m.VfsWriteBack) {
+		t.Fatalf("error = %q; want it to name both the field and the value %q", err, m.VfsWriteBack)
+	}
+}
+
+// TestBuildVFSOptionsWriteBackNonPositive pins the rejection of zero and
+// negative write-back delays. Both parse cleanly, so nothing upstream stops
+// them, and the VFS reads a non-positive write-back as a request for
+// synchronous write-back -- uploading on every dirty close rather than after
+// the configured delay. Accepting one would silently disable the async flush
+// this option exists to tune, so the mount must refuse to start instead.
+func TestBuildVFSOptionsWriteBackNonPositive(t *testing.T) {
+	for _, value := range []string{"0s", "0", "-1s", "-5m"} {
+		t.Run(value, func(t *testing.T) {
+			// Guard the premise: if the parser ever starts rejecting these on
+			// its own, this test would pass for the wrong reason.
+			var probe fs.Duration
+			if err := probe.Set(value); err != nil {
+				t.Fatalf("premise broken: the duration parser now rejects %q on its own (%v);"+
+					" this test no longer proves buildVFSOptions rejects it", value, err)
+			}
+
+			m := writableMount()
+			m.VfsWriteBack = value
+			_, err := buildVFSOptions(m, false)
+			if err == nil {
+				t.Fatalf("buildVFSOptions with vfs_write_back = %q = nil error;"+
+					" want it rejected (a non-positive delay makes write-back synchronous)", value)
+			}
+			if !strings.Contains(err.Error(), "vfs_write_back") || !strings.Contains(err.Error(), value) {
+				t.Fatalf("error = %q; want it to name both the field and the value %q", err, value)
+			}
+		})
 	}
 }

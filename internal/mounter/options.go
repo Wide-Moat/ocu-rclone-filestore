@@ -65,10 +65,21 @@ func buildVFSOptions(m mountcfg.Mount, readOnly bool) (vfscommon.Options, error)
 	// the ~5s cross-context read-after-write window on the outputs mount. A deployment
 	// that wants a tighter window sets a small duration (e.g. "1s"); it never maps 0
 	// (the object store is async, so 0 would just spin per-write uploads).
+	//
+	// Non-positive values are rejected rather than passed through. The duration parser
+	// accepts them -- "0s" and "-1s" both parse without error -- and the VFS reads a
+	// write-back of zero or less as a request for synchronous write-back, uploading on
+	// every dirty close instead of after the configured delay. Passing one through
+	// would therefore turn the async flush off silently, which is a mount-wide latency
+	// change no caller asked for.
 	if m.VfsWriteBack != "" {
 		var wb fs.Duration
 		if err := wb.Set(m.VfsWriteBack); err != nil {
 			return vfscommon.Options{}, fmt.Errorf("vfs_write_back %q: %w", m.VfsWriteBack, err)
+		}
+		if wb <= 0 {
+			return vfscommon.Options{}, fmt.Errorf(
+				"vfs_write_back %q: must be a positive duration", m.VfsWriteBack)
 		}
 		opt.WriteBack = wb
 	}
