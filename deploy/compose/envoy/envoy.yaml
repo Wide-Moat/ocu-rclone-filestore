@@ -50,6 +50,36 @@ static_resources:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 stat_prefix: storage_edge
                 codec_type: AUTO
+                # A6 (component-06 P6-R1): one JSON access-log line per
+                # connection — the durable record of every egress decision,
+                # allow and deny alike. The field set below is PINNED by the
+                # pipeline-side collector (ocu-audit internal/edgetail
+                # convert.go): its converter refuses a line with unknown or
+                # missing fields, so this format and that converter change
+                # together or the bridge fails loudly. session_id carries the
+                # jwt-validated filesystem_id — the session-scoped,
+                # host-attested handle (NFR-SEC-43); a pre-auth deny logs it
+                # empty, never invented. Stock file access logger; Envoy
+                # stays configuration-only.
+                access_log:
+                  - name: envoy.access_loggers.file
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+                      path: /var/log/envoy/edge-access.log
+                      log_format:
+                        json_format:
+                          start_time: "%START_TIME%"
+                          method: "%REQ(:METHOD)%"
+                          path: "%REQ(:PATH)%"
+                          authority: "%REQ(:AUTHORITY)%"
+                          response_code: "%RESPONSE_CODE%"
+                          response_code_details: "%RESPONSE_CODE_DETAILS%"
+                          bytes_sent: "%BYTES_SENT%"
+                          bytes_received: "%BYTES_RECEIVED%"
+                          duration_ms: "%DURATION%"
+                          x_request_id: "%REQ(X-REQUEST-ID)%"
+                          session_id: "%DYNAMIC_METADATA(envoy.filters.http.jwt_authn:jwt_payload:filesystem_id)%"
+                        omit_empty_values: false
                 route_config:
                   name: storage_routes
                   virtual_hosts:
